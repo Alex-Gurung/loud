@@ -9,8 +9,10 @@ variant: ramp128_f30
 task: cut
 seeds: [0, 1]
 priority: 65
+gpu: H100  # wall-clocks compared across experiments (E7 against e6.cut_k1)
 after: [verify.score_record.s0, verify.cut_prefix.s0, verify.cut_prefix_match.s0]
 args:
+  merge_batch: true  # the merge scores each candidate in one batch: bf16 rounding of close calls only
   sequences: 1M
   heldout: 32
   batch: 4

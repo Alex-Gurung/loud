@@ -97,8 +97,12 @@ its gates. A job runs only when each job in its `after` list is done and passed 
 6. `verify.cut_smoke`: a complete 16-update Cut-chain run through E7's ramp, the drift check, H4 and the end merge.
    `verify.cut_prefix` then runs the 10M schedule for 262 updates (all 242 Boost and 20 Cut), and
    `verify.cut_prefix_match` holds them against PR #40's published 8-GPU log: within 0.003 over the first 20 updates
-   (the plan's steps 2 and 10), within 0.02 over all 262 (step 100 and the first Cut updates). Same seed, data and
-   draws, so only float rounding separates them. The Cut-chain cells wait for both. `verify.cut_variants_smoke`
+   (the plan's steps 2 and 10), within the plan's seed noise, 0.01, over all 262 (step 100 and the first Cut
+   updates). Same seed, data and draws, so only float rounding separates them. The Cut-chain cells wait for both.
+   No measurement sets those bounds yet: `verify.cut_prefix_reversed` runs the same prefix with the 8-way gradient sum
+   in reversed rank order, and `verify.cut_prefix_reversed_match` reports how far rounding alone moves the losses,
+   the reference for relaxing them. Every Cut cell pins `gpu: H100`, since E7 compares wall-clocks with
+   `e6.cut_k1`, and scores its end merge in one batch (`merge_batch`). `verify.cut_variants_smoke`
    (16 updates: E11's runways and fits, E7's tiled rows with a self-check that raises them every update, E8's
    damping) gates E11, E8 on the chain and E7's self-check.
 
@@ -293,15 +297,21 @@ order changes only the rounding). Differences from PR #40:
 - **Seed:** the job's seed replaces the module's `SEED` constant (seed 0 is the record's). Data order and held-out set
   are the records' (`randperm(seed 1)`, the last 32), which the end merge scores.
 - **The end merge** runs after the last update inside the clock, as in the record. Its means are the shared loop's
-  (the same rule), and its held-out scorer adds the 32 sequences rank by rank, as the record's all-reduce does.
-  `final_plain.pt` keeps the weights before the merge, scored as `val_loss_plain` (the record's 3.703 to 3.676).
+  (the same rule), and its held-out scorer adds the 32 sequences rank by rank, as the record's all-reduce does
+  (with `merge_batch`, in one forward of all 32, which changes only the bf16 rounding of close calls and saves most of
+  the merge's ~8 minutes). Each of its scores is logged to `heldout.jsonl` (reason `merge`). `final_plain.pt` keeps
+  the weights before the merge, scored as `val_loss_plain` (the record's 3.703 to 3.676).
 - **E6** (`rows`, `row_offset_per_step`, `drift_every`) and **E7** (`rows_start`, `rows_full_at`, or `rows_tiled`
   at a fixed count) act only on the Cut phase's chain, at its nine sites (the embedding and the 8 mid streams).
   Boost, the head-only top probe and the key, gate, query and future probes keep their budgets. A token's credit at
   a site comes from its rows of the site's signed basis, scaled by 512 / rows. E6 reads window `s mod K` of bases held
   for a cycle of K updates. E7 grows the rows from `rows_start` at the first Cut update to 512 at the fraction
   `rows_full_at` of the run, in steps of 64; token t reads the window starting at `(t * rows) mod 512`, so every row
-  is read in every update. Every shape the run will use compiles in the warmup. The full cycle runs the record's
+  is read in every update. Every shape the run will use compiles in the warmup: `chain_chunk` compiles one graph per
+  site and moves per token (17 per row count, 16 more for E11), so the port raises the record's Dynamo limit of 64 to
+  twice what the run's row counts need and fails the job if the warmup reaches it (E7's ramps need up to 136). The
+  drift check reports the cosines with ANVIL II's fast and slow momenta (PR #40 steps along the fast one alone, so a
+  blend would repeat it). The full cycle runs the record's
   `chain_credits` itself. CPU tests check that, that the K windows of a cycle average to the full cycle, and that each
   tiled token gets its window's credit.
 - **E7's rows measure the identity-path guess's residual.** The plan's E7 cuts probes "while the identity-path guess

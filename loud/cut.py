@@ -87,16 +87,18 @@ class Turns:
             first = self._part(0, jobs[0])
         except BaseException as exc:  # also an interrupt while waiting: wake the other parts so they stop
             self._fail(exc)
-            raise
         finally:
             others = [f.exception() or f.result() for f in futures]  # waits for every part, failed or not
-        for result in others:
-            if isinstance(result, BaseException):
-                raise result
+        if self.failed is not None:  # the first failure, wherever it happened (the others only followed it)
+            raise self.failed
         return [first] + others
 
     def group_sum(self, part, tensor):
         with self.lock:
+            if any(self.done):  # a part that has finished never meets this collective
+                self.failed = RuntimeError('the parts of a sequence reached different collectives')
+                self.lock.notify_all()
+                raise self.failed
             self.arrived[part] = tensor
             if all(t is not None for t in self.arrived):
                 total = self.arrived[0].clone()
@@ -278,10 +280,10 @@ def estimator_classes(m):
             symmetric moves of both mixing scalars), each token's rows of H picked by `index`."""
             move = steps[sl].unsqueeze(-1) * H[index[sl]]
             scale = steps[sl].expand(-1, move.shape[1])
-            if prev is not None:
+            if prev is not None:  # their scales do not depend on the rows (the record's assume 2 or more)
                 h, prev, z = self.s.scalar_step, prev[sl].unsqueeze(1), x0[sl].unsqueeze(1)
                 move = torch.cat([move, h * prev, h * z, -h * prev, -h * z], 1)
-                scale = torch.cat([scale, torch.full_like(scale[:, :2], h), torch.full_like(scale[:, :2], -h)], 1)
+                scale = torch.cat([scale, scale.new_full((len(scale), 2), h), scale.new_full((len(scale), 2), -h)], 1)
             return move, scale
 
         def partial_chain_credits(self, e, x0, mids, outs, routes, y):
@@ -395,16 +397,17 @@ def record_settings(m, preset, batch):
                       future_draws=width // 4, route_k=width, future_layers=min(4, n_layer))
 
 
-def virtual_holdout_loss(ranks):
+def merge_loss(ranks, one_batch):
     """The record's holdout_loss as `ranks` GPUs compute it: each rank its rows[rank::ranks] in batches of 8, the
-    all-reduce a float64 sum. Its other lines are the record's (with its CUDA autocast, a no-op on a CPU)."""
+    all-reduce a float64 sum; with one_batch (merge_batch), all rows in one forward, which changes only the bf16
+    rounding of the losses. Its other lines are the record's (with its CUDA autocast, a no-op on a CPU)."""
 
     @torch.no_grad()
-    def holdout_loss(model, rows, rank, world):
+    def loss(model, rows):
         device = next(model.parameters()).device
         total = torch.zeros(2, dtype=torch.float64, device=device)
-        for r in range(ranks):
-            for batch in rows[r::ranks].split(8):
+        for part in [rows] if one_batch else [rows[r::ranks] for r in range(ranks)]:
+            for batch in part.split(len(part) if one_batch else 8):
                 batch = batch.to(device)
                 with torch.autocast('cuda', dtype=torch.bfloat16):
                     loss = model(batch[:, :-1].contiguous(), batch[:, 1:].contiguous(), loss_reduction='sum')
@@ -412,7 +415,7 @@ def virtual_holdout_loss(ranks):
                 total[1] += batch[:, 1:].numel()
         return (total[0] / total[1]).item()
 
-    return holdout_loss
+    return loss
 
 
 class SequenceEstimates:
@@ -443,11 +446,14 @@ class CutChain:
         self.first_cut = next((i + 1 for i, b in enumerate(self.schedule) if b[0] == 'cut'), None)
         self.Boost, self.Cut = estimator_classes(m)
         self.turns = Turns(self.split) if self.split > 1 else None
-        m.holdout_loss = virtual_holdout_loss(self.world)  # the end merge's scorer (joint_parts calls it by name)
         self.finish = self.end_merge if o['end_merge'] else None
         self.groups, self.drift = [], None
         self.probe_row = heldout[:1].to(device)  # the drift check's sequence: held out, so no momentum holds it
         self.reset()
+        self.planned = self.planned_rows()
+        self.graphs = self.chain_graphs(self.planned)
+        self.recompile_limit = max(64, 2 * len(self.graphs))  # the record's 64 holds only its own 17 graphs
+        raise_recompile_limit(self.recompile_limit)
 
     def describe(self):
         return dict(name='pr40', file=refs.TRAINERS['pr40'], settings=asdict(self.settings),
@@ -457,7 +463,9 @@ class CutChain:
                     rows_tiled=self.o['rows_tiled'] or self.o['rows_start'] is not None,
                     rows_start=self.o['rows_start'], rows_full_at=self.o['rows_full_at'],
                     rows_check=self.o['rows_check'], target_damping=self.o['target_damping'],
-                    curvature_damping=self.o['curvature_damping'])
+                    curvature_damping=self.o['curvature_damping'], merge_batch=self.o['merge_batch'],
+                    reverse_sum=self.o['reverse_sum'], chain_graphs=len(self.graphs),
+                    recompile_limit=self.recompile_limit)
 
     def estimators(self, phase, seed, ranks):
         cls = self.Boost if phase == 'boost' else self.Cut
@@ -525,8 +533,9 @@ class CutChain:
 
     def measure(self, group, x, y, total=None, sequences=None):
         """Add each of one sequence's GPUs' float32 gradients (divided by the sequence's token count, as Boost.step)
-        to `total` in rank order, as the step's all-reduce; returns the total and each GPU's clean loss. With a
-        `sequences` list, also appends the sequence's own estimate, its parts summed (E8's noise)."""
+        to `total` in rank order, as the step's all-reduce (reversed with reverse_sum, the calibration of its
+        rounding); returns the total and each GPU's clean loss. With a `sequences` list, also appends the
+        sequence's own estimate, its parts summed (E8's noise)."""
         for estimator in group:
             attach(estimator.capture, self.model)
         try:
@@ -539,7 +548,7 @@ class CutChain:
                 estimator.close()
         valid = (y != -1).sum()
         sequence = None
-        for g in gradients:
+        for g in gradients[::-1] if self.o['reverse_sum'] else gradients:
             flat = torch.cat([(g[name] / valid).float().reshape(-1) for name, _ in self.named])
             if sequences is not None:
                 sequence = flat.clone() if sequence is None else sequence.add_(flat)
@@ -550,6 +559,7 @@ class CutChain:
         for estimator in group:
             losses.append(estimator.capture.clean_loss[y != -1].mean())
             estimator.maps.clear()
+            estimator.measured = {}  # Cut's chain credits and targets, kept by the record until the next estimate
             for store in (estimator.capture.inputs, estimator.capture.outputs, estimator.capture.blocks):
                 store.clear()  # this sequence's activations are no longer needed
         return total, losses
@@ -574,7 +584,8 @@ class CutChain:
                 fields['chain_window'] = [start, start + rows]
         sequences = [] if self.shaper is not None else None
         total, losses, misses, fits = None, [], {}, {}
-        for g, group in enumerate(self.groups):  # group g: the GPUs of the batch's g-th sequences
+        order = list(enumerate(self.groups))  # group g: the GPUs of the batch's g-th sequences
+        for g, group in order[::-1] if self.o['reverse_sum'] else order:
             seqs = batch[g * self.per:(g + 1) * self.per]
             total, loss = self.measure(group, seqs[:, :-1].contiguous(), seqs[:, 1:].contiguous(), total, sequences)
             losses += loss
@@ -632,21 +643,57 @@ class CutChain:
             record['raised_to'] = min(self.floor, self.width)
         return record
 
-    def warmup(self, batch):
-        """As the record: one update of each phase on random tokens, each from a fresh model, so every shape compiles
-        before the clock starts; here also one at each partial row count the chain may use (E6, E7, and every step
-        of ROW_QUANTUM above them that E7's self-check may raise them to)."""
-        cut = [step for step, (phase, *_) in enumerate(self.schedule, 1) if phase == 'cut']
-        rows = {self.chain_rows(step)[0] for step in cut}
-        if self.o['rows_check'] and rows - {None}:  # the counts it raises to: the next multiples of ROW_QUANTUM
+    def planned_rows(self):
+        """The chain's row counts over the Cut phase (None: the full cycle), with every count E7's self-check may
+        raise them to (the next multiples of ROW_QUANTUM) and the drift check's full cycle."""
+        rows = {self.chain_rows(step)[0] for step, (phase, *_) in enumerate(self.schedule, 1) if phase == 'cut'}
+        if self.o['rows_check'] and rows - {None}:
             low = min(rows - {None})
             rows |= set(range((low // ROW_QUANTUM + 1) * ROW_QUANTUM, self.width, ROW_QUANTUM)) | {None}
+        if self.o['drift_every'] and rows:
+            rows.add(None)
+        return rows
+
+    def chain_graphs(self, rows):
+        """chain_chunk's graphs for these row counts, as Dynamo specializes it: one per (site, moves per token,
+        from_output). Part 0 adds the mixing scalars' 4 moves at the mid sites (and E7's self-check rows); the other
+        parts do not; E11 adds its 4 runway moves at every block's mid and output streams."""
+        L = self.settings.model.n_layer
+        check = CHECK_ROWS if self.o['rows_check'] else 0
+        keys = set()
+        for r in rows:
+            share = (r or self.width) // self.split
+            keys.add((-1, share, False))
+            keys |= {(site, share + 4 + (check if r is not None else 0), False) for site in range(L)}
+            if self.split > 1:
+                keys |= {(site, share, False) for site in range(L)}
+        if self.o['target_damping']:
+            keys |= {(site, len(RUNWAY), out) for site in range(L) for out in (False, True)}
+        return keys
+
+    def warmup(self, batch):
+        """As the record: one update of each phase on random tokens, each from a fresh model, so every shape compiles
+        before the clock starts; here one at each row count the chain may use, and a drift check. Fails if the
+        chain's kernel hit Dynamo's limit, which would leave shapes to run eagerly."""
+        config = torch._dynamo.config
+        if compiled_graphs(self.m.chain_chunk_eager) is None and hasattr(config, 'fail_on_recompile_limit_hit'):
+            config.fail_on_recompile_limit_hit = True  # this torch cannot count the graphs: fail at the limit instead
+        cut = [step for step, (phase, *_) in enumerate(self.schedule, 1) if phase == 'cut']
         runs = [(1, 0)] if self.schedule[0][0] == 'boost' else []
-        runs += [(cut[0], self.width if r is None else r) for r in rows] if cut else []
+        runs += [(cut[0], self.width if r is None else r) for r in self.planned] if cut else []
         for step, floor in runs:  # the floor sets a tiled chain's rows at the first Cut update; E6 ignores it
             self.reset(self.schedule[step - 1][0])
             self.floor = floor
             self.update(step, batch)
+        if self.drift is not None and cut:
+            self.drift_check()
+        compiled = compiled_graphs(self.m.chain_chunk_eager)
+        if compiled is not None and not torch._dynamo.config.disable:
+            print(f'chain_chunk: {compiled} graphs compiled; {len(self.graphs)} expected, limit '
+                  f'{self.recompile_limit}', flush=True)
+            if compiled >= self.recompile_limit:
+                raise RuntimeError(f'chain_chunk reached the recompile limit ({self.recompile_limit}): shapes would '
+                                   'run eagerly')
 
     @torch.no_grad()
     def diagnose(self, step):
@@ -665,13 +712,12 @@ class CutChain:
         return record
 
     def drift_check(self):
-        """E6's drift check: a full-cycle estimate on a held-out sequence against the momentum ANVIL II steps along,
-        weight * fast + (1 - weight) * slow, and against fast and slow alone, over all block matrices. One sequence's
-        estimate is noisy: read the cosines across K, not against an absolute threshold."""
+        """E6's drift check: a full-cycle estimate on a held-out sequence against ANVIL II's fast and slow momenta,
+        over all block matrices. PR #40 steps along the fast one alone (fast_weight 1.0), so there is no blend to
+        report. One sequence's estimate is noisy: read the cosines across K, not against an absolute threshold."""
         row = self.probe_row
         flat, _ = self.measure(self.drift, row[:, :-1].contiguous(), row[:, 1:].contiguous())
         anvil = self.optimizer.optimizers[0]
-        weight = anvil.fast_weight if anvil.t >= anvil.engage else 1.0
         full, fast, slow = [], [], []
         for name, p in self.named:
             if p in anvil.state:
@@ -680,18 +726,44 @@ class CutChain:
                 fast.append(anvil.state[p]['fast'].reshape(-1))
                 slow.append(anvil.state[p]['slow'].reshape(-1))
         full, fast, slow = torch.cat(full), torch.cat(fast), torch.cat(slow)
-        return dict(blend=cosine(full, weight * fast + (1 - weight) * slow), fast=cosine(full, fast),
-                    slow=cosine(full, slow))
+        return dict(fast=cosine(full, fast), slow=cosine(full, slow))
 
-    def end_merge(self, means):
-        """The record's end merge of the trajectory means, on the held-out sequences; returns its result fields."""
+    def end_merge(self, means, heldout):
+        """The record's end merge of the trajectory means; returns its result fields. Each candidate's held-out score
+        (merge_loss) goes through H3's log, heldout.jsonl, with reason 'merge'."""
         if means.means is None:  # as the record: no means, no merge
             return {}
+        scorer = merge_loss(self.world, self.o['merge_batch'])
+
+        def holdout_loss(model, rows, rank, world):  # the record's end_merge and joint_parts call it by name
+            return heldout.score(model, self.steps, 'merge', loss=lambda candidate: scorer(candidate, rows))
+        self.m.holdout_loss = holdout_loss
         start = time.perf_counter()
         out = self.m.end_merge(self.model, means.means, self.heldout, 0, 1)
         if self.device.type == 'cuda':
             torch.cuda.synchronize()
         return dict(out, merge_seconds=round(time.perf_counter() - start, 2))
+
+
+def raise_recompile_limit(limit):
+    """Dynamo's graphs per function raised to `limit` (the record sets 64), and its total to match, under the
+    current and the older names."""
+    config = torch._dynamo.config
+    for name in ('recompile_limit', 'cache_size_limit'):
+        if hasattr(config, name):
+            setattr(config, name, max(getattr(config, name), limit))
+    for name in ('accumulated_recompile_limit', 'accumulated_cache_size_limit'):
+        if hasattr(config, name):
+            setattr(config, name, max(getattr(config, name), limit + 256))
+
+
+def compiled_graphs(function):
+    """Dynamo's compiled graphs of a function (a debug API; None where this torch lacks it)."""
+    try:
+        from torch._dynamo.eval_frame import _debug_get_cache_entry_list
+    except ImportError:
+        return None
+    return len(_debug_get_cache_entry_list(function.__code__))
 
 
 def run(spec, run_dir):

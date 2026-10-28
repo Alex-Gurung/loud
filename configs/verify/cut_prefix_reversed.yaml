@@ -1,0 +1,16 @@
+# Calibration for cut_prefix_match: cut_prefix (262 updates of the 10M schedule, seed 0) with the step's 8-way gradient
+# sum taken in reversed rank order, the only change. The two runs differ by float rounding alone, so their per-update
+# gap (cut_prefix_reversed_match) is what rounding does over 262 updates, the reference for relaxing the match's bounds.
+experiment: verify
+variant: cut_prefix_reversed
+task: cut
+seeds: [0]
+priority: 11
+after: [verify.cut_smoke.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  stop_after: 262
+  reverse_sum: true
+notes: Calibration only.

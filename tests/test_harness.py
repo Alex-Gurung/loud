@@ -100,6 +100,30 @@ def test_bad_cut_options_fail_at_submission(tmp_path, args, error):
         specs_from_config(path)
 
 
+def test_turns_sum_the_parts_as_an_all_reduce():
+    from loud.cut import Turns
+    turns = Turns(2)
+    parts = [torch.tensor([1.0, 2.0]), torch.tensor([10.0, 20.0])]
+    out = turns.run([lambda p=p: turns.group_sum(p, parts[p]).clone() for p in range(2)])
+    assert all(torch.equal(t, torch.tensor([11.0, 22.0])) for t in out + parts)
+
+
+@pytest.mark.parametrize('extra', [0, 1])
+def test_turns_fail_when_one_part_has_an_extra_collective(extra):
+    """In either direction: the part with the extra group_sum would otherwise wait forever (part 0) or get its own
+    tensor back unsummed (part 1)."""
+    from loud.cut import Turns
+    turns = Turns(2)
+
+    def job(part):
+        total = turns.group_sum(part, torch.ones(1))
+        if part == extra:
+            turns.group_sum(part, torch.ones(1))
+        return total
+    with pytest.raises(RuntimeError, match='different collectives'):
+        turns.run([lambda p=p: job(p) for p in range(2)])
+
+
 def row(variant, seed, val, check='pass', gpu='H100', code='c1', complete=True):
     return dict(experiment='e', variant=variant, seed=seed, val_loss=val, test_loss=val, heldout_loss=val,
                 heldout_min=val, train_seconds=1.0, complete=complete, check=check, gpu=gpu, code=code, commit='x')

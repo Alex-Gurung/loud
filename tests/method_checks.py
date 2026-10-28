@@ -371,6 +371,12 @@ def cut_ranks(scratch):
         assert a == b, f'update {step}: loss {a} here, {b} on 8 processes'
     for name, p in ours.model.state_dict().items():
         assert torch.equal(p, theirs[name]), f'{name} differs by {(p.float() - theirs[name].float()).abs().max()}'
+    # reverse_sum (verify.cut_prefix_reversed's calibration): the same run up to the rounding of the 8-way sum
+    o = cut_options(dict(preset='2m', batch=4, sequences=CUT_ROWS, heldout=32, reverse_sum=True))
+    reversed_sum = CutChain(o, torch.device('cpu'), 0, len(training) // 4, heldout)
+    for step in (1, 2):
+        loss = reversed_sum.update(step, training[(step - 1) * 4:step * 4])[0].item()
+        assert abs(loss - losses[step - 1]) < 1e-5, f'update {step}: reversed sum {loss}, rank order {losses[step - 1]}'
 
 
 def cut_windows(scratch):
@@ -430,6 +436,47 @@ def cut_windows(scratch):
         first = torch.zeros(8, dtype=torch.long) if start == 0 else torch.arange(8) * rows
         assert torch.equal(index, (first[:, None] + torch.arange(rows)) % width), 'the halves do not tile a window'
 
+    # the same through the trainer with two virtual GPUs per sequence, meeting in group_sum: the K windows average to
+    # the record's chain credits, and rows = 2 (one row per GPU) sum to what one GPU measures over both
+    from loud.cut import CutChain, merge_loss
+    from loud.options import cut_options
+
+    def chain_credits(gpus, settings):
+        """Part 0's chain credits (complete after group_sum) of one measure per setting, every one from the same
+        generator states, so every setting reads the same bases."""
+        o = cut_options(dict(preset='2m', batch=1, virtual_gpus=gpus, sequences=CUT_ROWS, heldout=32))
+        trainer = CutChain(o, torch.device('cpu'), 0, 40, cut_rows_data()[-32:])
+        trainer.reset('cut')
+        group, out = trainer.groups[0], []
+        states = [[g.get_state() for g in (e.generator, e.capture.generator, e.capture.shared_generator)]
+                  for e in group]
+        real = type(group[0]).chain_credits
+
+        def keep(self, *args):
+            credits = real(self, *args)
+            if self.part == 0:
+                out.append({k: v.clone() for k, v in credits.items()})
+            return credits
+        type(group[0]).chain_credits = keep
+        for rows, start in settings:
+            for e, state in zip(group, states):
+                for g, saved in zip((e.generator, e.capture.generator, e.capture.shared_generator), state):
+                    g.set_state(saved)
+                e.rows, e.start = rows, start
+            trainer.measure(group, x, y)
+        type(group[0]).chain_credits = real
+        return out
+    split = chain_credits(2, [(None, 0)] + [(rows, k * rows) for k in range(K)] + [(2, 0)])
+    single = chain_credits(1, [(2, 0)])[0]
+    for key, value in split[0].items():
+        mean = sum(w[key] for w in split[1:1 + K]) / K
+        assert torch.allclose(mean, value, rtol=1e-4, atol=1e-6), f'{key}: split windows do not average to the cycle'
+        assert torch.allclose(split[-1][key], single[key], rtol=1e-4, atol=1e-6), f'{key}: rows = split differs'
+
+    # merge_batch: the end merge's candidates scored in one batch are the rank-by-rank scores up to rounding
+    rows8 = cut_rows_data()[-32:]
+    assert abs(merge_loss(8, True)(model, rows8) - merge_loss(8, False)(model, rows8)) < 1e-5
+
 
 def cut_run(scratch):
     """The whole loop on the 2-layer model (width 128), two virtual GPUs on one sequence per update: Boost, the switch,
@@ -453,6 +500,9 @@ def cut_run(scratch):
     assert result['holdout_merged'] <= result['holdout_plain'] and result['means_updates'] == 2
     assert result['train_seconds'] >= result['merge_seconds']
     assert {'final.pt', 'final_plain.pt', 'ckpt_100.pt'} <= {p.name for p in out.iterdir()}
+    calls = [json.loads(line) for line in (out / 'heldout.jsonl').read_text().splitlines()]
+    assert [c['call'] for c in calls] == list(range(1, len(calls) + 1))
+    assert sum(c['reason'] == 'merge' for c in calls) > 80  # the plain weights and every candidate the merge scored
 
 
 def tokens(n, seed=1, vocab=4096):
@@ -1017,16 +1067,25 @@ def cut_variants_run(scratch):
     """E11, E7's partial cycle with its self-check and E8 together on the 2-layer model, two virtual GPUs on each of
     two sequences: every update completes (the writers' fits replacing their gradients); the check raises the rows to
     the full cycle; the runway distribution and the damping summary are logged."""
-    cut_module()
+    m = cut_module()
     import loud.cut
+    from loud.options import cut_options
     loud.cut.RUNWAY_EVERY = 1
     patch_sequences(length=CUT_SEQ, vocab=CUT_VOCAB)
-    spec = dict(experiment='cpu', variant='cut_variants', seed=0, task='cut', args=dict(
-        preset='2m', sequences=16, heldout=8, batch=2, virtual_gpus=4, rows=64, rows_tiled=True, rows_check=1e-9,
-        target_damping=0.1, curvature_damping=30.0, damp_directions=2, damp_every=2, end_merge=False,
-        official_eval=False))
+    calls, kernel = set(), m.chain_chunk
+
+    def recorded(site, move, *args, from_output=False, **kwargs):  # what Dynamo would specialize chain_chunk on
+        calls.add((site, move.shape[1], from_output))
+        return kernel(site, move, *args, from_output=from_output, **kwargs)
+    m.chain_chunk = recorded
+    args = dict(preset='2m', sequences=16, heldout=8, batch=2, virtual_gpus=4, rows=64, rows_tiled=True,
+                rows_check=1e-9, target_damping=0.1, curvature_damping=30.0, damp_directions=2, damp_every=2,
+                end_merge=False, official_eval=False)
     out = Path(scratch) / 'cut_variants'
-    result = loud.cut.run(spec, out)
+    result = loud.cut.run(dict(experiment='cpu', variant='cut_variants', seed=0, task='cut', args=args), out)
+    plan = loud.cut.CutChain(cut_options(args), torch.device('cpu'), 0, 4, torch.zeros(8, CUT_SEQ, dtype=torch.long))
+    assert calls == plan.graphs, f'chain_chunk ran {sorted(calls - plan.graphs)} unplanned, missed ' \
+                                 f'{sorted(plan.graphs - calls)}'
     metrics = [json.loads(line) for line in (out / 'metrics.jsonl').read_text().splitlines()]
     assert result['complete'] and [r['phase'] for r in metrics] == ['boost', 'cut', 'cut', 'cut']
     assert [r.get('chain_rows') for r in metrics] == [None, 64, 128, 128]  # raised after the first Cut update
@@ -1035,6 +1094,32 @@ def cut_variants_run(scratch):
                for r in metrics[1:])
     assert all(abs(sum(fractions) - 1) < 1e-3 for r in metrics[1:] for fractions in r['runway'].values())
     assert [r['step'] for r in metrics if 'damping' in r] == [2, 4]  # refreshes at Cut updates 1 and 3
+
+
+def cut_compile_plan(scratch):
+    """Every Cut config's plan: each row count its chain can use (the schedule's, E7's raises, the drift check's
+    full cycle) is in the warmup, and Dynamo's limit, raised from the record's 64, holds all their graphs. E7's ramps
+    are the configs the record's limit would have cut short."""
+    cut_module()
+    from loud.cut import CutChain
+    from loud.options import RANGES, cut_options
+    from loud.run import specs_from_config
+    configs = [p for p in sorted((Path(__file__).parents[1] / 'configs').rglob('*.yaml'))
+               if 'task: cut' in p.read_text()]
+    assert len(configs) >= 15, configs
+    beyond = []
+    for path in configs:
+        args = specs_from_config(path)[0][0]['args']
+        o = cut_options(args)
+        n = RANGES.get(o['sequences'], o['sequences'])
+        steps = (n - o['heldout']) // o['batch']
+        plan = CutChain(o, torch.device('cpu'), 0, steps, torch.zeros(o['heldout'], CUT_SEQ, dtype=torch.long))
+        cut = [s for s, (phase, *_) in enumerate(plan.schedule, 1) if phase == 'cut']
+        assert {plan.chain_rows(s)[0] for s in cut} <= plan.planned, path
+        assert len(plan.graphs) < plan.recompile_limit <= 512, (path, len(plan.graphs), plan.recompile_limit)
+        if len(plan.graphs) > 64:
+            beyond.append(path.stem)
+    assert {'ramp64_f30', 'ramp64_f60', 'ramp128_f30', 'ramp128_f60'} <= set(beyond), beyond
 
 
 if __name__ == '__main__':
