@@ -1,0 +1,21 @@
+# E10: per-token shaping, proxy only, against the batch-8 baseline e1.bp_b8; also a cheap control for E3 and E11. Every
+# nn.Linear weight gradient (the block matrices, the value-embedding gates, the LM head) is a sum over the batch's
+# tokens of credit (the loss gradient at the layer's output) times input; this changes how that sum is formed.
+# (b) Keep only the gradient entries where at least 60% of the tokens with a nonzero contribution agree in sign
+# (the plan's sweep: 60, 70, 80%). Success: beats e1.bp_b8 by more than 0.02.
+experiment: e10
+variant: agree_t60
+task: proxy
+seeds: [0, 1, 2]
+priority: 55
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 8
+  means: true
+  heldout_every: 50
+  checkpoints: true
+  token_shaping: agree
+  agree_threshold: 0.6
