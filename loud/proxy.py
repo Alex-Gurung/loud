@@ -32,7 +32,7 @@ class Reference:
             self.warmdown, self.final = s.warmdown, 0.0
             self.make_model = lambda device, seed: m.make_model(device, seed, self.config)
             self.extra = dict(polar_margin=m.POLAR_MARGIN)
-        elif key == 'pr40':
+        elif key in ('pr40', 'pr46'):
             s = m.Settings()
             s.lr, s.anvil_lr, s.model = s.lr * lr_mult, s.anvil_lr * lr_mult, self.config
             self.warmdown, self.final = s.warmdown, s.final
@@ -45,7 +45,7 @@ class Reference:
 
     def describe(self):
         settings = asdict(self.settings) if is_dataclass(self.settings) else dict(vars(self.settings))
-        if self.key == 'pr40':  # only the optimizer/schedule/init fields act on backprop
+        if self.key in ('pr40', 'pr46'):  # only the optimizer/schedule/init fields act on backprop
             keep = ('lr', 'betas', 'warmdown', 'final', 'head_std', 'projection_std', 'anvil_lr', 'anvil_wd',
                     'fast_weight', 'polar_margin')
             settings = {k: settings[k] for k in keep}

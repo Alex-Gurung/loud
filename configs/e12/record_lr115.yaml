@@ -1,0 +1,14 @@
+# E12: the 30M record (PR #46) re-tuned for 30M, one knob per variant: both rates (Adam and ANVIL II) x 1.15.
+# PR #46 kept the 10M record's rates; compare with e12.record (same seed, same node type). 56 min on 8 x H100 each.
+experiment: e12
+variant: record_lr115
+task: reference
+seeds: [0]
+gpus: 8
+priority: 91
+after: [e12.record.s0]
+args:
+  script: [noise, train/val/run.py]
+  argv: [--data-dir, '{data}', --output, '{out}/ref']
+  result: ref/result.json
+  settings: {lr: 0.002415, anvil_lr: 0.0299}

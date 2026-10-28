@@ -1,0 +1,16 @@
+# E12 on one GPU: backprop on the 30M set with the current record's (PR #46, 3.338) exact optimizer, rates, schedule,
+# init and batch 4: the fair baseline the plan asks for. About 15 min on one H100. Compare the plain final weights
+# with the record's val_loss_plain; the record's end merge is not applied here.
+experiment: e12
+variant: bp_pr46
+task: proxy
+seeds: [0, 1, 2]
+priority: 55
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0]
+args:
+  recipe: pr46
+  sequences: 30M
+  heldout: 32
+  batch: 4
+  means: true
+  heldout_every: 200

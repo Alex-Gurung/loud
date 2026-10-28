@@ -17,6 +17,8 @@ stream after attention and before the MLP (its input plus the attention output).
                       each (a central difference of the batch gradient) and the across-sequence variance along it
     linearity_check   per site, probe size and token: how far the token's own loss response to +v and -v is from
                       linear, with attention frozen, in float32 and in bf16
+    credit_recovery   E5: one cycle of probes launched at the embedding, read at every site; per site and token, the
+                      credit solved from the probes' changes there against the credit a direct cycle there measures
 
 References are float32 throughout (no autocast, 'highest' matmul precision), as in check_relay.py; the estimator
 runs as in training (bf16 autocast).
@@ -110,6 +112,14 @@ def groups(names, n_layer):
     return out
 
 
+def hadamard(d, device):
+    """The Sylvester Hadamard matrix of order d (a power of two), entries +-1, as PR #40 builds it."""
+    H = torch.ones(1, 1, device=device)
+    while H.shape[0] < d:
+        H = torch.cat([torch.cat([H, H], 1), torch.cat([H, -H], 1)], 0)
+    return H
+
+
 def per_token_cosine(a, b):
     return F.cosine_similarity(a.float(), b.float(), dim=-1)
 
@@ -146,15 +156,21 @@ class Toolkit:
         return {g: round(F.cosine_similarity(flat(estimate, ns), flat(reference, ns), dim=0).item(), 5)
                 for g, ns in groups(list(reference), self.n_layer).items() if ns}, {}
 
-    def credit_dump(self):
-        _, true = reference_gradients(self.model, self.x, self.y)
+    def identity_guess(self):
+        """The identity path's per-token credit at each site: the top-stream credit carried down the residual scalars
+        (PR #26: d_out[L-1] = top credit, d_out[i] = lam[i+1] * d_out[i+1]); at emb, its RMS-norm cycle."""
         keep = {}
         self.estimate(keep)
         lam = self.model.resid_lambdas.float()
         guess, carried = {'emb': keep['emb']}, keep['top']
-        for i in reversed(range(self.n_layer)):  # PR #26: d_out[L-1] = top credit, d_out[i] = lam[i+1] * d_out[i+1]
+        for i in reversed(range(self.n_layer)):
             guess[f'mid{i}'] = carried
             carried = lam[i] * carried
+        return guess
+
+    def credit_dump(self):
+        _, true = reference_gradients(self.model, self.x, self.y)
+        guess = self.identity_guess()
         summary, tensors = {}, {}
         for site in site_names(self.n_layer):
             cos = per_token_cosine(true[site], guess[site])
@@ -169,19 +185,41 @@ class Toolkit:
         frozen = torch.stack([attn[f'mid{i}'][0] for i in range(self.n_layer)], 1)
         return values, frozen, self.m.norm(values['emb'][0]), self.y[0]
 
+    def paths(self, model):
+        """Tokens' own paths, every attention output frozen at its clean value (so tokens do not interact), batched
+        over any leading dims. blocks(x, a, x0, first) runs blocks first.. from stream x (a: the frozen attention
+        outputs [..., L, W]) and returns each block's mid stream and the final stream; loss(x, y) is the token's loss
+        from the final stream; from_site(site, h, a, x0) is the final stream with the site's activation set to h."""
+        norm, layers, vocab = self.m.norm, model.transformer.h, model.config.vocab_size
+        lam_r, lam_0 = model.resid_lambdas.float(), model.x0_lambdas.float()
+
+        def blocks(x, a, x0, first=0):
+            mids = []
+            for i in range(first, self.n_layer):
+                mid = lam_r[i] * x + lam_0[i] * x0 + a[..., i, :]
+                mids.append(mid)
+                x = mid + layers[i].mlp(norm(mid))
+            return mids, x
+
+        def loss(x, y):
+            logits = 15 * torch.tanh(model.lm_head(norm(x))[..., :vocab].float() / 15)
+            return -torch.log_softmax(logits, -1).gather(-1, y.unsqueeze(-1)).squeeze(-1)
+
+        def from_site(site, h, a, x0):
+            if site == 'emb':
+                return blocks(norm(h), a, norm(h))[1]
+            k = int(site[3:])
+            return blocks(h + layers[k].mlp(norm(h)), a, x0, k + 1)[1]
+
+        return blocks, loss, from_site
+
     def token_map_svd(self, chunk=32):
         model, norm = copy.deepcopy(self.model).float(), self.m.norm
         values, frozen, _, _ = self.frozen(model)
-        lam_r, lam_0 = model.resid_lambdas.float(), model.x0_lambdas.float()
+        blocks, _, _ = self.paths(model)
 
-        def to_sites(e, a):  # one token: raw embedding -> each block's mid stream, attention outputs frozen
-            x0 = norm(e)
-            x, out = x0, []
-            for i, block in enumerate(model.transformer.h):
-                mid = lam_r[i] * x + lam_0[i] * x0 + a[i]
-                out.append(mid)
-                x = mid + block.mlp(norm(mid))
-            return torch.stack(out)
+        def to_sites(e, a):  # one token: raw embedding -> each block's mid stream
+            return torch.stack(blocks(norm(e), a, norm(e))[0])
 
         jac = torch.func.vmap(torch.func.jacfwd(to_sites))  # forward mode: 512 inputs against L x 512 outputs
         singular = []
@@ -253,23 +291,12 @@ class Toolkit:
         every attention output frozen at its clean value (so tokens do not interact), under +v and -v of norm
         sigma |activation|. Reports, over tokens and draws, quantiles of |L+ + L- - 2 L0| / |L+ - L-| (0 for a linear
         response) and of |L+ - L-| (the signal), in float32 and under the bf16 autocast the probes run in."""
-        model, norm = copy.deepcopy(self.model).float(), self.m.norm
+        model = copy.deepcopy(self.model).float()
         values, frozen, x0_clean, targets = self.frozen(model)
-        blocks, vocab = model.transformer.h, model.config.vocab_size
-        lam_r, lam_0 = model.resid_lambdas.float(), model.x0_lambdas.float()
+        _, loss, from_site = self.paths(model)
 
         def token_loss(site, h, a, x0, y):
-            if site == 'emb':
-                x0 = norm(h)
-                x, first = x0, 0
-            else:
-                k = int(site[3:])
-                x, first = h + blocks[k].mlp(norm(h)), k + 1
-            for i in range(first, self.n_layer):
-                mid = lam_r[i] * x + lam_0[i] * x0 + a[i]
-                x = mid + blocks[i].mlp(norm(mid))
-            logits = 15 * torch.tanh(model.lm_head(norm(x))[:vocab].float() / 15)
-            return -torch.log_softmax(logits, -1).gather(-1, y.unsqueeze(-1)).squeeze(-1)
+            return loss(from_site(site, h, a, x0), y)
 
         generator = torch.Generator(self.x.device).manual_seed(0)
         summary = {}
@@ -294,6 +321,100 @@ class Toolkit:
                                                            signal=quantiles(torch.cat(signals)))
             summary[site] = row
         return summary, {}
+
+    def credit_recovery(self, ridges=(0.0, 1e-3, 1e-1), sigma=0.01, chunk=16):
+        """E5: one cycle launched at the embedding, read at every site. Each token's raw embedding takes the W probes
+        v_i (rows of a signed Hadamard matrix times sigma x the token's RMS: PR #40's chain_sigma step), every
+        attention output frozen (the cut). The probes' changes are carried as PR #40's chain carries them
+        (chain_chunk_eager at the embedding, without its own-query responses and with every MLP unit): forward
+        differences against the clean pass, with the MLP and head products in float32 or, as the record's chain
+        runs them, in bf16. At site k, A[i] is the probe's change there and d[i] the token's loss change; the
+        recovered credit solves min |A c - d|^2 + lam |c - g|^2, lam = ridge x mean(diag A^T A), g the identity path's
+        guess (ridge 0: A c = d). It is compared per token with the credit a direct cycle at the site measures
+        (autograd of the token's own loss, attention and x0 = norm(emb) held) and with autograd's full credit. The
+        probe also moves x0, which every later block reads, so d carries paths that skip site k: those, the
+        conditioning of A and rounding are what this measures. At emb, A is the probe itself."""
+        model, norm = copy.deepcopy(self.model).float(), self.m.norm
+        values, frozen, x0_clean, targets = self.frozen(model)
+        blocks, loss, from_site = self.paths(model)
+        names, L = site_names(self.n_layer), self.n_layer
+        guess = self.identity_guess()
+        _, full = reference_gradients(self.model, self.x, self.y)
+        with exact():
+            direct = {site: torch.func.vmap(torch.func.grad(lambda h, a, x0, y, site=site: loss(
+                from_site(site, h, a, x0), y)))(values[site][0], frozen, x0_clean, targets) for site in names}
+            emb, mids = values['emb'][0], [values[f'mid{i}'][0] for i in range(L)]
+            final = blocks(x0_clean, frozen, x0_clean)[1]  # the clean top stream, before the final norm
+            pre = [F.linear(norm(mid), b.mlp.c_fc.weight.float()) for mid, b in zip(mids, model.transformer.h)]
+            head = model.lm_head.weight.float()[:model.config.vocab_size]
+            base = final @ head.T
+        lam_r, lam_0 = model.resid_lambdas.float(), model.x0_lambdas.float()
+        cap = lambda z: 15 * torch.tanh(z / 15)
+        eps = torch.finfo(torch.float32).eps
+
+        def changes(sl, v, dtype):
+            """The chain's forward differences for probes v [t, P, W] at tokens sl: each site's change and the loss
+            change [t, P]."""
+            e, x0, xL, z0 = emb[sl, None], x0_clean[sl, None], final[sl, None], base[sl, None]
+            w_fc = [b.mlp.c_fc.weight.to(dtype) for b in model.transformer.h]
+            w_out = [b.mlp.c_proj.weight.to(dtype) for b in model.transformer.h]
+            dx0 = norm(e + v) - x0
+            delta, out = None, [v]
+            for b in range(L):
+                delta = (lam_r[0] + lam_0[0]) * dx0 if b == 0 else lam_r[b] * delta + lam_0[b] * dx0
+                out.append(delta)
+                mid, h = mids[b][sl, None], pre[b][sl, None]
+                dh = ((norm(mid + delta) - norm(mid)).to(dtype) @ w_fc[b].T).float()
+                up, down = F.relu(h + dh), F.relu(h)
+                delta = delta + (((up - down) * (up + down)).to(dtype) @ w_out[b].T).float()
+            y = targets[sl, None]
+            w_y, z0_y = head[y], z0.gather(-1, y[..., None])[..., 0]
+            inv = torch.rsqrt((xL + delta).square().mean(-1) + eps)
+            inv0 = torch.rsqrt(xL.square().mean(-1) + eps)
+            z = (z0 + (delta.to(dtype) @ head.T.to(dtype)).float()) * inv[..., None]
+            moved = torch.logsumexp(cap(z), -1) - cap((z0_y + (delta * w_y).sum(-1)) * inv)
+            clean = torch.logsumexp(cap(z0 * inv0[..., None]), -1) - cap(z0_y * inv0)
+            return out, moved - clean
+
+        tokens, width = emb.shape
+        signs = torch.randint(0, 2, (width,), generator=torch.Generator().manual_seed(0)).to(emb) * 2 - 1
+        basis = hadamard(width, emb.device) * signs  # rows: the cycle's W orthogonal directions
+        eye = torch.eye(width, device=emb.device)
+        precisions = {'float32': torch.float32, 'bf16': torch.bfloat16}
+        cos = {(p, s, r): [] for p in precisions for s in names for r in ridges}
+        condition = {(p, s): [] for p in precisions for s in names}
+        with exact(), torch.no_grad():
+            for precision, dtype in precisions.items():
+                for t0 in range(0, tokens, chunk):
+                    sl = slice(t0, t0 + chunk)
+                    v = sigma * emb[sl, None].square().mean(-1, keepdim=True).sqrt() * basis  # [t, W probes, W]
+                    sites, d = changes(sl, v, dtype)
+                    d = d.unsqueeze(-1)
+                    for site, A in zip(names, sites):
+                        s = torch.linalg.svdvals(A)
+                        condition[precision, site].append(s[:, 0] / s[:, -1].clamp_min(1e-30))
+                        gram, rhs = A.mT @ A, A.mT @ d
+                        scale = gram.diagonal(dim1=-2, dim2=-1).mean(-1)[:, None, None]
+                        for ridge in ridges:
+                            if ridge:
+                                c = torch.linalg.solve(gram + ridge * scale * eye,
+                                                       rhs + ridge * scale * guess[site][sl, :, None].float())
+                            else:
+                                c = torch.linalg.solve(A, d)
+                            cos[precision, site, ridge].append(per_token_cosine(c[..., 0], direct[site][sl]))
+        summary, tensors = {}, {}
+        for site in names:
+            row = dict(guess_vs_direct=quantiles(per_token_cosine(guess[site], direct[site])),
+                       direct_vs_full=quantiles(per_token_cosine(direct[site], full[site])))
+            for precision in precisions:
+                row[f'{precision} condition'] = quantiles(torch.cat(condition[precision, site]))
+                for ridge in ridges:
+                    per_token = torch.cat(cos[precision, site, ridge])
+                    row[f'{precision} ridge {ridge}'] = quantiles(per_token)
+                    tensors[f'{site} {precision} ridge {ridge}'] = per_token.cpu()
+            summary[site] = row
+        summary['settings'] = dict(sigma=sigma, ridges=list(ridges), probes=width, tokens=tokens)
+        return summary, tensors
 
 
 def load(checkpoint, device):

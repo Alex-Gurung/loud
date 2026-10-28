@@ -1,0 +1,16 @@
+# E5's diagnostic on e1.bp_b4.s0's 20% checkpoint (no training): one 512-probe cycle launched at each token's
+# embedding, read at all nine sites with attention frozen; per site, the median cosine between the credit solved from
+# the probes' changes there (ridge 0, 1e-3 and 0.1 toward the identity-path guess) and the credit a direct cycle there
+# measures, and the median condition number. With recovery_c100, the plan's 9 x 2 table.
+# Decision: cosine >= 0.95 at all sites -> the full version; failing only at the top two or three sites -> the hybrid;
+# failing at most sites on the 100% checkpoint -> drop it. The implementation waits for the maintainers' answer to the
+# rules question (plan section 6); the diagnostic does not.
+experiment: e5
+variant: recovery_c20
+task: diagnose
+seeds: [0]
+priority: 70
+after: [e1.bp_b4.s0]
+args:
+  tool: credit_recovery
+  checkpoint: e1.bp_b4.s0:ckpt_20.pt

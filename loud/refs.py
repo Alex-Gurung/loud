@@ -45,6 +45,9 @@ TRAINERS = {
     # PR #40 (10M record #14): lr 0.0021, betas (0.5, 0.98), warmdown 0.4 to 30%, head std 0.02, ANVIL II 0.026,
     # fast weight 1.0, batched polar (Gram Newton-Schulz on wide matrices).
     'pr40': ('noise', 'archive/10M/train/val/run.py'),
+    # PR #46 (30M track 1 record, 3.338 in 56 min on 8xH100): PR #40's optimizer, rates and schedule with ANVIL II
+    # weight decay 0.75 and 6.68% Boost; same make_model / make_optimizer as PR #40. E12's backprop baseline.
+    'pr46': ('noise', 'train/val/run.py'),
     # PR #26 (track 2, 4.1772): the identity-path forward-only estimator that loud.identity runs unchanged.
     'pr26': ('noise-pr26', 'train/speedrun/run.py'),
 }

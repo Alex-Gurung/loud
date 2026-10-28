@@ -67,7 +67,8 @@ TRAINING = dict(
 
 PROXY = dict(
     TRAINING,
-    recipe='boostcut',          # reference trainer: 'boostcut' (backprop_preset.py) or 'pr40' (PR #40's rates)
+    recipe='boostcut',          # reference trainer: 'boostcut' (backprop_preset.py), 'pr40' (PR #40's rates, the 10M
+                                # record) or 'pr46' (PR #46's, the 30M record)
     micro_batch=1,              # sequences per forward/backward (1 = one GPU's share in the 8-GPU script)
     lr_mult=1.0,                # scales both Adam and ANVIL II rates, as backprop_preset.py --lr-mult
     per_sequence_grads=False,   # H2
@@ -84,12 +85,13 @@ IDENTITY = dict(
 SCORE = dict(checkpoint=None, splits=['val'])
 
 DIAGNOSE = dict(
-    tool=None,                  # cos_to_autograd | credit_dump | token_map_svd | direction_stats | linearity_check
+    tool=None,                  # cos_to_autograd | credit_dump | token_map_svd | direction_stats | linearity_check |
+                                # credit_recovery
     checkpoint=None,            # '<job id>:<file>' (e.g. e1.bp_b4.s0:ckpt_20.pt) or a path relative to the repo
     row=0,                      # the held-out sequence (0-31 of the 10M order's last 32) measured
     batch=8,                    # direction_stats: sequences for the gradient, its curvature and its spread
 )
-TOOLS = ('cos_to_autograd', 'credit_dump', 'token_map_svd', 'direction_stats', 'linearity_check')
+TOOLS = ('cos_to_autograd', 'credit_dump', 'token_map_svd', 'direction_stats', 'linearity_check', 'credit_recovery')
 
 
 def positive(o, *keys):
@@ -143,7 +145,7 @@ def training_options(args, table, task):
 
 def proxy_options(args):
     o = training_options(args, PROXY, 'proxy')
-    if o['recipe'] not in ('boostcut', 'pr40'):
+    if o['recipe'] not in ('boostcut', 'pr40', 'pr46'):
         raise ValueError(f'unknown recipe {o["recipe"]!r}')
     if o['lr_mult'] <= 0:
         raise ValueError('lr_mult must be positive')
@@ -186,12 +188,17 @@ def score_options(args):
 
 
 def reference_options(args):
-    allowed = {'script', 'cwd', 'argv', 'result'}
+    allowed = {'script', 'cwd', 'argv', 'result', 'settings', 'train_rows'}
     if set(args) - allowed or not isinstance(args.get('script'), list) or len(args['script']) != 2:
         raise ValueError(f'reference needs script: [repo, path] and accepts only {sorted(allowed)}')
     for arg in args.get('argv', []):
         if set(re.findall(r'{(\w*)}', arg)) - {'data', 'out', 'seed'}:
             raise ValueError(f'reference argv {arg!r}: the placeholders are {{data}}, {{out}} and {{seed}}')
+    if not isinstance(args.get('settings', {}), dict):
+        raise ValueError("reference settings: a mapping of the script's Settings fields to values")
+    rows = args.get('train_rows', 0)
+    if not isinstance(rows, int) or isinstance(rows, bool) or not 0 <= rows <= RANGES['30M']:
+        raise ValueError(f'reference train_rows: a row count up to {RANGES["30M"]} (0: all of train.pt)')
     return args
 
 

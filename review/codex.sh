@@ -20,7 +20,7 @@ home=/home/$user
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 work=/var/tmp/loud-review/$stamp-$lens
 report=$repo/review/reports/$stamp-$lens-codex.md
-id "$user" >/dev/null 2>&1 || useradd --system --create-home --home-dir "$home" --shell /bin/bash "$user"
+"$repo/scripts/cpu_env.sh" >&2  # the reviewer user and the CPU Python the reviewers run tests with
 
 # Codex refreshes its login by rotating the token, so whichever copy refreshed last wins in both places.
 sync_login() {

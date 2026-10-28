@@ -219,6 +219,17 @@ def diagnostics(scratch):
     linear, _ = tools.linearity_check(sigmas=(1e-3, 1e-1), draws=1)
     assert set(linear) == set(site_names(n_layer))
     assert all(r[f'{p} 0.001']['nonlinearity']['median'] >= 0 for r in linear.values() for p in ('float32', 'bf16'))
+    # E5's recovery: with x0 read only by block 0, every path from the embedding passes each mid site, so the solve
+    # recovers the direct credit off the radial direction (which the embedding's RMS norm hides to first order); the
+    # ridge toward the (here exact) identity-path guess fills that one in. At emb, A is the probe itself.
+    with torch.no_grad():
+        model.x0_lambdas[1:] = 0
+    recovery, per_token = tools.credit_recovery(ridges=(0.0, 1e-3), chunk=64)
+    assert recovery['emb']['float32 ridge 0.0']['p10'] > 0.999, recovery['emb']
+    for site in site_names(n_layer)[1:]:
+        assert recovery[site]['float32 ridge 0.001']['p10'] > 0.99, (site, recovery[site])
+        assert recovery[site]['float32 condition']['median'] > 1e2  # the radial direction, seen only at second order
+    assert per_token['mid0 bf16 ridge 0.001'].shape == (SEQ - 1,)
 
     # direction_stats on a model with live writers: its finite-difference curvature against an exact
     # Hessian-vector product (double backward works with the dense attention used here), and the pending update

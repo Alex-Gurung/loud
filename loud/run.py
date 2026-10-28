@@ -15,6 +15,7 @@ Config layout (YAML):
     after: [verify.bp_b8.s0]    # job ids that must be done (and pass their check) first; '{seed}' is substituted
     after_done: [...]           # job ids that must be done, passed or not (a comparison that explains a failed gate)
     gpu: H100                   # optional: only workers whose GPU name contains this run it (comparable wall-clocks)
+    gpus: 8                     # optional (task reference only): only a worker with this many GPUs runs it (default 1)
     args: {...}                 # task options
     expect: {val_loss: [3.708, 0.01]}   # optional automatic check, recorded in result.json
     notes: ...                  # free text, kept with the job
@@ -30,8 +31,8 @@ from .jobqueue import JobQueue, free_name, job_id
 from .options import TASKS, VALIDATE, check_expect
 from .paths import QUEUE, REPO, run_dir as default_run_dir
 
-KEYS = {'experiment', 'variant', 'task', 'seed', 'seeds', 'priority', 'after', 'after_done', 'gpu', 'args', 'expect',
-        'notes'}
+KEYS = {'experiment', 'variant', 'task', 'seed', 'seeds', 'priority', 'after', 'after_done', 'gpu', 'gpus', 'args',
+        'expect', 'notes'}
 
 
 def specs_from_config(path, seeds=None):
@@ -76,6 +77,11 @@ def _specs(config, path, seeds):
         raise ValueError('priority must be an integer')
     if gpu is not None and (not isinstance(gpu, str) or not gpu):
         raise ValueError('gpu must be part of a GPU name, e.g. H100')
+    gpus = config.get('gpus', 1)
+    if not isinstance(gpus, int) or isinstance(gpus, bool) or gpus not in (1, 2, 4, 8):
+        raise ValueError('gpus must be 1, 2, 4 or 8')
+    if gpus > 1 and task != 'reference':
+        raise ValueError(f'gpus > 1 runs a reference script under torchrun; task {task} uses one GPU')
     try:
         rel = str(Path(path).resolve().relative_to(REPO.resolve()))
     except ValueError:
@@ -83,7 +89,7 @@ def _specs(config, path, seeds):
     out = []
     for seed in seeds:
         spec = dict(experiment=config['experiment'], variant=config['variant'], seed=seed, task=task, args=args,
-                    expect=config.get('expect'))
+                    expect=config.get('expect'), gpus=gpus)
         meta = dict(config_path=rel, notes=config.get('notes'), priority=priority,
                     after=[a.format(seed=seed) for a in after], after_done=[a.format(seed=seed) for a in after_done],
                     gpu=gpu)
@@ -92,7 +98,7 @@ def _specs(config, path, seeds):
 
 
 def config_hash(spec):
-    return digest({k: spec[k] for k in ('experiment', 'variant', 'seed', 'task', 'args', 'expect')})
+    return digest({k: spec[k] for k in ('experiment', 'variant', 'seed', 'task', 'args', 'expect', 'gpus')})
 
 
 def execute(spec, run_dir):
