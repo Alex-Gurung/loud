@@ -17,6 +17,7 @@ the clock covers the updates only (diagnostics, held-out scoring and checkpoints
 the official validation (and test) score in a fresh process. Writes config.json, metrics.jsonl (per update: step,
 sequences, tokens, train loss, step time, effective rates), heldout.jsonl, the H4 files and result.json.
 """
+import math
 import time
 
 import torch
@@ -111,6 +112,8 @@ def train(spec, run_dir, o, build, method):
         batch = split.train[first:first + o['batch']].to(dev)
         loss, fields = trainer.update(step, batch)
         loss = loss.item()  # also waits for the update, so the step time is the GPU's
+        if not math.isfinite(loss):
+            raise FloatingPointError(f'non-finite training loss at update {step}')
         elapsed = time.perf_counter() - start - pause_total
         record = dict(step=step, seqs=first + o['batch'], tokens=(first + o['batch']) * (SEQ - 1), train_loss=loss,
                       step_seconds=round(elapsed - previous, 4), train_seconds=round(elapsed, 2), **fields)

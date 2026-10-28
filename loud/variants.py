@@ -164,9 +164,12 @@ class TokenShaping:
     per-token credit norms over the whole update batch, per layer. The quantile needs every micro-batch's credits, so
     each layer's credits and inputs are kept (bf16, about 0.3 GB per sequence for the benchmark model) until the batch
     is done; a second backward for the norms would cost a full pass more.
-    agree: each entry of the ordinary gradient is kept only where at least agree_threshold of the tokens with a nonzero
-    contribution credit[i] * input[j] share one sign. The counts are sign matmuls accumulated over the micro-batches,
-    exact for +-1 and 0 entries in float32 (TF32 on the GPU) with float32 sums, so nothing per token is kept.
+    agree: each entry of the ordinary gradient is kept only where at least agree_threshold of the tokens share one sign
+    of their contribution credit[i] * input[j]: of the tokens with a nonzero contribution (agree_over 'active', the
+    default), or of all the update's tokens (agree_over 'all', the plan's literal reading, under which an entry whose
+    input or credit is zero for more than 1 - threshold of the tokens, common after the ReLU^2, is always dropped).
+    The counts are sign matmuls accumulated over the micro-batches, exact for +-1 and 0 entries in float32 (TF32 on the
+    GPU) with float32 sums, so nothing per token is kept.
 
     While shaping, these weights skip autograd's own weight gradient (requires_grad off); a hook on each layer's output
     forms it from the captured input, with the same matmul as autograd."""
@@ -176,6 +179,7 @@ class TokenShaping:
         self.modules = [m for m in model.modules() if isinstance(m, nn.Linear)]
         self.sums = [slot[id(m.weight)] for m in self.modules]  # the proxy's float32 gradient accumulators
         self.mode, self.quantile, self.threshold = o['token_shaping'], o['cap_quantile'], o['agree_threshold']
+        self.over_all, self.tokens = o['agree_over'] == 'all', 0  # tokens: this update's, per layer (shapes, no sync)
         self.kept = [[] for _ in self.modules]  # cap: (credit, input) of each micro-batch, per layer
         self.counts = ([(torch.zeros_like(s), torch.zeros_like(s)) for s in self.sums] if self.mode == 'agree'
                        else None)  # agree: (sum of sign products, count of nonzero products), per layer
@@ -185,6 +189,7 @@ class TokenShaping:
         """Hooks for one update's backward passes; finish() then writes the shaped sums."""
         if self.counts is not None:
             torch._foreach_zero_([c for pair in self.counts for c in pair])
+            self.tokens = 0
         handles = []
 
         def forward_hook(k):
@@ -210,6 +215,8 @@ class TokenShaping:
         if self.mode == 'cap':
             self.kept[k].append((g, x))
             return
+        if k == 0:
+            self.tokens += g.shape[0]  # every layer sees each micro-batch's tokens
         self.sums[k].add_(torch.mm(x.t(), g).t())  # autograd's weight gradient of the linear map
         same, nonzero = self.counts[k]
         sg, sx = g.sign().float(), x.sign().float()
@@ -221,7 +228,8 @@ class TokenShaping:
         if self.mode == 'agree':
             for total, (same, nonzero) in zip(self.sums, self.counts):
                 majority = same.abs_().add_(nonzero)  # twice the number of products with the majority sign
-                total.mul_(majority >= nonzero.mul_(2 * self.threshold))
+                total.mul_(majority >= (2 * self.threshold * self.tokens if self.over_all
+                                        else nonzero.mul_(2 * self.threshold)))
             return
         for total, kept in zip(self.sums, self.kept):
             norms = [g.float().norm(dim=-1) for g, _ in kept]

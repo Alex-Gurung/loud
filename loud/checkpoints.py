@@ -41,15 +41,15 @@ class FractionCheckpoints:
     def due(self, step):
         return self.enabled and step in self.at
 
-    def name(self, fraction):
-        return f'ckpt_{round(fraction * 100):02d}.pt'
+    def name(self, fraction, copy=None):
+        return f'ckpt_{round(fraction * 100):02d}' + ('' if copy is None else f'.c{copy}') + '.pt'
 
-    def save(self, model, step, optimizer=None):
+    def save(self, model, step, optimizer=None, copy=None):
         """Save the checkpoint(s) due at this step; coinciding fractions link to the first file. With `optimizer`
-        (the records' Optimizers(ANVIL II, Adam)), also <name>.optim.pt: ANVIL II's per-matrix state in float32 and
+        (the records' Optimizers(ANVIL II, Adam)), also <name>.optim.pt; with `copy` (E3), ckpt_<f>.c<copy>.pt: ANVIL II's per-matrix state in float32 and
         the beta and fast weight of its next step, which H6's direction_stats needs to rebuild the pending update."""
         first, *rest = self.at[step]
-        path = self.dir / self.name(first)
+        path = self.dir / self.name(first, copy)
         torch.save(state_dict_cpu(model, self.dtype), path)
         self.saved[path.name] = dict(step=step, fraction=first, dtype=str(self.dtype or 'float32'))
         if optimizer is not None:
@@ -61,7 +61,7 @@ class FractionCheckpoints:
             torch.save(dict(step=step, state=state, beta=anvil.rail_beta(),
                             fast_weight=anvil.fast_weight if engaged else 1.0), path.with_suffix('.optim.pt'))
         for f in rest:
-            link = self.dir / self.name(f)
+            link = self.dir / self.name(f, copy)
             if not link.exists():
                 os.symlink(path.name, link)
             self.saved[link.name] = dict(self.saved[path.name], fraction=f, link=path.name)

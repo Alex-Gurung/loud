@@ -515,18 +515,19 @@ def variants_shaping(scratch):
         if n not in linears:
             assert torch.equal(got[n], plain_grads[n]), f'cap changed {n}, which is not a linear weight'
 
-    for threshold in (0.6, 0.8):
-        got = shaped(token_shaping='agree', agree_threshold=threshold)
+    for threshold, over in ((0.6, 'active'), (0.8, 'active'), (0.6, 'all')):
+        got = shaped(token_shaping='agree', agree_threshold=threshold, agree_over=over)
         dropped = kept = 0
         for n in linears:
             positive = negative = torch.zeros(credits[n].shape[1], inputs[n].shape[1])
             for g, x in zip(credits[n], inputs[n]):  # one token at a time
                 product = torch.outer(g, x)
                 positive, negative = positive + (product > 0), negative + (product < 0)
-            mask = torch.maximum(positive, negative) >= threshold * (positive + negative)
-            assert torch.equal(got[n], plain_grads[n] * mask) or close(got[n], plain_grads[n] * mask), n
+            voters = positive + negative if over == 'active' else len(credits[n])  # 'all': every token votes
+            mask = torch.maximum(positive, negative) >= threshold * voters
+            assert torch.equal(got[n], plain_grads[n] * mask) or close(got[n], plain_grads[n] * mask), (n, over)
             dropped, kept = dropped + int((~mask).sum()), kept + int(mask.sum())
-        assert dropped and kept, (threshold, dropped, kept)
+        assert dropped and kept, (threshold, over, dropped, kept)
 
     o = dict(proxy_options(dict(preset='2m', batch=2, token_shaping='agree')), agree_threshold=0.5)
     trainer = Backprop(o, reference, cpu, 0, 10)
@@ -721,7 +722,8 @@ def population_run(scratch):
     patch_sequences(population)
     for rule in ('average', 'select', 'ensemble'):
         spec = dict(experiment='cpu', variant=rule, seed=0, task='population', args=dict(
-            preset='2m', sequences=72, heldout=4, rule=rule, every=2, official_eval=False))
+            preset='2m', sequences=72, heldout=4, rule=rule, every=2, official_eval=False,
+            checkpoints=rule == 'average'))
         out = Path(scratch) / rule
         result = population.run(spec, out)
         config = json.loads((out / 'config.json').read_text())
@@ -743,6 +745,10 @@ def population_run(scratch):
                    < 1e-12 for e in events for p in e['midpoints'])
         if rule == 'average':
             assert all(e['action'] == 'average' for e in events) and result['final'] == 'mean'
+            # H4: the trunk's fractions up to the branch, then every copy's 50% and its end (100%)
+            saved = {p.name for p in out.glob('ckpt_*.pt')}
+            assert saved == {'ckpt_00.pt', 'ckpt_10.pt', 'ckpt_20.pt'} | {
+                f'ckpt_{f}.c{c}.pt' for f in (50, 100) for c in range(4)}, saved
         if rule == 'select':
             assert all(set(e['action']) == {'select', 'replace'} for e in events)
             last = events[-1]

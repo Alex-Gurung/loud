@@ -62,7 +62,7 @@ def _specs(config, path, seeds):
     if task not in TASKS:
         raise ValueError(f'unknown task {task!r}; have {sorted(TASKS)}')
     VALIDATE[task](args)
-    check_expect(task, config.get('expect'))
+    check_expect(task, config.get('expect'), list(args['values']) if task == 'gate' else None)
     seeds = seeds if seeds is not None else config.get('seeds', [config.get('seed', 0)])
     if not isinstance(seeds, list) or not seeds or not all(isinstance(s, int) for s in seeds):
         raise ValueError('seeds must be a non-empty list of integers')

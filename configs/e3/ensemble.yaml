@@ -13,5 +13,6 @@ args:
   sequences: 10M
   heldout: 32
   batch: 4
+  checkpoints: true
   rule: ensemble
   every: 50

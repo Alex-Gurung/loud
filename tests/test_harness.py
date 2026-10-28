@@ -222,7 +222,7 @@ def test_plots_read_only_the_run_files(tmp_path, monkeypatch):
         plots.plot(experiment)
     assert (tmp_path / 'plots' / 'e12' / 'val_time.png').exists()
     assert '| record | 1 | 3.3400 | - | 6.0 min (n=1) |' in (tmp_path / 'plots' / 'e12' / 'summary.md').read_text()
-    assert {p.name for p in (tmp_path / 'plots' / 'e6').iterdir()} == {'final.png', 'curves.png', 'drift.png'}
+    assert {p.name for p in (tmp_path / 'plots' / 'e6').iterdir()} == {'final.png', 'curves.png', 'drift.png', 'time.md'}
     assert '| mid7 | 0.9 | 0.9 | 0.9 | 0.9 |' in (tmp_path / 'plots' / 'e5' / 'recovery.md').read_text()
     assert '| emb | - | - | 0.9 | - | - |' in (tmp_path / 'plots' / 'e7' / 'credit_dump.md').read_text()
     assert (tmp_path / 'plots' / 'e8' / 'h2_over_c.png').exists()
@@ -245,4 +245,28 @@ def test_reference_settings_are_checked_at_submission(tmp_path):
     path.write_text('experiment: e\nvariant: v\ntask: reference\ngpus: 8\n'
                     'args: {script: [noise, train/val/run.py], settings: {lrr: 0.001}}\n')
     with pytest.raises(ValueError, match=r"no Settings field \['lrr'\]"):
+        specs_from_config(path)
+
+
+def test_gate_reduces_a_diagnostic_and_checks_min_max(tmp_path, monkeypatch):
+    from loud import gate
+    from loud.runlog import check
+    monkeypatch.setattr(paths, 'RUNS', tmp_path / 'runs')
+    for fraction, medians in (('c20', [0.95, 0.92, 0.5]), ('c100', [0.6, 0.65, 0.9])):
+        run = tmp_path / 'runs' / 'h6' / f'credit_dump_{fraction}' / 's0'
+        run.mkdir(parents=True)
+        (run / 'credit_dump.json').write_text(json.dumps(
+            {f'mid{i}': dict(p10=0.0, median=m, p90=1.0) for i, m in enumerate(medians)}))
+    spec = dict(experiment='e7', variant='precondition', seed=0, task='gate', expect=dict(
+        early=dict(min=0.9), late=dict(max=0.7)), args=dict(values=dict(
+            early=['h6.credit_dump_c20.s0', 'credit_dump.json', 'median'],
+            late=['h6.credit_dump_c100.s0', 'credit_dump.json', 'median'])))
+    result = gate.run_task(spec, tmp_path / 'gate')
+    assert result['early'] == 0.92 and result['late'] == 0.65 and result['check']['status'] == 'pass'
+    assert check(dict(x=0.5), dict(x=dict(min=0.6)))['status'] == 'fail'
+    assert check(dict(x=0.5), dict(x=[0.4, 0.2]))['status'] == 'pass'
+    path = tmp_path / 'g.yaml'
+    path.write_text('experiment: e\nvariant: v\ntask: gate\nargs: {values: {a: [j.v.s0, f.json, median]}}\n'
+                    'expect: {b: {min: 1}}\n')
+    with pytest.raises(ValueError, match="no 'b'"):
         specs_from_config(path)

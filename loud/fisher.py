@@ -37,7 +37,7 @@ class FisherFactor:
         self.outputs = [None] * len(self.modules)
         self.hooks = [module.register_forward_hook(self.keep(i)) for i, module in enumerate(self.modules)]
         self.batch_sum = [torch.zeros(p.size(0), p.size(0), device=p.device) for _, p in named]
-        self.tokens, self.S, self.R = 0, None, None
+        self.tokens, self.S, self.R = None, None, None  # tokens: a device tensor, so counting never syncs
         self.generator = torch.Generator(next(model.parameters()).device).manual_seed(seed + SAMPLE_SEED)
 
     def keep(self, i):
@@ -59,7 +59,8 @@ class FisherFactor:
         for total, d in zip(self.batch_sum, deltas):
             d = d.flatten(0, 1).float()
             total.addmm_(d.T, d)
-        self.tokens += int((targets != -1).sum())
+        count = (targets != -1).sum()
+        self.tokens = count if self.tokens is None else self.tokens + count
         self.outputs = [None] * len(self.modules)
 
     def before_step(self, step, pergrad=None):
@@ -68,7 +69,7 @@ class FisherFactor:
         self.S = batch if self.S is None else [s.lerp_(b, 1 - FISHER_DECAY) for s, b in zip(self.S, batch)]
         for total in self.batch_sum:
             total.zero_()
-        self.tokens = 0
+        self.tokens = None
         if (step - 1) % FISHER_EVERY == 0:
             self.R = [inverse_root(s, self.damping) for s in self.S]
 

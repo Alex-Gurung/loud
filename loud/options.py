@@ -14,6 +14,7 @@ TASKS = {
     'reference': ('loud.reference', 'run_task'),  # a pinned external script, unmodified, on one GPU
     'compare': ('loud.compare', 'run_task'),      # two runs' per-update losses side by side
     'diagnose': ('loud.diagnostics', 'run_task'), # H6: one diagnostic tool on one checkpoint
+    'gate': ('loud.gate', 'run_task'),            # a plan decision rule on finished diagnostics, as a check
     'noop': ('loud.noop', 'run_task'),            # queue/worker plumbing check, no GPU work
 }
 
@@ -32,6 +33,7 @@ RESULTS = {'proxy': TRAINING_RESULTS, 'identity': TRAINING_RESULTS, 'population'
            'reference': ('val_loss', 'test_loss', 'train_seconds'),
            'compare': ('train_loss_max_diff', 'train_loss_mean_diff', 'train_loss_max_diff_all', 'val_loss_diff'),
            'diagnose': (),
+           'gate': (),  # its args name its values
            'noop': ('val_loss',)}
 
 
@@ -42,18 +44,26 @@ def range_size(sequences):
     return n
 
 
-def check_expect(task, expect):
-    """expect: {metric: [target, tolerance]} over the metrics the task's result.json holds."""
+def number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def check_expect(task, expect, metrics=None):
+    """expect: {metric: [target, tolerance] or {min: a, max: b} (either or both)} over the metrics the task's
+    result.json holds (`metrics`, when the task names them in its args, as gate does)."""
     if expect is None:
         return
     if not isinstance(expect, dict):
-        raise ValueError('expect must map metrics to [target, tolerance]')
+        raise ValueError('expect must map metrics to [target, tolerance] or {min, max}')
+    allowed = RESULTS[task] if metrics is None else tuple(metrics)
     for metric, bound in expect.items():
-        if metric not in RESULTS[task]:
-            raise ValueError(f'expect: {task} results have no {metric!r}; checkable: {list(RESULTS[task])}')
-        if (not isinstance(bound, list) or len(bound) != 2
-                or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in bound) or bound[1] < 0):
-            raise ValueError(f'expect: {metric} needs [target, tolerance >= 0], not {bound!r}')
+        if metric not in allowed:
+            raise ValueError(f'expect: {task} results have no {metric!r}; checkable: {list(allowed)}')
+        interval = isinstance(bound, dict) and bound and set(bound) <= {'min', 'max'} and all(
+            number(v) for v in bound.values())
+        if not interval and (not isinstance(bound, list) or len(bound) != 2 or not all(number(v) for v in bound)
+                             or bound[1] < 0):
+            raise ValueError(f'expect: {metric} needs [target, tolerance >= 0] or {{min, max}}, not {bound!r}')
 
 
 # Every training task (loud/train.py): data range, H3, H4, monitoring, scoring.
@@ -91,6 +101,7 @@ PROXY = dict(
     token_shaping='none',       # E10: 'cap' or 'agree', on every nn.Linear weight gradient
     cap_quantile=0.95,          # E10 cap: each token's credit norm is capped at this quantile over the batch
     agree_threshold=0.7,        # E10 agree: the share of tokens whose contributions must agree in sign
+    agree_over='active',        # E10 agree: 'active' (tokens with a nonzero contribution) or 'all' (the plan's literal)
     curvature_damping=0.0,      # E8: lambda, in squared ANVIL II steps (loud/curvature.py); 0 = off
     damp_directions=16,         # E8: tracked top singular directions of each block matrix's pending update
     damp_every=50,              # E8: updates between refreshes of the directions and their curvature
@@ -101,7 +112,8 @@ PROXY = dict(
 STEP_CONTROLS, SHAPINGS = ('none', 'reject', 'adapt'), ('none', 'cap', 'agree')
 # Each variant option, and the setting (of another option) it acts under.
 VARIANT_OPTIONS = {'accept_up': ('step_control', 'adapt'), 'accept_down': ('step_control', 'adapt'),
-                   'cap_quantile': ('token_shaping', 'cap'), 'agree_threshold': ('token_shaping', 'agree')}
+                   'cap_quantile': ('token_shaping', 'cap'), 'agree_threshold': ('token_shaping', 'agree'),
+                   'agree_over': ('token_shaping', 'agree')}
 
 # E3 (loud/population.py): copies of the proxy branched from one trajectory. Only POPULATION_FREE options may change;
 # the rest stay at their defaults (one change per variant, and the population loop has no H4 or monitoring).
@@ -114,7 +126,7 @@ POPULATION = dict(
     every=10,                   # N: updates per copy between averages or selections (ensemble: between logs)
 )
 POPULATION_FREE = ('sequences', 'heldout', 'batch', 'preset', 'test', 'official_eval', 'recipe', 'micro_batch',
-                   'lr_mult', 'branch', 'copies', 'rule', 'every')
+                   'lr_mult', 'branch', 'copies', 'rule', 'every', 'checkpoints', 'checkpoint_dtype')
 
 IDENTITY = dict(
     TRAINING,
@@ -212,6 +224,8 @@ def proxy_options(args):
         raise ValueError('batch must be a multiple of micro_batch')
     if o['per_sequence_grads'] and o['micro_batch'] != 1:
         raise ValueError('per-sequence gradients need micro_batch: 1')
+    if o['grad_noise_every'] and o['batch'] < 2:
+        raise ValueError('grad_noise_every needs batch >= 2: the noise is a variance across the sequences')
     if o['grad_noise_every'] and not o['per_sequence_grads']:
         raise ValueError('grad_noise_every needs per_sequence_grads')
     warmdown = o['warmdown']
@@ -233,6 +247,8 @@ def proxy_options(args):
         raise ValueError('smooth_tau must be >= 0')
     if not (o['accept_up'] >= 1 and 0 < o['accept_down'] <= 1):
         raise ValueError('accept_up must be >= 1 and accept_down in (0, 1]')
+    if o['agree_over'] not in ('active', 'all'):
+        raise ValueError("agree_over must be 'active' or 'all'")
     if not 0 < o['cap_quantile'] <= 1:
         raise ValueError('cap_quantile must be in (0, 1]')
     if not 0.5 < o['agree_threshold'] <= 1:
@@ -249,6 +265,8 @@ def proxy_options(args):
         positive(o, 'damp_directions', 'damp_every')
         if not o['per_sequence_grads']:
             raise ValueError('curvature_damping reads its noise from per-sequence gradients: set per_sequence_grads')
+        if o['batch'] < 2:
+            raise ValueError('curvature_damping needs batch >= 2: its noise is a variance across the sequences')
         if o['damp_where'] not in ('step', 'pending'):
             raise ValueError("damp_where must be 'step' or 'pending'")
         if o['damp_directions'] > PRESETS[o['preset']][1]:
@@ -396,6 +414,14 @@ def diagnose_options(args):
     return o
 
 
+def gate_options(args):
+    values = args.get('values')
+    if set(args) != {'values'} or not isinstance(values, dict) or not values or not all(
+            isinstance(v, list) and len(v) == 3 and all(isinstance(x, str) for x in v) for v in values.values()):
+        raise ValueError('gate needs values: {name: [job id, summary file, field]}')
+    return args
+
+
 def noop_options(args):
     if set(args) - {'seconds', 'fail', 'val_loss'}:
         raise ValueError('noop accepts only seconds, fail, val_loss')
@@ -405,4 +431,4 @@ def noop_options(args):
 VALIDATE = {'proxy': proxy_options, 'identity': identity_options, 'population': population_options,
             'cut': cut_options, 'score': score_options,
             'reference': reference_options, 'compare': compare_options, 'diagnose': diagnose_options,
-            'noop': noop_options}
+            'gate': gate_options, 'noop': noop_options}

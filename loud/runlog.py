@@ -69,10 +69,15 @@ class Run:
 
 
 def check(result, expect):
-    """expect: {metric: [target, tolerance]}; pass only if every metric is within its tolerance."""
+    """expect: {metric: [target, tolerance] or {min, max}}; pass only if every metric is within its bounds."""
     details = {}
-    for metric, (target, tolerance) in expect.items():
+    for metric, bound in expect.items():
         value = result.get(metric)
-        details[metric] = dict(value=value, target=target, tolerance=tolerance,
-                               ok=value is not None and abs(value - target) <= tolerance)
+        if isinstance(bound, dict):
+            ok = value is not None and bound.get('min', value) <= value <= bound.get('max', value)
+            details[metric] = dict(value=value, **bound, ok=ok)
+        else:
+            target, tolerance = bound
+            details[metric] = dict(value=value, target=target, tolerance=tolerance,
+                                   ok=value is not None and abs(value - target) <= tolerance)
     return dict(status='pass' if all(d['ok'] for d in details.values()) else 'fail', metrics=details)

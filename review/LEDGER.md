@@ -228,3 +228,36 @@ wrong or not worth it) or **deferred** (why, and what it waits on). "Same as" po
 | 10 | minor | Nothing extracts when the 60% run crosses 3.5; E12's final plot mixes merged records with unmerged proxies | fixed | `plots/e12/summary.md`: final, plain-weights val and the time to 3.5, with the merged/plain note |
 | 11 | minor | A misspelt `settings` field fails only on the 8-GPU node; JSON lists replace tuple fields | fixed | Fields checked at submission from the script's source (`launch.settings_fields`, no torch); lists become tuples where the default is a tuple |
 | nits | nit | jacrev docstring; no progress during reference runs; "queued" wording; `cpu_env.sh` rebuilds on any failed import | fixed (partly) | Docstring and wording fixed; reference progress and a narrower rebuild left as they are (the reference log is copied at the end; a rebuild takes a minute) |
+
+## Round 5: the experiments (frozen copies of 2026-10-28 22:55 to 23:59 UTC, commit d99a223)
+
+### 20261028T225506Z-code-codex.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | blocker | E8 accepts batch 1, whose noise variance is NaN, and completes with NaN weights | fixed | `curvature_damping` and `grad_noise_every` need batch >= 2; and every training loop (shared and population) now stops on a non-finite training loss instead of finishing "complete" |
+| 2 | major | The Cut chain crashes when each virtual rank gets one row (rows == split) | deferred | Handed to the Cut port's author with the other Cut items; fixed on that branch before merge |
+| 3 | minor | E9 syncs the GPU once per micro-batch counting tokens | fixed | The count stays a device tensor |
+
+### 20261028T231339Z-research-codex.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | major | E10 counts agreement among tokens with a nonzero contribution, not all tokens | fixed | `agree_over: all` is the plan's literal reading, checked against brute force; control cell `e10.agree_all_t70`. The active-token reading stays the default: under the literal one, an entry whose input is zero for more than 30% of tokens (common after the ReLU^2) is always dropped |
+| 2 | major | E7 can start before the diagnostic that justifies it | fixed | New task `gate` evaluates the plan's rule on H6's credit_dump (median over sites above 0.9 at 20%, below 0.7 at 100%; `expect` takes {min, max}); `e7.precondition` gates the four ramps |
+| 3 | major | `cut_prefix_match` allows 0.02 after update 20, twice the plan's seed noise, unmeasured | deferred | With the Cut port's author: tightened to 0.01, plus a calibration run with the 8-way sum reversed whose gap is the reference for any relaxing |
+| 4 | minor | The end merge's candidate scores bypass H3's log | deferred | With the Cut port's author |
+| 5 | minor | E3 saves no H4 checkpoints or means | fixed (partly) | The trunk's 0/10/20% and each copy's 50% and 100% (`ckpt_<f>.c<k>.pt`); no means, since after the branch there is no single trajectory and the rules are E3's merges (stated in the module) |
+
+### 20261028T235900Z-cut-claude.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | blocker | E7's row counts exceed Dynamo's 64-graph limit, so most of its Cut updates run the chain eagerly, biasing its time test | deferred | With the Cut port's author: raise the limit to cover every row count and fail the job after the warmup if a shape is missing |
+| 2 | major | No Cut config pins the GPU; E7's baseline is in another experiment, so a mismatch goes unflagged | deferred | With the Cut port's author (`gpu: H100` on every Cut cell) |
+| 3 | minor | Turns misses a collective mismatch when the last part has the extra group_sum | deferred | With the Cut port's author |
+| 4 | minor | E7's plots show neither its criterion nor its baseline | fixed | E7 and E11 get e6.cut_k1 as the baseline row, and `time.md` (val, plain-weights val and training minutes against the baseline) |
+| 5 | minor | `e1.cut_1m.s0` and `e6.cut_k1.s0` are the same run | fixed | `configs/e1/cut_1m.yaml` removed; E1's 1M Cut number is `e6.cut_k1.s0` (README) |
+| 6 | minor | The rank-by-rank end merge is about 8 of every 35 minutes | deferred | With the Cut port's author: `merge_batch` for the experiment cells, the record's layout for verification |
+| 7 | minor | `cut_prefix_match`'s bounds are uncalibrated | deferred | Same as research-codex #3 |
+| 8-11 | nit | drift blend equals fast; idle `measured`; duplicated end_merge; split=2 windows check | deferred | With the Cut port's author; the end_merge duplication is factored on main after the merge |

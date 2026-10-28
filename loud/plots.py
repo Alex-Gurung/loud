@@ -10,6 +10,7 @@ Diagnostics (e5, h6) are tables. Colors: the categorical slots in a fixed order 
 color across an experiment's charts.
 """
 import argparse
+from functools import partial
 from pathlib import Path
 import statistics
 
@@ -302,6 +303,34 @@ def e12_table(out, target=3.5):
     return text
 
 
+def time_table(experiment, out, baseline=None):
+    """Equal loss at lower time (E6, E7, E11 on the Cut chain): per variant and for the baseline cell, the final
+    validation loss (after the end merge where there is one), the plain weights' and the training time."""
+    cells = dict(counted(experiment))
+    if baseline:
+        source, variant = baseline
+        cells[f'baseline {source}.{variant}'] = counted(source).get(variant, [])
+    rows = []
+    for v, runs_ in sorted(cells.items()):
+        if not runs_:
+            continue
+        plain = [x['val_loss_plain'] for x in (read_json(Path(r['run_dir']) / 'result.json') for r in runs_)
+                 if 'val_loss_plain' in x]
+        rows.append([v, len(runs_), f'{statistics.fmean(r["val_loss"] for r in runs_):.4f}',
+                     f'{statistics.fmean(plain):.4f}' if plain else '-',
+                     f'{statistics.fmean(r["train_seconds"] for r in runs_) / 60:.1f}'])
+    if not rows:
+        return None
+    text = markdown(['variant', 'n', 'val', 'val, plain weights', 'training minutes'], rows)
+    (out / 'time.md').write_text(text)
+    return text
+
+
+def e7_tables(out):
+    """E7: its precondition (H6's credit_dump) and its criterion (loss and time against e6.cut_k1)."""
+    return '\n'.join(t for t in (e7_table(out), time_table('e7', out, ('e6', 'cut_k1'))) if t) or None
+
+
 def diagnostic(experiment, variant):
     """The summary JSON of a finished diagnose run (seed 0), or None."""
     run = RUNS / experiment / variant / 's0'
@@ -384,10 +413,11 @@ def e8_plot(plt, out):
 
 
 EXTRA = {'e3': [e3_plot], 'e4': [e4_plots], 'e6': [drift_plot], 'e12': [val_time_plot]}
-TABLES = {'e2': e2_table, 'e5': e5_table, 'e7': e7_table, 'e8': e8_table, 'e12': e12_table}
+TABLES = {'e2': e2_table, 'e5': e5_table, 'e6': partial(time_table, 'e6'), 'e7': e7_tables, 'e8': e8_table,
+          'e11': partial(time_table, 'e11', baseline=('e6', 'cut_k1')), 'e12': e12_table}
 # The plan's reference cell for experiments whose baseline lives in E1.
 BASELINES = {'e2': ('e1', 'bp_b8'), 'e4': ('e1', 'bp_b8'), 'e10': ('e1', 'bp_b8'), 'e3': ('e1', 'bp_b4'),
-             'e8': ('e1', 'bp_b4'), 'e9': ('e1', 'bp_b4')}
+             'e8': ('e1', 'bp_b4'), 'e9': ('e1', 'bp_b4'), 'e7': ('e6', 'cut_k1'), 'e11': ('e6', 'cut_k1')}
 FIGURES = {'e8': e8_plot}
 
 

@@ -21,9 +21,14 @@ Rules (one per variant), applied after every N = `every` rounds and at the end:
 Every N rounds (before the rule acts) population.jsonl records each copy's H3 score and each pairwise midpoint's, and
 the barrier of each pair, midpoint minus the worse end (above 0: the pair has left one basin). These scores are
 untimed monitoring, except the ones a rule decides on. metrics.jsonl has one record per update, naming its copy.
+H4 (checkpoints): the trunk's fractions before the branch (ckpt_00, _10, _20), then each copy's (ckpt_50.c<k>,
+ckpt_100.c<k>) after the round in which the copies pass that fraction of the single run's updates (the copies' last
+updates fall just short of the run's last, so 100% is their end); final.pt is the rule's choice. No trajectory means:
+after the branch there is no single trajectory, and the rules are themselves E3's merges.
 """
 from contextlib import contextmanager
 from itertools import combinations
+import math
 import time
 
 import torch
@@ -182,6 +187,8 @@ def run(spec, run_dir):
 
     heldout = HeldoutScorer(split.heldout, run_dir / 'heldout.jsonl', dev)
     events = JsonlLog(run_dir / 'population.jsonl')
+    checkpoints = FractionCheckpoints(run_dir, steps, dtype=o['checkpoint_dtype'], enabled=o['checkpoints'])
+    pending = sorted(s for s in checkpoints.at if s > prefix) if o['checkpoints'] else []
     if dev.type == 'cuda':
         torch.cuda.reset_peak_memory_stats()
     clock = Clock(dev)
@@ -190,6 +197,8 @@ def run(spec, run_dir):
     def record(step, loss, fields, **extra):
         nonlocal previous
         loss = loss.item()  # also waits for the update, so the step time is the GPU's
+        if not math.isfinite(loss):
+            raise FloatingPointError(f'non-finite training loss at update {step}')
         elapsed = clock.elapsed()
         seqs = step * B
         run.metrics.write(dict(step=step, **extra, seqs=seqs, tokens=seqs * (SEQ - 1), train_loss=loss,
@@ -199,9 +208,13 @@ def run(spec, run_dir):
             print(dict(step=step, train_loss=loss, train_seconds=round(elapsed, 2), **extra), flush=True)
         return loss
 
-    for step in range(1, prefix + 1):
-        batch = split.train[(step - 1) * B:step * B].to(dev)
-        record(step, *trunk.update(step, batch), phase='prefix')
+    for step in range(0, prefix + 1):
+        if step:
+            batch = split.train[(step - 1) * B:step * B].to(dev)
+            record(step, *trunk.update(step, batch), phase='prefix')
+        if checkpoints.due(step):
+            with clock.paused():
+                checkpoints.save(trunk.model, step)
     population = Population(o, trunk, reference, dev, seed, heldout, events, clock)
     for r in range(1, rounds + 1):
         losses = []
@@ -210,6 +223,11 @@ def run(spec, run_dir):
             member.optimizer.optimizers[0].t = step - 1  # ANVIL II's clock follows the single run's
             batch = rows[c][(r - 1) * B:r * B].to(dev)
             losses.append(record(step, *member.update(step, batch), phase='population', copy=c, round=r))
+        while pending and (pending[0] <= step or r == rounds):
+            with clock.paused():
+                for c, member in enumerate(population.copies):
+                    checkpoints.save(member.model, pending[0], copy=c)
+            pending.pop(0)
         if r % o['every'] == 0 or r == rounds:
             scores = population.checkpoint(r, step)
     model, choice = population.final(step, scores)
@@ -217,7 +235,8 @@ def run(spec, run_dir):
     elapsed = clock.elapsed()
     events.close()
 
-    final = FractionCheckpoints(run_dir, steps, enabled=False).save_final(model)
+    final = checkpoints.save_final(model)
+    run.update_config(checkpoints=checkpoints.saved)
     result = dict(steps=steps, updates=prefix + rounds * K, complete=True, train_seconds=round(elapsed, 2),
                   update_sequences=(prefix + rounds * K) * B, train_loss_last=sum(losses) / len(losses),
                   rule=o['rule'], every=o['every'], copies=K, branch_step=prefix, **choice)

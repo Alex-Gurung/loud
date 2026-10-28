@@ -106,8 +106,8 @@ is when they are needed to tell a port error from an environment difference.
    float rounding separates them.
 6. **E1**, the baselines: backprop at batch 8 and batch 4, three seeds each, with held-out scoring and the nine means
    (`bp_b4` saves the H4 checkpoints and optimizer state for the diagnostics); `bp_b4_pr40`, batch 4 with PR #40's
-   recipe, since no published run anchors boost-cut's rates at batch 4; `e1.identity` and `e1.cut_1m` (the Cut chain
-   on the 1M slice), seed 0.
+   recipe, since no published run anchors boost-cut's rates at batch 4; `e1.identity`, seed 0. E1's Cut chain on the
+   1M slice is `e6.cut_k1.s0` (the unchanged chain, E6's K = 1).
 7. **H6** on `e1.bp_b4.s0`'s checkpoints (`configs/h6/`): `credit_dump` and `cos_to_autograd` at all five fractions;
    `token_map_svd`, `linearity_check` and `direction_stats` at 20% and 100%. Each measures held-out sequences.
    `direction_stats` takes the top directions of the pending update (from the optimizer state `bp_b4` saves with
