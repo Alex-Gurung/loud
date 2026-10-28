@@ -68,6 +68,24 @@ def test_bad_configs_fail_at_submission(tmp_path, text, error):
     assert str(path) in str(caught.value)
 
 
+@pytest.mark.parametrize('args, error', [
+    ('{batch: 3}', 'does not divide'),
+    ('{rows: 96}', 'power of two'),
+    ('{row_offset_per_step: true}', 'needs rows below'),
+    ('{rows_start: 64}', 'both rows_start and rows_full_at'),
+    ('{rows_start: 100, rows_full_at: 0.5}', 'multiple of 64'),
+    ('{rows_start: 64, rows_full_at: 0.1}', r'after the Boost phase'),
+    ('{rows: 128, rows_start: 64, rows_full_at: 0.5}', 'not both'),
+    ('{heldout: 0}', 'end merge needs'),
+    ('{end_merge: false, heldout: 0, drift_every: 10}', 'needs heldout'),
+])
+def test_bad_cut_options_fail_at_submission(tmp_path, args, error):
+    path = tmp_path / 'c.yaml'
+    path.write_text(f'experiment: e\nvariant: v\ntask: cut\nargs: {args}\n')
+    with pytest.raises(ValueError, match=error):
+        specs_from_config(path)
+
+
 def row(variant, seed, val, check='pass', gpu='H100', code='c1', complete=True):
     return dict(experiment='e', variant=variant, seed=seed, val_loss=val, test_loss=val, heldout_loss=val,
                 heldout_min=val, train_seconds=1.0, complete=complete, check=check, gpu=gpu, code=code, commit='x')

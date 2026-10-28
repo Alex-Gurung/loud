@@ -1,0 +1,16 @@
+# H5 verification: the single-GPU Cut-chain port (PR #40 @4ef285e unchanged, its 8 GPUs emulated with their seeds and
+# roles) on the 10M schedule, stopped after 262 of its 1,212 updates: all 242 Boost updates and the first 20 Cut ones.
+# Seed 0 and the record's data order, held-out split and draws, so cut_prefix_match can hold its per-update losses
+# against the published 8-GPU log. About 15 minutes on one H100 (Boost 1.6 s and Cut 16 s per update: 8 times the
+# published per-GPU times).
+experiment: verify
+variant: cut_prefix
+task: cut
+seeds: [0]
+priority: 10
+after: [verify.cut_smoke.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  stop_after: 262

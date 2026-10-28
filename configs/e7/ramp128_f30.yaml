@@ -1,0 +1,19 @@
+# E7 on the Cut chain (1M slice): fewer rows early, all rows late. Each chain site reads 128 rows per token at the first
+# Cut update (scaled by 512 / 128), rising linearly in steps of 64 to the full 512 at 30% of the run's updates; each
+# token reads its own window, consecutive tokens tiling the cycle, so every row is read in every update. Baseline: the
+# unchanged chain, e6.cut_k1. Success: equal loss at lower time. The plan's precondition, to read before submitting:
+# h6.credit_dump_c20 and _c100 show a median identity-path cosine above 0.9 at 20% and below 0.7 at 100%.
+experiment: e7
+variant: ramp128_f30
+task: cut
+seeds: [0, 1]
+priority: 65
+after: [verify.score_record.s0, verify.cut_prefix.s0, verify.cut_prefix_match.s0]
+args:
+  sequences: 1M
+  heldout: 32
+  batch: 4
+  rows_start: 128
+  rows_full_at: 0.3
+  heldout_every: 10
+  checkpoints: true

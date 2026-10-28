@@ -3,11 +3,16 @@
     python tests/method_checks.py <check> <scratch dir>
 
 Two test-only patches make them run on a CPU: dense attention with the same causal window instead of flex attention
-(which has no CPU backward, and on CPU sees float32 values under autocast), and sequences cut to SEQ tokens.
+(which has no CPU backward, and on CPU sees float32 values under autocast), and sequences cut to SEQ tokens. The Cut
+chain's checks also shrink the vocabulary (CUT_VOCAB): its head matmuls are bfloat16, which this CPU runs slowly.
 """
 import copy
 import json
+import os
+import socket
+import subprocess
 import sys
+import types
 from pathlib import Path
 
 import torch
@@ -29,14 +34,16 @@ def patch_attention():
     um.attention = dense_attention
 
 
-def patch_sequences():
+def patch_sequences(length=SEQ, vocab=None):
     real = data.benchmark_split
 
     def short(*args, **kwargs):
         split = real(*args, **kwargs)
-        split.train, split.heldout = split.train[:, :SEQ].contiguous(), split.heldout[:, :SEQ].contiguous()
+        split.train, split.heldout = split.train[:, :length].contiguous(), split.heldout[:, :length].contiguous()
+        if vocab is not None:
+            split.train, split.heldout = split.train % vocab, split.heldout % vocab
         return split
-    train.benchmark_split, train.SEQ = short, SEQ
+    train.benchmark_split, train.SEQ = short, length
 
 
 def proxy_gradient(scratch):
@@ -249,8 +256,169 @@ def diagnostics(scratch):
     assert all(len(pending[n]) == 1 and pending[n][0]['noise'] >= 0 for n in names)
 
 
+CUT_SEQ, CUT_VOCAB = 65, 512  # the Cut checks: 64 predictions per sequence, a 512-token vocabulary
+CUT_ROWS = 72                   # their data: 40 sequences feed 10 updates of 4 (2 Boost), 32 are held out
+
+
+def cut_module():
+    """PR #40 run eagerly (both sides of a comparison) with dense attention, and loud.cut.record_settings shrunk to
+    CUT_SEQ tokens and CUT_VOCAB."""
+    import torch._dynamo
+    torch._dynamo.config.disable = True
+    m = refs.trainer_module('pr40')
+    patch_attention()
+    m.attention = sys.modules['utils.model'].attention  # the script's own reference to the flex attention
+    import loud.cut
+    real = loud.cut.record_settings
+
+    def small(*args):
+        s = real(*args)
+        s.model.sequence_len, s.model.vocab_size = CUT_SEQ - 1, CUT_VOCAB
+        return s
+    loud.cut.record_settings = small
+    return m
+
+
+def cut_rows_data():
+    return torch.randint(0, CUT_VOCAB, (CUT_ROWS, CUT_SEQ), generator=torch.Generator().manual_seed(6))
+
+
+def cut_rank(scratch, rank):
+    """One of 8 gloo processes running PR #40's own train_stages (its loop, groups and all-reduces) for 4 updates:
+    2 Boost, then the switch and 2 Cut. Each all-reduce sums in rank order, as the port does, so the two can agree to
+    the bit. Its CUDA calls become no-ops; load_rows returns cut_rows_data()."""
+    import argparse
+    import loud.cut
+    m = cut_module()
+    dist = torch.distributed
+    dist.init_process_group('gloo', rank=int(rank), world_size=8)
+
+    def all_reduce(tensor, op=dist.ReduceOp.SUM, group=None, async_op=False):
+        assert op == dist.ReduceOp.SUM and not async_op
+        parts = [torch.empty_like(tensor) for _ in range(dist.get_world_size(group))]
+        dist.all_gather(parts, tensor.contiguous(), group=group)
+        total = parts[0].clone()
+        for part in parts[1:]:
+            total += part
+        tensor.copy_(total)
+    dist.all_reduce = all_reduce
+    for name in ('synchronize', 'reset_peak_memory_stats'):
+        setattr(torch.cuda, name, lambda *a, **k: None)
+    torch.cuda.max_memory_allocated = lambda *a, **k: 0
+    m.load_rows = lambda path, rows: cut_rows_data()
+    args = argparse.Namespace(data_dir=Path(scratch), output=Path(scratch) / 'record', steps=None, stop_after_step=4,
+                              resume=None, eval_every=0, checkpoint_every=0)
+    m.train_stages(args, loud.cut.record_settings(m, '2m', 4), torch.device('cpu'), int(rank), 8)
+    torch.distributed.destroy_process_group()
+
+
+def cut_ranks(scratch):
+    """The single-process port (8 virtual GPUs, two per sequence taking turns) against PR #40's train_stages on 8 real
+    gloo processes, both eager in float32: bit-identical per-update losses and weights after 2 Boost and 2 Cut
+    updates (the processes' all-reduces sum in rank order; on GPUs NCCL's order changes the rounding)."""
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        port = sock.getsockname()[1]
+    env = dict(os.environ, MASTER_ADDR='127.0.0.1', MASTER_PORT=str(port), TORCHDYNAMO_DISABLE='1')
+    procs = [subprocess.Popen([sys.executable, __file__, 'cut_rank', scratch, str(r)], env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) for r in range(8)]
+    m = cut_module()
+    from loud.cut import CutChain
+    from loud.options import cut_options
+    rows = cut_rows_data()
+    order = rows[torch.randperm(len(rows), generator=torch.Generator().manual_seed(1))]  # the record's order
+    training, heldout = order[:-32], order[-32:]
+    o = cut_options(dict(preset='2m', batch=4, sequences=CUT_ROWS, heldout=32))
+    ours = CutChain(o, torch.device('cpu'), 0, len(training) // 4, heldout)
+    losses = [ours.update(step, training[(step - 1) * 4:step * 4])[0].item() for step in range(1, 5)]
+    for proc in procs:
+        out, _ = proc.communicate(timeout=1800)
+        assert proc.returncode == 0, out[-4000:]
+    record = [json.loads(line) for line in (Path(scratch) / 'record' / 'metrics.jsonl').read_text().splitlines()]
+    assert [r['phase'] for r in record] == ['boost', 'boost', 'cut', 'cut']
+    theirs = torch.load(Path(scratch) / 'record' / 'checkpoint.pt', weights_only=True)['model']
+    for step, (a, b) in enumerate(zip(losses, [r['train_loss'] for r in record]), 1):
+        assert a == b, f'update {step}: loss {a} here, {b} on 8 processes'
+    for name, p in ours.model.state_dict().items():
+        assert torch.equal(p, theirs[name]), f'{name} differs by {(p.float() - theirs[name].float()).abs().max()}'
+
+
+def cut_windows(scratch):
+    """rows = full is PR #40's Cut estimate; at fewer rows, the K windows of a held cycle (each scaled by K) average
+    to the full cycle's chain credits, the tiled windows (E7) give each token its window's credit, and the GPUs of a
+    sequence split each token's window into halves."""
+    m = cut_module()
+    from loud.cut import estimator_classes, record_settings
+    s = record_settings(m, '2m', 4)
+    width = s.model.n_embd
+    model = m.make_model(torch.device('cpu'), 0, s.model, s.projection_std, s.head_std)
+    _, Cut = estimator_classes(m)
+    row = cut_rows_data()[:1]
+    x, y = row[:, :-1].contiguous(), row[:, 1:].contiguous()
+    ours, theirs = Cut(model, s, 0, 0, 1, 1, None), m.Cut(model, s, 0, 0, 1, 1, None)
+    a, b = ours.estimate(x, y), theirs.estimate(x, y)
+    assert a.keys() == b.keys() and all(torch.equal(a[k], b[k]) for k in a), 'the full cycle is not the record'
+
+    saved = {}
+
+    def keep(self, *args):
+        saved['args'] = args
+        return Cut.chain_credits(self, *args)
+    ours.chain_credits = types.MethodType(keep, ours)
+    ours.estimate(x, y)
+    del ours.chain_credits
+    state = ours.generator.get_state()
+    full = ours.chain_credits(*saved['args'])
+    K, rows = 4, width // 4
+    ours.generator.set_state(state)  # the cycle's held bases are then the ones the full cycle drew
+    ours.rows, ours.cycle, windows = rows, 7, []
+    for k in range(K):
+        ours.start = k * rows
+        windows.append(ours.chain_credits(*saved['args']))
+    ours.start = None
+    tiled = ours.chain_credits(*saved['args'])
+    tokens = torch.arange(x.shape[1])
+    for key, value in full.items():
+        mean = sum(w[key] for w in windows) / K
+        assert torch.allclose(mean, value, rtol=1e-4, atol=1e-6), f'{key}: the windows do not average to the cycle'
+        if not isinstance(key, tuple):  # ('lam', site): the mixing scalars' probes do not use the rows
+            each = torch.stack([w[key] for w in windows])[tokens % K, tokens]
+            assert torch.allclose(tiled[key], each, rtol=1e-4, atol=1e-6), f'{key}: a tiled token misses its window'
+    halves = [Cut(model, s, 0, part, 2, 2, None) for part in range(2)]
+    for start in (0, None):
+        for half in halves:
+            half.rows, half.start = rows, start
+        index = torch.cat([h.row_index(8) for h in halves], 1)
+        first = torch.zeros(8, dtype=torch.long) if start == 0 else torch.arange(8) * rows
+        assert torch.equal(index, (first[:, None] + torch.arange(rows)) % width), 'the halves do not tile a window'
+
+
+def cut_run(scratch):
+    """The whole loop on the 2-layer model (width 128), two virtual GPUs on one sequence per update: Boost, the switch,
+    E7's ramp (64 rows until it reaches the full cycle at 60%), the drift check, H4, the means (updates 10 and 12) and
+    the record's end merge, timed."""
+    cut_module()
+    from loud.cut import run
+    patch_sequences(CUT_SEQ, CUT_VOCAB)
+    spec = dict(experiment='cpu', variant='cut', seed=0, task='cut', args=dict(
+        preset='2m', sequences=20, heldout=8, batch=1, virtual_gpus=2, rows_start=64, rows_full_at=0.6,
+        drift_every=3, checkpoints=True, heldout_every=4, official_eval=False))
+    out = Path(scratch) / 'cut'
+    result = run(spec, out)
+    metrics = [json.loads(line) for line in (out / 'metrics.jsonl').read_text().splitlines()]
+    assert result['complete'] and len(metrics) == 12
+    assert [r['phase'] for r in metrics] == ['boost'] * 2 + ['cut'] * 10
+    assert [r.get('chain_rows') for r in metrics] == [None] * 2 + [64] * 5 + [128] * 5
+    assert [r['step'] for r in metrics if 'drift' in r] == [3, 6, 9, 12]
+    assert all(-1 <= v <= 1 for r in metrics if 'drift' in r for v in r['drift'].values())
+    assert {'holdout_plain', 'holdout_merged', 'merge_choices', 'merge_seconds'} <= set(result)
+    assert result['holdout_merged'] <= result['holdout_plain'] and result['means_updates'] == 2
+    assert result['train_seconds'] >= result['merge_seconds']
+    assert {'final.pt', 'final_plain.pt', 'ckpt_100.pt'} <= {p.name for p in out.iterdir()}
+
+
 if __name__ == '__main__':
-    torch.set_num_threads(8)  # the default (every core) oversubscribes a shared machine
+    torch.set_num_threads(2 if sys.argv[1] == 'cut_rank' else 8)  # every core would oversubscribe a shared machine
     torch.manual_seed(0)
-    globals()[sys.argv[1]](sys.argv[2])
+    globals()[sys.argv[1]](*sys.argv[2:])
     print('ok')

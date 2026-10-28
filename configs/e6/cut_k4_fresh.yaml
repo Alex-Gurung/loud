@@ -1,0 +1,17 @@
+# E6's control on the Cut chain (1M slice), as identity_k4_fresh on the identity path: 128 rows per update as cut_k4,
+# but rows [0, 128) of fresh bases every update instead of complementary windows of a basis held for 4 updates. If
+# cut_k4 matches this, stitching a cycle across updates is not what makes K = 4 work.
+experiment: e6
+variant: cut_k4_fresh
+task: cut
+seeds: [0, 1, 2]
+priority: 60
+after: [verify.score_record.s0, verify.cut_prefix.s0, verify.cut_prefix_match.s0]
+args:
+  sequences: 1M
+  heldout: 32
+  batch: 4
+  rows: 128
+  drift_every: 10
+  heldout_every: 10
+  checkpoints: true

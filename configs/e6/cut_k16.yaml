@@ -1,0 +1,17 @@
+# E6 on the Cut chain (1M slice): each chain site's 512 Hadamard rows spread over K = 16 updates (32 rows per update,
+# scaled by K), as cut_k4 otherwise. Success: within 0.05 of K = 1 (cut_k1).
+experiment: e6
+variant: cut_k16
+task: cut
+seeds: [0, 1, 2]
+priority: 60
+after: [verify.score_record.s0, verify.cut_prefix.s0, verify.cut_prefix_match.s0]
+args:
+  sequences: 1M
+  heldout: 32
+  batch: 4
+  rows: 32
+  row_offset_per_step: true
+  drift_every: 10
+  heldout_every: 10
+  checkpoints: true

@@ -1,0 +1,19 @@
+# E6 on the Cut chain (1M slice): each chain site's 512 Hadamard rows spread over K = 4 updates (128 rows per update,
+# scaled by K, so the estimate stays unbiased), momentum unchanged; Boost and every other probe keep their budgets.
+# Every 10 Cut updates, a full-cycle estimate on a held-out sequence is compared with ANVIL II's momenta (the drift
+# check). Success: K = 4 within 0.02 of K = 1 (cut_k1); K = 16 within 0.05. Kill: K = 4 already loses more than 0.02.
+experiment: e6
+variant: cut_k4
+task: cut
+seeds: [0, 1, 2]
+priority: 60
+after: [verify.score_record.s0, verify.cut_prefix.s0, verify.cut_prefix_match.s0]
+args:
+  sequences: 1M
+  heldout: 32
+  batch: 4
+  rows: 128
+  row_offset_per_step: true
+  drift_every: 10
+  heldout_every: 10
+  checkpoints: true

@@ -4,6 +4,7 @@ import re
 TASKS = {
     'proxy': ('loud.proxy', 'run'),               # H1 backprop proxy
     'identity': ('loud.identity', 'run'),         # H5 identity-path forward-only estimator (PR #26)
+    'cut': ('loud.cut', 'run'),                   # H5 the record's Boost -> Cut chain (PR #40)
     'score': ('loud.score', 'run_task'),          # official rescoring of a checkpoint
     'reference': ('loud.reference', 'run_task'),  # a pinned external script, unmodified, on one GPU
     'compare': ('loud.compare', 'run_task'),      # two runs' per-update losses side by side
@@ -19,7 +20,10 @@ CHECKPOINT_DTYPES = ('bfloat16', 'float32')
 
 # What each task's result.json holds that `expect` may check.
 TRAINING_RESULTS = ('val_loss', 'test_loss', 'heldout_loss', 'train_seconds', 'train_loss_last', 'peak_cuda_gb')
-RESULTS = {'proxy': TRAINING_RESULTS, 'identity': TRAINING_RESULTS, 'score': ('val_loss', 'test_loss'),
+RESULTS = {'proxy': TRAINING_RESULTS, 'identity': TRAINING_RESULTS,
+           'cut': TRAINING_RESULTS + ('val_loss_plain', 'test_loss_plain', 'holdout_plain', 'holdout_merged',
+                                      'merge_seconds'),
+           'score': ('val_loss', 'test_loss'),
            'reference': ('val_loss', 'test_loss', 'train_seconds'),
            'compare': ('train_loss_max_diff', 'train_loss_mean_diff', 'train_loss_max_diff_all', 'val_loss_diff'),
            'diagnose': (),
@@ -80,6 +84,21 @@ IDENTITY = dict(
     row_offset_per_step=False,  # E6: update s uses rows [(s mod K) * rows, ...), K = 512 / rows
     drift_every=0,              # E6: every N updates, a full-cycle estimate on a held-out sequence vs the momentum
 )
+
+CUT = dict(
+    TRAINING,
+    batch=4,                    # the record's batch: 4 sequences, each on 2 of the 8 virtual GPUs
+    means=True,                 # the record's nine trajectory means (the end merge's candidates)
+    virtual_gpus=8,             # the record's GPUs, emulated in turn; virtual_gpus / batch of them share a sequence
+    end_merge=True,             # the record's end merge on the held-out sequences, timed with the training
+    rows=None,                  # E6: Hadamard rows per token at each chain site (None: the full cycle, 512)
+    row_offset_per_step=False,  # E6: update s reads rows [(s mod K) * rows, ...) of a basis held for K updates
+    drift_every=0,              # E6: every N updates (Cut phase), a full-cycle estimate on a held-out sequence vs momentum
+    rows_start=None,           # E7: rows per token at the first Cut update, ramped linearly up to the full cycle...
+    rows_full_at=None,          # ...reached at this fraction of the run's updates; each token reads its own window
+)
+CUT_SWITCH = 0.2                # PR #40's Boost fraction (Settings.switch): Cut, and its chain, start after it
+ROW_QUANTUM = 64                # E7's ramp moves in steps of 64 rows, so only a few chain shapes compile
 
 SCORE = dict(checkpoint=None, splits=['val'])
 
@@ -175,6 +194,43 @@ def identity_options(args):
     return o
 
 
+def cut_options(args):
+    o = training_options(args, CUT, 'cut')
+    width = PRESETS[o['preset']][1]
+    world, batch = o['virtual_gpus'], o['batch']
+    if world not in (1, 2, 4, 8):
+        raise ValueError('virtual_gpus must be 1, 2, 4 or 8, as the record supports')
+    split = max(1, world // batch)
+    if world % split or batch % (world // split):
+        raise ValueError(f'batch {batch} does not divide over {world} virtual GPUs as the record does')
+    if o['end_merge'] and not (o['means'] and o['heldout']):
+        raise ValueError('the end merge needs the means and held-out sequences to score them')
+    if o['checkpoint_optimizer']:
+        raise ValueError("checkpoint_optimizer reads boost-cut's ANVIL II state; PR #40's batched one is not checked")
+    if o['rows'] is not None:
+        positive(o, 'rows')
+        if o['rows'] & (o['rows'] - 1) or not split <= o['rows'] <= width:
+            raise ValueError(f'rows must be a power of two from {split} (the GPUs of a sequence) to {width}')
+        if o['rows'] == width:
+            o['rows'] = None
+    if o['row_offset_per_step'] and o['rows'] is None:
+        raise ValueError('row_offset_per_step needs rows below the full cycle')
+    if (o['rows_start'] is None) != (o['rows_full_at'] is None):
+        raise ValueError('the E7 ramp needs both rows_start and rows_full_at')
+    if o['rows_start'] is not None:
+        if o['rows'] is not None:
+            raise ValueError('give rows (E6) or the rows_start ramp (E7), not both')
+        if (not isinstance(o['rows_start'], int) or isinstance(o['rows_start'], bool)
+                or o['rows_start'] % ROW_QUANTUM or not 0 < o['rows_start'] < width):
+            raise ValueError(f'rows_start must be a multiple of {ROW_QUANTUM} below {width}')
+        f = o['rows_full_at']
+        if not isinstance(f, (int, float)) or isinstance(f, bool) or not CUT_SWITCH < f <= 1:
+            raise ValueError(f'rows_full_at is a fraction of the run after the Boost phase ({CUT_SWITCH}, 1]')
+    if o['drift_every'] and not o['heldout']:
+        raise ValueError('the drift check measures a held-out sequence: it needs heldout > 0')
+    return o
+
+
 def score_options(args):
     unknown = set(args) - set(SCORE)
     if unknown or not args.get('checkpoint'):
@@ -228,6 +284,6 @@ def noop_options(args):
     return args
 
 
-VALIDATE = {'proxy': proxy_options, 'identity': identity_options, 'score': score_options,
+VALIDATE = {'proxy': proxy_options, 'identity': identity_options, 'cut': cut_options, 'score': score_options,
             'reference': reference_options, 'compare': compare_options, 'diagnose': diagnose_options,
             'noop': noop_options}
