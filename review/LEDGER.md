@@ -261,3 +261,21 @@ wrong or not worth it) or **deferred** (why, and what it waits on). "Same as" po
 | 6 | minor | The rank-by-rank end merge is about 8 of every 35 minutes | deferred | With the Cut port's author: `merge_batch` for the experiment cells, the record's layout for verification |
 | 7 | minor | `cut_prefix_match`'s bounds are uncalibrated | deferred | Same as research-codex #3 |
 | 8-11 | nit | drift blend equals fast; idle `measured`; duplicated end_merge; split=2 windows check | deferred | With the Cut port's author; the end_merge duplication is factored on main after the merge |
+
+### 20261028T235900Z-proxy-claude.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | major | `direction_stats` never uses the pending update on a real checkpoint (its matrices include the value-embedding gates, which ANVIL II does not hold); round-3 #2 was not fixed | fixed | It now takes ANVIL II's matrices (`anvil.is_anvil_matrix`); the method check loads a state saved by `FractionCheckpoints.save` and requires 'pending update'; h6 config comments corrected |
+| 2 | major | A rejected E4 update rewinds ANVIL II's clock, so its momentum schedule follows accepted updates | fixed | The clock (the schedule, not a record of data) keeps following the loop; weights, rails, energy and Adam's state are still restored. Check updated: the next update equals a fresh trainer's at that clock |
+| 3 | major | E12's summary says the proxies have no merge, which they now have; the README omits the proxy's `end_merge` | fixed | The note says to compare merged with merged and plain with plain; the README's proxy paragraph describes `end_merge` (added after this copy was frozen) |
+| 4 | minor | E3's held-out curve and `heldout_min` read midpoint scores | fixed | `collect.own_score` skips means, copies, midpoints and the ensemble mean, in collect and the plots |
+| 5 | minor | E9 rescales to sqrt(min(m, n)), up to 1.3x what polar() gives | fixed | Scaled to `polar(pending).norm()`, so only the direction differs from ANVIL II; check updated |
+| 6 | minor | E3's calibration (rule a near a batch-16 run) has no cell | fixed | `configs/e3/bp_b16.yaml` |
+| 7 | minor | E8's sub-options are accepted with E8 off | fixed | `damp_directions`, `damp_every`, `damp_where` need `curvature_damping` |
+| 8 | minor | No GPU smoke run gates E2, E4 or E10 | fixed | `verify.blur_smoke`, `step_control_smoke`, `cap_smoke`, `agree_smoke` gate their experiments |
+| 9 | minor | E8's "needs the Cut port" is stale, and the hook cannot reach PR #40's BatchedAnvil | fixed (partly) | Comments point at `configs/e8/cut_rows128*.yaml`, which the Cut port's author is building with a BatchedAnvil hook |
+| 10 | nit | Fisher dTd cost is 180 GFLOP, not 90 | fixed | |
+| 11 | nit | `per_sequence_grads` with E9 is rejected though E9 keeps the plain gradient | fixed | Allowed |
+| 12 | nit | Fisher token count syncs per micro-batch | fixed | Same as 20261028T225506Z-code-codex.md #3 |
+| 13 | nit | The ensemble rescores the copies at the end, inside the clock | fixed | The last checkpoint's scores are the decision's, timed |

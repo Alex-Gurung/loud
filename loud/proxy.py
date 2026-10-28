@@ -197,7 +197,7 @@ def shaper(o, reference, model, seed):
     if o['curvature_damping']:
         return CurvatureDamping(o, model, reference.settings.anvil_lr, reference.module.polar)
     if o['fisher_damping']:
-        return FisherFactor(o, model, seed)
+        return FisherFactor(o, model, seed, reference.module.polar)
     return None
 
 

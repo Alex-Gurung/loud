@@ -10,7 +10,8 @@ variant: agree_all_t70
 task: proxy
 seeds: [0, 1, 2]
 priority: 55
-after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0]
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0,
+        verify.cap_smoke.s0, verify.agree_smoke.s0]
 args:
   recipe: boostcut
   sequences: 10M

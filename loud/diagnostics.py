@@ -12,7 +12,7 @@ stream after attention and before the MLP (its input plus the attention output).
                       PR #26's RMS-norm cycle of it
     token_map_svd     per site: singular values of each token's map from its raw embedding to the site, with the
                       attention outputs frozen at their clean values (torch.func.jacfwd per token)
-    direction_stats   per block matrix: the top singular directions of the pending update (from the optimizer state
+    direction_stats   per ANVIL II matrix: the top singular directions of the pending update (from the optimizer state
                       the checkpoint saved with checkpoint_optimizer; else of the batch gradient), the curvature along
                       each (a central difference of the batch gradient) and the across-sequence variance along it
     linearity_check   per site, probe size and token: how far the token's own loss response to +v and -v is from
@@ -32,6 +32,7 @@ import torch
 import torch.nn.functional as F
 
 from . import paths, refs
+from .anvil import is_anvil_matrix
 from .data import benchmark_split
 from .options import diagnose_options
 from .runlog import Run
@@ -255,7 +256,7 @@ class Toolkit:
             raise ValueError('direction_stats needs at least two sequences for the noise')
         model = copy.deepcopy(self.model).float().requires_grad_(True)
         params = dict(model.named_parameters())
-        names = [n for n, p in params.items() if n.startswith('transformer.h.') and p.ndim == 2]
+        names = [n for n, p in params.items() if is_anvil_matrix(n, p)]  # the matrices whose state is saved
 
         def loss(batch):
             with exact():

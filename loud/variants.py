@@ -86,7 +86,7 @@ class Blur:
 
 
 class Snapshot:
-    """The weights and the whole optimizer state (every state tensor and the step clocks), copied into buffers that
+    """The weights and the optimizer state (every state tensor; ANVIL II's schedule clock is left to the loop), copied into buffers that
     are allocated once per tensor and reused, so a rejected update can be undone exactly."""
 
     def __init__(self, model, optimizer):
@@ -106,17 +106,16 @@ class Snapshot:
             if id(t) not in self.buffers:
                 self.buffers[id(t)] = torch.empty_like(t)
         torch._foreach_copy_([self.buffers[id(t)] for t in self.saved], self.saved)
-        self.clocks = [getattr(o, 't', None) for o in self.optimizers]  # ANVIL II's step clock; Adam's is a tensor
 
     def restore(self):
+        """Undo the step: weights, rails, energy and Adam's moments and counts. ANVIL II's clock `t` is not a record
+        of the data but its schedule (rail-beta ramp, engage, cooldown), which follows the loop's update count as the
+        warmdown does, so it stays advanced."""
         torch._foreach_copy_(self.saved, [self.buffers[id(t)] for t in self.saved])
         known = {id(t) for t in self.saved}
         created = [t for t in self._tensors() if id(t) not in known]
         if created:  # the undone step was the first: zero state is what a fresh optimizer starts from
             torch._foreach_zero_(created)
-        for o, t in zip(self.optimizers, self.clocks):
-            if t is not None:
-                o.t = t
 
 
 class StepControl:

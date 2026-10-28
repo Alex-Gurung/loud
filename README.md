@@ -263,8 +263,9 @@ path is unchanged: the CPU test of the float32 mean still holds bit for bit. All
   loss's gradient. `blurred_loss` is logged too. A CPU test checks the length, the shared r and the odd-order
   cancellation (the error falls 4× when r halves). About 2.3× a baseline update.
 - **E4, `step_control`.** `reject`: after the step, one no-grad forward on the same micro-batches; if the loss rose,
-  the weights and all optimizer state (ANVIL II's rails and energy, Adam's moments, both step clocks) are restored
-  from a snapshot, and the batch feeds no update. `adapt` also multiplies every rate (and so ANVIL II's decay) by
+  the weights and all optimizer state (ANVIL II's rails and energy, Adam's moments and counts) are restored from a
+  snapshot, and the batch feeds no update. ANVIL II's clock, which drives its momentum schedule, keeps following the
+  loop's update count, as the warmdown does. `adapt` also multiplies every rate (and so ANVIL II's decay) by
   `accept_up` after an accept and `accept_down` after a reject, on top of the schedule. `warmdown: 0` removes the hand
   warmdown; ANVIL II's own momentum schedule stays. The plan's 1.05 and 0.8 settle at 82% acceptance, so `adapt_t60`
   uses 0.9294 for its stated 0.6. Logged: `accepted`, `trial_loss`, `lr_multiplier`, and `lr` is the effective rate.

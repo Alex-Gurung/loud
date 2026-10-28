@@ -5,12 +5,13 @@ d_t is the gradient of the summed loss with respect to W's output at token t whe
 model's own softmax: the true Fisher's output-side Kronecker factor (K-FAC's G). Each sequence's training forward
 feeds one extra backward for these labels, to the layer outputs only (no weight gradients). Every FISHER_EVERY updates
 (from update 1), R = (S + fisher_damping * mean eig(S) * I)^(-1/2) by eigh. ANVIL II's polar(pending) becomes
-R @ pending, scaled to the polar factor's Frobenius norm sqrt(min(rows, cols)), so its rates keep their meaning; the
+R @ pending, scaled to the Frobenius norm polar(pending) has (about sqrt(min(rows, cols)), less where the pending update
+has small singular values), so the step's size is ANVIL II's and only its direction changes; the
 rails, per-lane gain, decay and rates are unchanged. fisher_damping is the one knob: large values flatten R towards
 the identity (the raw pending update), small ones whiten the output side fully.
 
 The labels come from a generator seeded by the job's seed. Cost per sequence: one backward to the outputs (about a
-third of a training step) and the d^T d products (about 90 GFLOP for the 38M model); every 10 updates, 48 eighs.
+third of a training step) and the d^T d products (about 180 GFLOP for the 38M model); every 10 updates, 48 eighs.
 The plan's kernel version (the curvature term and sampled-label loss from the Cut chain's probes) waits on this test:
 if it fails, that work is skipped.
 """
@@ -27,8 +28,8 @@ SAMPLE_SEED = 7919    # offset of the label generator's seed from the job's
 class FisherFactor:
     """The E9 shaper of ShapedAnvil (loud/anvil.py), and the hooks that measure S on the training forwards."""
 
-    def __init__(self, o, model, seed):
-        self.damping = o['fisher_damping']
+    def __init__(self, o, model, seed, polar):
+        self.damping, self.polar = o['fisher_damping'], polar
         self.model, self.vocab = model, model.config.vocab_size
         named = [(n, p) for n, p in model.named_parameters() if is_anvil_matrix(n, p)]
         self.index = {id(p): i for i, (_, p) in enumerate(named)}
@@ -75,7 +76,7 @@ class FisherFactor:
 
     def direction(self, p, pending):
         update = self.R[self.index[id(p)]] @ pending
-        return update * (min(pending.shape) ** 0.5 / update.norm().clamp_min(1e-30))
+        return update * (self.polar(pending).norm() / update.norm().clamp_min(1e-30))
 
     def after_step(self, model, batch, pergrad=None):
         pass

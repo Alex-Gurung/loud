@@ -24,6 +24,16 @@ SEED_DIR = re.compile(r'^s(\d+)$')
 ATTEMPT_DIR = re.compile(r'^(s\d+)\.attempt\d+$')
 
 
+# heldout.jsonl fields that mark a score of something other than the run's weights: a trajectory mean, an E3 copy,
+# midpoint or mean of copies
+OTHER_SCORES = ('mean_decay', 'copy', 'midpoint', 'mean')
+
+
+def own_score(h):
+    """Whether a heldout.jsonl entry scores the run's own weights."""
+    return h.get('heldout_loss') is not None and not any(k in h for k in OTHER_SCORES)
+
+
 def runs(root=RUNS, experiment=None, active=()):
     """(rows with a result.json, directories without a finished run: seed directories with no result.json, and
     attempts of seeds that never finished, marked running when their path is in `active`)."""
@@ -49,7 +59,7 @@ def runs(root=RUNS, experiment=None, active=()):
             experiment=exp, variant=variant, seed=int(SEED_DIR.match(run_dir.name).group(1)),
             val_loss=result.get('val_loss'), test_loss=result.get('test_loss'),
             heldout_loss=result.get('heldout_loss'),
-            heldout_min=min((h['heldout_loss'] for h in heldout if 'mean_decay' not in h), default=None),
+            heldout_min=min((h['heldout_loss'] for h in heldout if own_score(h)), default=None),
             train_seconds=result.get('train_seconds'), wall_seconds=result.get('wall_seconds'),
             complete=result.get('complete', True), check=(result.get('check') or {}).get('status'),
             gpu=result.get('gpu'), torch=(config.get('environment') or {}).get('torch'),

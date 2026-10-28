@@ -253,8 +253,12 @@ def proxy_options(args):
         raise ValueError('cap_quantile must be in (0, 1]')
     if not 0.5 < o['agree_threshold'] <= 1:
         raise ValueError('agree_threshold must be in (0.5, 1]: at least half the tokens always share the majority sign')
-    if o['per_sequence_grads'] and variants and variants[0] not in ('step_control', 'curvature_damping'):
+    if o['per_sequence_grads'] and variants and variants[0] not in ('step_control', 'curvature_damping',
+                                                                      'fisher_damping'):
         raise ValueError(f"per_sequence_grads reads each sequence's plain gradient, which {variants[0]} replaces")
+    for key in ('damp_directions', 'damp_every', 'damp_where'):
+        if key in args and not o['curvature_damping']:
+            raise ValueError(f'{key} acts only with curvature_damping')
     if o['curvature_damping'] < 0 or o['fisher_damping'] < 0:
         raise ValueError('curvature_damping and fisher_damping must be >= 0 (0 = off)')
     if o['end_merge'] and not (o['recipe'] in ('pr40', 'pr46') and o['means'] and o['heldout']):

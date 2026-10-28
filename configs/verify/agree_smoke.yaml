@@ -1,0 +1,15 @@
+# A complete short run on the 1M range (E10's agree) before its experiment's cells: the GPU paths the CPU checks cannot reach,
+# and the step time behind the README's cost estimate.
+experiment: verify
+variant: agree_smoke
+task: proxy
+seeds: [0]
+priority: 3
+after: [verify.smoke.s0]
+args:
+  recipe: boostcut
+  sequences: 1M
+  heldout: 32
+  batch: 8
+  token_shaping: agree
+notes: Pipeline check only; its numbers are not a result.

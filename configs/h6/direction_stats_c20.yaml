@@ -1,5 +1,5 @@
-# H6 on e1.bp_b4.s0's 20% checkpoint. E8's diagnostic: per block matrix, the curvature and across-sequence noise along the top 16
-# singular directions of the batch gradient, and h^2 / c.
+# H6 on e1.bp_b4.s0's 20% checkpoint. E8's diagnostic: per ANVIL II matrix, the curvature and across-sequence noise along the top
+# 16 singular directions of the pending update (rebuilt from the optimizer state saved with the checkpoint), and h^2 / c.
 experiment: h6
 variant: direction_stats_c20
 task: diagnose

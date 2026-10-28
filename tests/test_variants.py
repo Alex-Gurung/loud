@@ -36,7 +36,7 @@ def test_proxy_variant_options(args, error):
 @pytest.mark.parametrize('args, error', [
     (dict(), 'rule must be'),
     (dict(rule='vote'), 'rule must be'),
-    (dict(rule='average', checkpoints=True), 'at their defaults'),
+    (dict(rule='average', means=True), 'at their defaults'),
     (dict(rule='average', fisher_damping=0.1), 'at their defaults'),
     (dict(rule='average', copies=1), 'at least two'),
     (dict(rule='average', heldout=0), 'held-out'),

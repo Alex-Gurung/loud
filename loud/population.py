@@ -113,11 +113,12 @@ class Population:
     def scores(self, step, reason):
         return [self.heldout.score(c.model, step, reason, copy=i) for i, c in enumerate(self.copies)]
 
-    def checkpoint(self, r, step):
-        """After every N rounds and at the end: log the copies and midpoints, then apply the rule."""
+    def checkpoint(self, r, step, last=False):
+        """After every N rounds and at the end: log the copies and midpoints, then apply the rule. Scores a rule
+        decides on are timed (select's every time, the ensemble's choice at the end); the rest is monitoring."""
         rule = self.o['rule']
-        if rule == 'select':
-            copies = self.scores(step, 'select')
+        if rule == 'select' or (rule == 'ensemble' and last):
+            copies = self.scores(step, rule)
         else:
             with self.clock.paused():
                 copies = self.scores(step, 'monitor')
@@ -150,8 +151,7 @@ class Population:
         if rule == 'select':  # the scores taken before the last selection still name the best copy
             best = copies.index(min(copies))
             return self.copies[best].model, dict(final=f'copy {best}', final_copy_scores=copies)
-        copies = self.scores(step, 'ensemble')
-        load_mean(self.scratch, self.models())
+        load_mean(self.scratch, self.models())  # the copies' scores are the last checkpoint()'s
         mean = self.heldout.score(self.scratch, step, 'ensemble', mean=True)
         best = copies.index(min(copies))
         choice = dict(final_copy_scores=copies, final_mean_score=mean)
@@ -229,7 +229,7 @@ def run(spec, run_dir):
                     checkpoints.save(member.model, pending[0], copy=c)
             pending.pop(0)
         if r % o['every'] == 0 or r == rounds:
-            scores = population.checkpoint(r, step)
+            scores = population.checkpoint(r, step, last=r == rounds)
     model, choice = population.final(step, scores)
     clock.sync()
     elapsed = clock.elapsed()

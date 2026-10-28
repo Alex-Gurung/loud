@@ -14,7 +14,7 @@ from functools import partial
 from pathlib import Path
 import statistics
 
-from .collect import counts, runs
+from .collect import counts, own_score, runs
 from .common import read_json, read_jsonl
 from .paths import ARTIFACTS, RUNS
 
@@ -110,7 +110,7 @@ def curves_plot(plt, by_variant, palette, out, title, window=25):
             train.append({m['seqs']: y for m, y in zip(records, smooth)})
             held.append({seqs.get(h['step'], 0): h['heldout_loss']
                          for h in read_jsonl(Path(r['run_dir']) / 'heldout.jsonl')
-                         if 'mean_decay' not in h and h.get('heldout_loss') is not None})
+                         if own_score(h)})
         for ax, series in ((train_ax, train), (held_ax, held)):
             xs, ys = seed_mean([s for s in series if s])
             if xs:
@@ -297,8 +297,8 @@ def e12_table(out, target=3.5):
     if not rows:
         return None
     text = markdown(['variant', 'n', 'val', 'val, plain weights', f'reaches {target}'], rows)
-    text += ('\nThe records\' val is after their end merge; the backprop proxies (bp_*) have no merge, so compare them '
-             'with the plain column.\n')
+    text += ('\nBoth the records and the backprop proxies (bp_*) run the record\'s end merge: compare val with val and '
+             'the plain weights with the plain weights.\n')
     (out / 'summary.md').write_text(text)
     return text
 

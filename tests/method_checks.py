@@ -302,6 +302,16 @@ def diagnostics(scratch):
     pending, _ = tools.direction_stats(row, fake, directions=1)
     assert pending['directions_from'] == 'pending update'
     assert all(len(pending[n]) == 1 and pending[n][0]['noise'] >= 0 for n in names)
+    # and from the state a checkpoint really saves (ANVIL II's matrices: the value-embedding gates are Adam's)
+    from loud.checkpoints import FractionCheckpoints
+    optimizer = m.make_optimizer(model, m.Recipe(), 10)
+    for p in model.parameters():
+        p.grad = torch.randn_like(p)
+    optimizer.step()
+    saved = FractionCheckpoints(Path(scratch), 2).save(model, 1, optimizer)
+    state = torch.load(saved.with_suffix('.optim.pt'), weights_only=True)
+    real, _ = tools.direction_stats(row, state, directions=1)
+    assert real['directions_from'] == 'pending update', 'the saved state does not cover direction_stats matrices'
 
 
 def tokens(n, seed=1, vocab=4096):
@@ -397,7 +407,7 @@ def variants_blur(scratch):
 
 
 def optimizer_state(trainer):
-    """Copies of the weights, every optimizer state tensor (in parameter order) and the step clocks."""
+    """Copies of the weights, every optimizer state tensor (in parameter order) and the optimizers' clocks."""
     held = [p.detach().clone() for p in trainer.model.parameters()]
     for o in trainer.optimizer.optimizers:
         for p in trainer.model.parameters():
@@ -405,14 +415,14 @@ def optimizer_state(trainer):
     return held, [getattr(o, 't', None) for o in trainer.optimizer.optimizers]
 
 
-def same_state(a, b):
-    return a[1] == b[1] and len(a[0]) == len(b[0]) and all(torch.equal(u, v) for u, v in zip(a[0], b[0]))
+def same_tensors(a, b):
+    return len(a[0]) == len(b[0]) and all(torch.equal(u, v) for u, v in zip(a[0], b[0]))
 
 
 def variants_control(scratch, recipe='boostcut'):
-    """E4: a rejected update leaves the weights, every optimizer tensor and the clocks exactly as before (after the
-    first update: as a fresh optimizer, so the retried update equals a fresh trainer's); adapt's multiplier follows
-    the outcomes; warmdown 0 holds the rates constant."""
+    """E4: a rejected update leaves the weights and every optimizer tensor exactly as before (after the first update:
+    as a fresh optimizer), while ANVIL II's schedule clock advances with the loop, so the next update equals a fresh
+    trainer's at that clock; adapt's multiplier follows the outcomes; warmdown 0 holds the rates constant."""
     from loud.options import proxy_options
     from loud.proxy import Backprop, Reference
     reference = Reference(recipe, 1.0, '2m')
@@ -428,19 +438,23 @@ def variants_control(scratch, recipe='boostcut'):
     after = optimizer_state(trainer)
     weights = len(list(trainer.model.parameters()))
     assert all(torch.equal(u, v) for u, v in zip(before[0], after[0][:weights]))
-    assert after[1] == before[1] and all(not t.any() for t in after[0][weights:]), 'not a fresh optimizer'
+    assert all(not t.any() for t in after[0][weights:]), 'not a fresh optimizer'
+    assert after[1][0] == before[1][0] + 1, "ANVIL II's clock must follow the loop's updates"
     del trainer.batch_loss  # the real trial forward again
-    _, fields = trainer.update(1, rows)
+    _, fields = trainer.update(2, rows)
     fresh = Backprop(proxy_options(dict(recipe=recipe, preset='2m', batch=2)), reference, cpu, 0, 10)
-    fresh.update(1, rows)
+    fresh.optimizer.optimizers[0].t = 1
+    fresh.update(2, rows)
     assert fields['accepted'] and fields['trial_loss'] < 10, fields
     assert all(torch.equal(a, b) for a, b in zip(trainer.model.parameters(), fresh.model.parameters()))
 
-    trainer.update(2, tokens(2, seed=2))
+    trainer.update(3, tokens(2, seed=2))
     held = optimizer_state(trainer)
     trainer.batch_loss = reject
-    trainer.update(3, tokens(2, seed=3))
-    assert same_state(held, optimizer_state(trainer)), 'a mid-run rejection is not undone exactly'
+    trainer.update(4, tokens(2, seed=3))
+    later = optimizer_state(trainer)
+    assert same_tensors(held, later), 'a mid-run rejection is not undone exactly'
+    assert later[1][0] == held[1][0] + 1
     if recipe != 'boostcut':
         return
 
@@ -709,7 +723,7 @@ def fisher_factor(scratch):
     p = dict(model.named_parameters())[names[0]]
     pending = torch.randn(p.shape, generator=torch.Generator().manual_seed(11))
     update = shaper.direction(p, pending)
-    assert abs(update.norm().item() - min(p.shape) ** 0.5) < 1e-3
+    assert abs(update.norm().item() - m.polar(pending).norm().item()) < 1e-3  # the step's size stays ANVIL II's
     assert torch.allclose(update / update.norm(), R @ pending / (R @ pending).norm(), atol=1e-6)
 
 
