@@ -38,7 +38,7 @@ def main():
         stale = now - w['seen']
         state = w['state'] if stale <= LEASE_SECONDS or w['state'].startswith('exited') else f'LOST ({w["state"]})'
         print(f'  {w["worker"]:44s} {state:36s} {w.get("job") or "":34s} seen {age(stale)} ago  '
-              f'gpu {w.get("gpu")}  done {w.get("completed", 0)}')
+              f'gpu {w.get("gpus", 1)} x {w.get("gpu")}  done {w.get("completed", 0)}')
     for log in sorted((q.root / 'bootstrap_logs').glob('*.log')):
         found = re.search(r'startup exit=(\d+) phase=(\S+)', last_line(log) or '')
         if found and found.group(1) != '0' and now - log.stat().st_mtime < RECENT:
@@ -62,7 +62,8 @@ def main():
     print(f'\nqueued ({len(queued)}):')
     for j in queued:
         state, why = q.dependency_state(j, finished)
-        gpu = f'  needs {j["gpu"]}' if j.get('gpu') else ''
+        count = j['spec'].get('gpus', 1)
+        gpu = (f'  needs {j["gpu"]}' if j.get('gpu') else '') + (f'  needs {count} GPUs' if count > 1 else '')
         print(f'  {j["id"]:40s} priority {j.get("priority", 100):4d}  {state}{": " + why if why else ""}{gpu}')
 
     print(f'\nfailed ({len(failed)}):')

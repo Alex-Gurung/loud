@@ -1,0 +1,15 @@
+# Runs before E9: a complete short run (the 1M range, 114 updates of 4) with E9's true-Fisher left factor on the GPU:
+# the sampled-label backward on every forward, the inverse roots and the preconditioned steps. A few minutes.
+experiment: verify
+variant: fisher_smoke
+task: proxy
+seeds: [0]
+priority: 3
+after: [verify.smoke.s0]
+args:
+  recipe: boostcut
+  sequences: 1M
+  heldout: 32
+  batch: 4
+  fisher_damping: 0.1
+notes: Pipeline check only; its numbers are not a result.

@@ -56,9 +56,17 @@ def test_means_follow_the_record():
     ('args: {stop_after: wrong}', 'stop_after must be an integer'),
     ('priority: high', 'priority must be an integer'),
     ('gpu: [H100, H200]', 'gpu must be'),
+    ('gpus: 3', 'gpus must be 1, 2, 4 or 8'),
+    ('gpus: 8', 'task proxy uses one GPU'),
     ('args: {checkpoints: 1}', 'checkpoints must be true or false'),
     ('expect: {val_loss: 3.5}', r'needs \[target, tolerance'),
     ('expect: {val_los: [3.5, 0.1]}', "no 'val_los'"),
+    ('args: {smooth_tau: 1, token_shaping: cap}', 'one change per variant'),
+    ('args: {step_control: reject, accept_down: 0.9}', 'accept_down acts only with step_control: adapt'),
+    ('args: {token_shaping: agree, agree_threshold: 0.5}', r'agree_threshold must be in \(0.5, 1\]'),
+    ('args: {per_sequence_grads: true, token_shaping: cap}', 'per_sequence_grads'),
+    ('args: {warmdown: 1.5}', 'warmdown must be a fraction'),
+    ('args: {step_control: undo}', 'step_control must be one of'),
 ])
 def test_bad_configs_fail_at_submission(tmp_path, text, error):
     path = tmp_path / 'c.yaml'
@@ -130,3 +138,111 @@ def test_submission_rejects_unknown_and_circular_dependencies(tmp_path):
     with pytest.raises(SystemExit, match='waits on itself'):
         check_dependencies([a, dict(id='e.b.s0', after=['e.a.s0'])], queue)
     check_dependencies([a, dict(id='e.b.s0', after=[])], queue)
+
+
+def test_launch_replaces_settings_and_rows_but_not_the_script(tmp_path):
+    """loud/launch.py runs a record script with some Settings fields replaced and the epoch cut to the first rows."""
+    import subprocess
+    import sys
+    script = tmp_path / 'record.py'
+    script.write_text(
+        'from dataclasses import asdict, dataclass\nimport json, sys\n'
+        'SEED = 0\n@dataclass\nclass Settings:\n    lr: float = 1.0\n    switch: float = 0.2\n'
+        'def load_rows(path, rows):\n    return list(range(rows))\n'
+        'def main():\n'
+        '    print(json.dumps(dict(seed=SEED, settings=asdict(Settings()), rows=len(load_rows("x/train.pt", 10)),'
+        ' val=len(load_rows("x/val.pt", 4)), argv=sys.argv[1:])))\n'
+        "if __name__ == '__main__':\n    main()\n")
+    launch = paths.SOURCE / 'loud' / 'launch.py'  # the code under test, not the live repo's
+    run = lambda *a: subprocess.run([sys.executable, str(launch), str(script), *a], capture_output=True, text=True)
+    out = json.loads(run('{"lr": 0.5}', '6', '2', '--output', 'o').stdout)
+    assert out == dict(seed=2, settings=dict(lr=0.5, switch=0.2), rows=6, val=4, argv=['--output', 'o'])
+    assert json.loads(run('{}', '0', '-').stdout) == dict(seed=0, settings=dict(lr=1.0, switch=0.2), rows=10, val=4,
+                                                         argv=[])
+    bad = run('{"lrr": 0.5}', '0', '-')
+    assert bad.returncode and 'Settings has no' in bad.stderr
+    from loud.launch import settings_fields
+    assert settings_fields(script) == {'lr', 'switch'}
+    record = paths.REPO / 'external' / 'noise' / 'train' / 'val' / 'run.py'
+    if record.exists():  # PR #46's record: boost_hub and mlp_output_credit are init=False
+        fields = settings_fields(record)
+        assert {'lr', 'anvil_lr', 'switch', 'betas'} <= fields and 'boost_hub' not in fields
+
+
+def fake_run(root, experiment, variant, seed, val, extra=None, summary=None):
+    run = root / 'runs' / experiment / variant / f's{seed}'
+    run.mkdir(parents=True)
+    if summary is not None:
+        (run / 'tool.json').write_text(json.dumps(summary))
+        (run / 'result.json').write_text(json.dumps(dict(complete=True, summary_file='tool.json')))
+        return
+    lines = [dict(step=s, seqs=8 * s, train_loss=8 - s / 50 + 0.01 * seed, **(extra(s) if extra else {}))
+             for s in range(1, 101)]
+    (run / 'metrics.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in lines))
+    (run / 'heldout.jsonl').write_text(''.join(json.dumps(dict(step=s, heldout_loss=7 - s / 60)) + '\n'
+                                               for s in (0, 50, 100)))
+    (run / 'result.json').write_text(json.dumps(dict(val_loss=val, complete=True, train_seconds=1.0)))
+
+
+def test_plots_read_only_the_run_files(tmp_path, monkeypatch):
+    pytest.importorskip('matplotlib')
+    from loud import plots
+    monkeypatch.setattr(plots, 'RUNS', tmp_path / 'runs')
+    monkeypatch.setattr(plots, 'ARTIFACTS', tmp_path)
+    drift = lambda s: dict(drift=dict(blend=0.5, fast=0.4, slow=0.3)) if s % 10 == 0 else {}
+    for seed in (0, 1, 2):
+        fake_run(tmp_path, 'e6', 'identity_k1', seed, 4.17 + 0.01 * seed, drift)
+        fake_run(tmp_path, 'e6', 'identity_k4', seed, 4.19 + 0.01 * seed, drift)
+    site = dict(p10=0.8, median=0.9, p90=0.95)
+    recovery = {s: {'guess_vs_direct': site, 'bf16 emb condition without_radial': site, 'bf16 emb ridge 0.0001': site,
+                    'bf16 mid0 ridge 0.0': site} for s in plots.SITES}
+    fake_run(tmp_path, 'e5', 'recovery_c20', 0, None, summary=dict(recovery, settings=dict(ridges=[0.0, 1e-4])))
+    fake_run(tmp_path, 'h6', 'credit_dump_c20', 0, None, summary={s: site for s in plots.SITES})
+    stats = {'transformer.h.0.attn.c_q.weight': [dict(h2_over_c=2.0), dict(h2_over_c=0.5)]}
+    fake_run(tmp_path, 'h6', 'direction_stats_c20', 0, None, summary=stats)
+    for seed in (0, 1):
+        fake_run(tmp_path, 'e1', 'bp_b8', seed, 3.71, lambda s: dict(lr=dict(anvil=0.02 * (1 - s / 120))))
+        fake_run(tmp_path, 'e4', 'adapt', seed, 3.70, lambda s: dict(accepted=s % 3 > 0, lr=dict(anvil=0.02)))
+        fake_run(tmp_path, 'e2', 'smooth_t3', seed, 3.69, lambda s: dict(blurred_loss=8.1 - s / 50))
+        fake_run(tmp_path, 'e8', 'lambda_3e1', seed, 3.70, lambda s: dict(damping={'mlp.c_fc': dict(
+            h=1.0, c=2.0, h2_over_c=0.5, factor=0.9, overlap=0.8)}) if s % 50 == 1 else {})
+        fake_run(tmp_path, 'e3', 'avg10', seed, 3.72)
+        (tmp_path / 'runs' / 'e3' / 'avg10' / f's{seed}' / 'population.jsonl').write_text(''.join(
+            json.dumps(dict(round=r, step=242 + 4 * r, barriers={'0-1': 0.01 * r, '0-2': -0.01})) + '\n'
+            for r in (10, 20)))
+    for experiment in ('e2', 'e3', 'e4', 'e8'):
+        plots.plot(experiment)
+    made = {p.relative_to(tmp_path / 'plots').as_posix() for p in (tmp_path / 'plots').rglob('*.*')}
+    assert {'e4/step_control.png', 'e3/barriers.png', 'e2/gap.md', 'e8/damping.md', 'e2/final.png'} <= made
+    assert '| baseline e1.bp_b8 | 2 | 3.7100 |' in (tmp_path / 'plots' / 'e2' / 'gap.md').read_text()
+    assert '| lambda_3e1 | mlp.c_fc | 0.5 | 0.9 | 0.8 |' in (tmp_path / 'plots' / 'e8' / 'damping.md').read_text()
+    timed = lambda s: dict(train_seconds=s * 6.0, val_loss=5 - s / 40) if s % 25 == 0 else {}
+    fake_run(tmp_path, 'e12', 'record', 0, 3.34, timed)
+    for experiment in ('e6', 'e5', 'e7', 'e8', 'e12'):
+        plots.plot(experiment)
+    assert (tmp_path / 'plots' / 'e12' / 'val_time.png').exists()
+    assert '| record | 1 | 3.3400 | - | 6.0 min (n=1) |' in (tmp_path / 'plots' / 'e12' / 'summary.md').read_text()
+    assert {p.name for p in (tmp_path / 'plots' / 'e6').iterdir()} == {'final.png', 'curves.png', 'drift.png'}
+    assert '| mid7 | 0.9 | 0.9 | 0.9 | 0.9 |' in (tmp_path / 'plots' / 'e5' / 'recovery.md').read_text()
+    assert '| emb | - | - | 0.9 | - | - |' in (tmp_path / 'plots' / 'e7' / 'credit_dump.md').read_text()
+    assert (tmp_path / 'plots' / 'e8' / 'h2_over_c.png').exists()
+
+
+def test_one_gpu_jobs_keep_their_config_hash(tmp_path):
+    """gpus enters a job's identity only above 1, so queued one-GPU jobs stay unchanged configs."""
+    from loud.common import digest
+    from loud.run import config_hash
+    path = tmp_path / 'c.yaml'
+    path.write_text('experiment: e\nvariant: v\ntask: proxy\n')
+    spec, _ = specs_from_config(path)[0]
+    assert config_hash(spec) == digest({k: spec[k] for k in ('experiment', 'variant', 'seed', 'task', 'args', 'expect')})
+    assert config_hash(dict(spec, task='reference', gpus=8)) != config_hash(dict(spec, task='reference'))
+
+
+@pytest.mark.skipif(not (paths.REPO / 'external' / 'noise').exists(), reason='needs the pinned Noise checkout')
+def test_reference_settings_are_checked_at_submission(tmp_path):
+    path = tmp_path / 'c.yaml'
+    path.write_text('experiment: e\nvariant: v\ntask: reference\ngpus: 8\n'
+                    'args: {script: [noise, train/val/run.py], settings: {lrr: 0.001}}\n')
+    with pytest.raises(ValueError, match=r"no Settings field \['lrr'\]"):
+        specs_from_config(path)

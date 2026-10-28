@@ -34,7 +34,7 @@ def patch_attention():
     um.attention = dense_attention
 
 
-def patch_sequences(length=SEQ, vocab=None):
+def patch_sequences(*loops, length=SEQ, vocab=None):
     real = data.benchmark_split
 
     def short(*args, **kwargs):
@@ -43,7 +43,8 @@ def patch_sequences(length=SEQ, vocab=None):
         if vocab is not None:
             split.train, split.heldout = split.train % vocab, split.heldout % vocab
         return split
-    train.benchmark_split, train.SEQ = short, length
+    for loop in (train, *loops):
+        loop.benchmark_split, loop.SEQ = short, length
 
 
 def proxy_gradient(scratch):
@@ -226,6 +227,35 @@ def diagnostics(scratch):
     linear, _ = tools.linearity_check(sigmas=(1e-3, 1e-1), draws=1)
     assert set(linear) == set(site_names(n_layer))
     assert all(r[f'{p} 0.001']['nonlinearity']['median'] >= 0 for r in linear.values() for p in ('float32', 'bf16'))
+    # E5's recovery: with x0 read only by block 0, every path from the embedding passes each mid site, so the solve
+    # recovers the direct credit off the radial direction (which the embedding's RMS norm hides to first order); the
+    # ridge toward the (here exact) identity-path guess fills that one in.
+    with torch.no_grad():
+        model.x0_lambdas[1:] = 0
+    recovery, per_token = tools.credit_recovery(ridges=(0.0, 1e-3), route_k=None, chunk=64)
+    for site in site_names(n_layer)[1:]:
+        assert recovery[site]['float32 emb ridge 0.001']['p10'] > 0.99, (site, recovery[site])
+        assert recovery[site]['float32 emb condition all']['median'] > 1e2  # the radial direction, at second order
+        assert recovery[site]['float32 emb condition without_radial']['median'] < 10
+    assert per_token['mid0 bf16 emb ridge 0.001'].shape == (SEQ - 1,)
+
+    # E5 on a model with live writers and MLPs: the chain arithmetic's direct cycles match autograd at every site, and
+    # block 0's cycle read further up (x0 held, so every path passes each later site) recovers the later sites'
+    # credit, up to this random model's nonlinearity (a smaller probe, 1e-3, keeps it small; the trained record's is
+    # far more linear) and bf16 rounding
+    model = m.make_model(torch.device('cpu'), 0, config)
+    with torch.no_grad():
+        for p in model.parameters():
+            p.add_(0.02 * torch.randn_like(p))
+    tools = Toolkit(m, model, settings, row[:1, :-1].contiguous(), row[:1, 1:].contiguous())
+    recovery, _ = tools.credit_recovery(ridges=(0.0,), route_k=None, chunk=64)
+    for site in site_names(n_layer):
+        assert recovery[site]['direct_vs_autograd']['p10'] > 0.999, (site, recovery[site]['direct_vs_autograd'])
+    recovery, _ = tools.credit_recovery(ridges=(0.0,), sigma=1e-3, route_k=None, chunk=64)
+    for site in site_names(n_layer)[2:]:
+        f32, b16 = (recovery[site][f'{p} mid0 ridge 0.0']['median'] for p in ('float32', 'bf16'))
+        assert f32 > 0.95 and abs(f32 - b16) < 0.05, (site, f32, b16)
+    assert recovery['mid1']['float32 mid0 ridge 0.0']['median'] > 0.995
 
     # direction_stats on a model with live writers: its finite-difference curvature against an exact
     # Hessian-vector product (double backward works with the dense attention used here), and the pending update
@@ -399,7 +429,7 @@ def cut_run(scratch):
     the record's end merge, timed."""
     cut_module()
     from loud.cut import run
-    patch_sequences(CUT_SEQ, CUT_VOCAB)
+    patch_sequences(length=CUT_SEQ, vocab=CUT_VOCAB)
     spec = dict(experiment='cpu', variant='cut', seed=0, task='cut', args=dict(
         preset='2m', sequences=20, heldout=8, batch=1, virtual_gpus=2, rows_start=64, rows_full_at=0.6,
         drift_every=3, checkpoints=True, heldout_every=4, official_eval=False))
@@ -415,6 +445,496 @@ def cut_run(scratch):
     assert result['holdout_merged'] <= result['holdout_plain'] and result['means_updates'] == 2
     assert result['train_seconds'] >= result['merge_seconds']
     assert {'final.pt', 'final_plain.pt', 'ckpt_100.pt'} <= {p.name for p in out.iterdir()}
+
+
+def tokens(n, seed=1, vocab=4096):
+    return torch.randint(0, vocab, (n, SEQ), generator=torch.Generator().manual_seed(seed))
+
+
+def variants_blur(scratch):
+    """E2 in float32 (no autocast): r has the documented length at all nine sites, + and - add the same r, and the
+    antithetic mean cancels the odd orders: far closer to the clean gradient than one displaced gradient, and closer
+    by about 4x when r halves. Then the trainer: the clean loss, and the mean of all 2 x micro-batches gradients."""
+    from loud.options import proxy_options
+    from loud.proxy import Backprop, Reference
+    from loud.variants import CHAIN_SIGMA, Blur
+    reference = Reference('boostcut', 1.0, '2m')
+    patch_attention()
+    cpu = torch.device('cpu')
+    model = reference.make_model(cpu, 0)
+    width, params = model.config.n_embd, list(model.parameters())
+    rows = tokens(2)
+    x, y = rows[:, :-1].contiguous(), rows[:, 1:].contiguous()
+
+    def gradient():
+        model.requires_grad_(True)
+        grads = torch.autograd.grad(model(x, y), params)
+        model.requires_grad_(False)
+        return torch.cat([g.reshape(-1) for g in grads])
+
+    sites, inputs = [], {}  # the clean activations at the sites, read with the test's own hooks
+    hooks = [model.transformer.wte.register_forward_hook(lambda m, a, out: sites.append(out))]
+    for i, block in enumerate(model.transformer.h):
+        hooks.append(block.register_forward_pre_hook(lambda m, a, i=i: inputs.__setitem__(i, a[0])))
+        hooks.append(block.attn.register_forward_hook(lambda m, a, out, i=i: sites.append(inputs[i] + out)))
+    with torch.no_grad():
+        clean = model(x, y)
+    for h in hooks:
+        h.remove()
+    clean_grad = gradient()
+
+    tau = 10.0
+    blur = Blur(model, tau, 0, cpu)
+    assert torch.equal(blur.measure(lambda: model(x, y)), clean)
+    assert len(blur.shifts) == len(sites) == 1 + model.config.n_layer
+    for a, r in zip(sites, blur.shifts):
+        expected = tau * CHAIN_SIGMA * a.square().mean(-1).sqrt() * width ** 0.5
+        assert torch.allclose(r.norm(dim=-1), expected, rtol=1e-5), 'r does not have the documented length'
+    for sign in (1, -1):  # each site's writer output moves by exactly sign * r
+        raw, moved = [], []
+        hooks = [model.transformer.wte.register_forward_hook(lambda m, a, out: raw.append(out), prepend=True)]
+        hooks += [b.attn.register_forward_hook(lambda m, a, out: raw.append(out), prepend=True)
+                  for b in model.transformer.h]
+        with blur.shifted(sign), torch.no_grad():
+            hooks += [model.transformer.wte.register_forward_hook(lambda m, a, out: moved.append(out))]
+            hooks += [b.attn.register_forward_hook(lambda m, a, out: moved.append(out)) for b in model.transformer.h]
+            model(x, y)
+        for h in hooks:
+            h.remove()
+        for before, after, r in zip(raw, moved, blur.shifts):
+            assert torch.allclose(after - before, sign * r, atol=1e-6), 'the two signs do not add the same r'
+
+    def displaced(sign):
+        with blur.shifted(sign):
+            return gradient()
+
+    plus, minus = displaced(1), displaced(-1)
+    one_sided, antithetic = (plus - clean_grad).norm(), ((plus + minus) / 2 - clean_grad).norm()
+    assert antithetic < 0.2 * one_sided, (antithetic, one_sided)
+    blur.shifts = [r / 2 for r in blur.shifts]
+    half = ((displaced(1) + displaced(-1)) / 2 - clean_grad).norm()
+    assert half < 0.4 * antithetic, (half, antithetic)  # second order: a quarter, up to higher orders
+
+    o = proxy_options(dict(preset='2m', batch=2, smooth_tau=3.0))
+    trainer = Backprop(o, reference, cpu, 0, 10)
+    loss = trainer.gradient(rows)
+    got = [p.grad.clone() for p in trainer.model.parameters()]
+    replay = Blur(trainer.model, 3.0, 0, cpu)  # the same generator stream, replayed by hand
+    sums, clean_losses, blurred = [torch.zeros_like(p, dtype=torch.float32) for p in got], [], []
+    for i in range(2):
+        micro = rows[i:i + 1]
+        clean_losses.append(replay.measure(lambda: trainer.loss_of(micro)))
+        for sign in (1, -1):
+            trainer.model.requires_grad_(True)
+            with replay.shifted(sign):
+                step_loss = trainer.loss_of(micro)
+                for s, g in zip(sums, torch.autograd.grad(step_loss, list(trainer.model.parameters()))):
+                    s += g.float()
+            trainer.model.requires_grad_(False)
+            blurred.append(step_loss.detach())
+    assert torch.equal(loss, torch.stack(clean_losses).mean()), 'the logged loss is not the clean loss'
+    assert torch.allclose(trainer.blurred, torch.stack(blurred).mean())
+    for g, s, p in zip(got, sums, trainer.model.parameters()):
+        assert torch.equal(g, (s / 4).to(p.dtype)), 'not the mean over sequences and both signs'
+    assert not trainer.model.transformer.wte._forward_hooks, 'the blur left a hook behind'
+
+
+def optimizer_state(trainer):
+    """Copies of the weights, every optimizer state tensor (in parameter order) and the step clocks."""
+    held = [p.detach().clone() for p in trainer.model.parameters()]
+    for o in trainer.optimizer.optimizers:
+        for p in trainer.model.parameters():
+            held += [v.clone() for _, v in sorted(o.state.get(p, {}).items()) if torch.is_tensor(v)]
+    return held, [getattr(o, 't', None) for o in trainer.optimizer.optimizers]
+
+
+def same_state(a, b):
+    return a[1] == b[1] and len(a[0]) == len(b[0]) and all(torch.equal(u, v) for u, v in zip(a[0], b[0]))
+
+
+def variants_control(scratch, recipe='boostcut'):
+    """E4: a rejected update leaves the weights, every optimizer tensor and the clocks exactly as before (after the
+    first update: as a fresh optimizer, so the retried update equals a fresh trainer's); adapt's multiplier follows
+    the outcomes; warmdown 0 holds the rates constant."""
+    from loud.options import proxy_options
+    from loud.proxy import Backprop, Reference
+    reference = Reference(recipe, 1.0, '2m')
+    patch_attention()
+    cpu, rows = torch.device('cpu'), tokens(2)
+    reject, accept = (lambda batch: torch.tensor(float('inf'))), (lambda batch: torch.tensor(-float('inf')))
+    o = proxy_options(dict(recipe=recipe, preset='2m', batch=2, step_control='reject'))
+    trainer = Backprop(o, reference, cpu, 0, 10)
+    before = optimizer_state(trainer)
+    trainer.batch_loss = reject
+    _, fields = trainer.update(1, rows)
+    assert fields['accepted'] is False and fields['trial_loss'] == float('inf')
+    after = optimizer_state(trainer)
+    weights = len(list(trainer.model.parameters()))
+    assert all(torch.equal(u, v) for u, v in zip(before[0], after[0][:weights]))
+    assert after[1] == before[1] and all(not t.any() for t in after[0][weights:]), 'not a fresh optimizer'
+    del trainer.batch_loss  # the real trial forward again
+    _, fields = trainer.update(1, rows)
+    fresh = Backprop(proxy_options(dict(recipe=recipe, preset='2m', batch=2)), reference, cpu, 0, 10)
+    fresh.update(1, rows)
+    assert fields['accepted'] and fields['trial_loss'] < 10, fields
+    assert all(torch.equal(a, b) for a, b in zip(trainer.model.parameters(), fresh.model.parameters()))
+
+    trainer.update(2, tokens(2, seed=2))
+    held = optimizer_state(trainer)
+    trainer.batch_loss = reject
+    trainer.update(3, tokens(2, seed=3))
+    assert same_state(held, optimizer_state(trainer)), 'a mid-run rejection is not undone exactly'
+    if recipe != 'boostcut':
+        return
+
+    o = proxy_options(dict(preset='2m', batch=2, step_control='adapt', accept_up=1.25, accept_down=0.5, warmdown=0))
+    trainer = Backprop(o, reference, cpu, 0, 10)
+    multipliers = []
+    for step, judge in zip(range(1, 11), (accept, accept, reject, accept) * 3):
+        trainer.batch_loss = judge
+        _, fields = trainer.update(step, rows)
+        multipliers.append(fields['lr_multiplier'])
+        assert fields['lr']['anvil'] == reference.settings.anvil_lr * fields['lr_multiplier']  # constant schedule
+    assert multipliers[:5] == [1.0, 1.25, 1.5625, 0.78125, 0.9765625]
+
+
+def variants_control_pr40(scratch):
+    """The same exact undo with PR #40's batched ANVIL II, whose per-matrix state is views into stacked tensors."""
+    variants_control(scratch, 'pr40')
+
+
+def variants_shaping(scratch):
+    """E10 against a brute-force per-token computation: credits read with retain_grad on each nn.Linear output, every
+    token's contribution formed and counted explicitly; and agree at threshold 0.5 keeps the plain gradient exactly."""
+    from torch import nn
+    from loud.options import proxy_options
+    from loud.proxy import Backprop, Reference
+    from loud.variants import TokenShaping
+    reference = Reference('boostcut', 1.0, '2m')
+    patch_attention()
+    cpu, rows = torch.device('cpu'), tokens(2)
+    plain = Backprop(proxy_options(dict(preset='2m', batch=2)), reference, cpu, 0, 10)
+    plain.gradient(rows)
+    plain_grads = {n: p.grad.clone() for n, p in plain.model.named_parameters()}
+    model = plain.model
+    linears = {n + '.weight': m for n, m in model.named_modules() if isinstance(m, nn.Linear)}
+
+    credits, inputs = {n: [] for n in linears}, {n: [] for n in linears}
+    for i in range(2):  # brute force: each sequence's credits at every linear output
+        outputs, hooks = {}, []
+        for n, m in linears.items():
+            def hook(module, args, out, n=n):
+                out.retain_grad()
+                outputs[n] = out
+                inputs[n].append(args[0].to(out.dtype).reshape(-1, args[0].shape[-1]).float())
+            hooks.append(m.register_forward_hook(hook))
+        model.requires_grad_(True)
+        plain.loss_of(rows[i:i + 1]).backward()
+        model.requires_grad_(False)
+        model.zero_grad(set_to_none=True)
+        for h in hooks:
+            h.remove()
+        for n, out in outputs.items():
+            credits[n].append(out.grad.reshape(-1, out.shape[-1]).float())
+    credits = {n: torch.cat(c) for n, c in credits.items()}
+    inputs = {n: torch.cat(c) for n, c in inputs.items()}
+
+    def shaped(**options):
+        trainer = Backprop(proxy_options(dict(preset='2m', batch=2, **options)), reference, cpu, 0, 10)
+        trainer.gradient(rows)
+        return {n: p.grad for n, p in trainer.model.named_parameters()}
+
+    def close(a, b):
+        return (a - b).norm() <= 1e-2 * b.norm() + 1e-12
+
+    got = shaped(token_shaping='cap', cap_quantile=0.9)
+    for n in linears:
+        norms = credits[n].norm(dim=-1)
+        scale = (torch.quantile(norms, 0.9) / norms.clamp_min(1e-30)).clamp(max=1)
+        assert (scale < 1).any() and (scale == 1).any()
+        expected = torch.einsum('ti,tj->ij', credits[n] * scale[:, None], inputs[n]) / 2  # mean over 2 sequences
+        assert close(got[n], expected), f'cap differs at {n}'
+    for n in plain_grads:
+        if n not in linears:
+            assert torch.equal(got[n], plain_grads[n]), f'cap changed {n}, which is not a linear weight'
+
+    for threshold in (0.6, 0.8):
+        got = shaped(token_shaping='agree', agree_threshold=threshold)
+        dropped = kept = 0
+        for n in linears:
+            positive = negative = torch.zeros(credits[n].shape[1], inputs[n].shape[1])
+            for g, x in zip(credits[n], inputs[n]):  # one token at a time
+                product = torch.outer(g, x)
+                positive, negative = positive + (product > 0), negative + (product < 0)
+            mask = torch.maximum(positive, negative) >= threshold * (positive + negative)
+            assert torch.equal(got[n], plain_grads[n] * mask) or close(got[n], plain_grads[n] * mask), n
+            dropped, kept = dropped + int((~mask).sum()), kept + int(mask.sum())
+        assert dropped and kept, (threshold, dropped, kept)
+
+    o = dict(proxy_options(dict(preset='2m', batch=2, token_shaping='agree')), agree_threshold=0.5)
+    trainer = Backprop(o, reference, cpu, 0, 10)
+    assert isinstance(trainer.shaping, TokenShaping)
+    trainer.gradient(rows)
+    for n, p in trainer.model.named_parameters():  # the hook's matmul is autograd's own, bit for bit
+        assert torch.equal(p.grad, plain_grads[n]), f'threshold 0.5 changed {n}'
+
+
+def variants_run(scratch):
+    """The whole loop with each variant: the experiment series land in metrics.jsonl; the default trainer builds none
+    of them."""
+    from loud.options import proxy_options
+    from loud.proxy import Backprop, Reference, run
+    reference = Reference('boostcut', 1.0, '2m')
+    patch_attention()
+    patch_sequences()
+    default = Backprop(proxy_options(dict(preset='2m', batch=2)), reference, torch.device('cpu'), 0, 10)
+    assert default.blur is None and default.control is None and default.shaping is None
+    for variant, args, fields in (('adapt', dict(step_control='adapt', warmdown=0), {'accepted', 'lr_multiplier'}),
+                                  ('blur', dict(smooth_tau=3.0), {'blurred_loss'}),
+                                  ('cap', dict(token_shaping='cap'), set()),
+                                  ('agree', dict(token_shaping='agree'), set())):
+        spec = dict(experiment='cpu', variant=variant, seed=0, task='proxy', args=dict(
+            preset='2m', sequences=24, heldout=4, batch=4, official_eval=False, **args))
+        out = Path(scratch) / variant
+        result = run(spec, out)
+        metrics = [json.loads(line) for line in (out / 'metrics.jsonl').read_text().splitlines()]
+        assert result['complete'] and len(metrics) == 5 and all(fields <= set(m) for m in metrics), variant
+        assert all(torch.isfinite(torch.tensor(m['train_loss'])) for m in metrics), variant
+
+
+def proxy_trainer(**args):
+    from loud.options import proxy_options
+    from loud.proxy import Backprop, Reference
+    reference = Reference('boostcut', 1.0, '2m')
+    patch_attention()
+    o = proxy_options(dict(dict(preset='2m', batch=4), **args))
+    return Backprop(o, reference, torch.device('cpu'), 0, 10), reference.module
+
+
+def batches(count, vocab, seed=6):
+    return torch.randint(0, vocab, (count, 4, SEQ), generator=torch.Generator().manual_seed(seed))
+
+
+def anvil_hook(scratch):
+    """ShapedAnvil whose shaper returns polar(pending) steps exactly as boost-cut's Anvil, and leaves Anvil in place."""
+    from loud.anvil import shaped_optimizer
+    trainer, m = proxy_trainer()
+    original = m.Anvil
+    twin = copy.deepcopy(trainer.model)
+    polar = type('Polar', (), dict(direction=lambda self, p, pending: m.polar(pending)))()
+    shaped = shaped_optimizer(m, twin, trainer.reference.settings, 10, polar)
+    assert m.Anvil is original and type(trainer.optimizer.optimizers[0]) is original
+    for rows in batches(3, trainer.model.config.vocab_size):
+        for model, optimizer in ((trainer.model, trainer.optimizer), (twin, shaped)):
+            model.requires_grad_(True)
+            model(rows[:, :-1].contiguous(), rows[:, 1:].contiguous()).backward()
+            model.requires_grad_(False)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+    for (name, a), b in zip(trainer.model.named_parameters(), twin.parameters()):
+        assert torch.equal(a, b), f'{name}: ShapedAnvil does not reproduce Anvil'
+
+
+def curvature_damping(scratch):
+    """E8: the tracked directions are the pending update's top singular directions; h matches an exact Hessian-vector
+    product; c is the across-sequence variance of the projections; the factors follow the formula; 'step' damps after
+    polar() and 'pending' before it, where polar() undoes most of it."""
+    from loud.curvature import CURVATURE_ROWS, damp
+    trainer, m = proxy_trainer(per_sequence_grads=True, curvature_damping=3.0, damp_directions=2, damp_every=2)
+    shaper, model = trainer.shaper, trainer.model
+    rows = batches(3, model.config.vocab_size)
+    trainer.update(1, rows[0])  # a refresh: at update 1, fast and slow are multiples of g, so pending is too
+    params = dict(model.named_parameters())
+    for i, name in enumerate(shaper.names):
+        a, b = shaper.left[i], shaper.right[i]
+        assert torch.allclose(a.T @ a, torch.eye(2), atol=1e-5) and torch.allclose(b.T @ b, torch.eye(2), atol=1e-5)
+        u, _, vh = torch.linalg.svd(trainer.accumulators[list(params).index(name)], full_matrices=False)
+        assert (u[:, :2] * a).sum(0).abs().min() > 0.999 and (vh[:2].T * b).sum(0).abs().min() > 0.999, name
+        g = trainer.pergrad.stack(name).float()
+        projections = torch.einsum('brc,rk,ck->bk', g, a, b)
+        assert torch.allclose(shaper.noise[i], projections.var(0), rtol=1e-4)
+
+    i = shaper.names.index('transformer.h.1.mlp.c_fc.weight')
+    d = torch.outer(shaper.left[i][:, 0], shaper.right[i][:, 0])
+    exact_model = copy.deepcopy(model).float().requires_grad_(True)
+    weight = dict(exact_model.named_parameters())[shaper.names[i]]
+    curvature_rows = rows[0][:CURVATURE_ROWS]
+    with torch.enable_grad():
+        loss = exact_model(curvature_rows[:, :-1].contiguous(), curvature_rows[:, 1:].contiguous())
+        g = torch.autograd.grad(loss, weight, create_graph=True)[0]
+        hvp = torch.autograd.grad((g * d).sum(), weight)[0]
+    exact_h = (hvp * d).sum().item()
+    assert abs(shaper.h[i][0].item() - exact_h) < 2e-2 * abs(exact_h) + 1e-6, (shaper.h[i][0].item(), exact_h)
+
+    trainer.diagnose(1)
+    trainer.update(2, rows[1])  # not a refresh: one more noise sample, factors from the formula
+    lr = trainer.reference.settings.anvil_lr
+    for i, name in enumerate(shaper.names):
+        p = params[name]
+        scale = 3.0 * lr ** 2 * max(1, p.size(0) / p.size(1))
+        expected = 1 / (1 + (shaper.noise[i] / 2) / (4 * shaper.h[i].square() * scale))
+        assert shaper.samples == 2 and torch.allclose(shaper.factors[i], expected, rtol=1e-5)
+    trainer.diagnose(2)
+    trainer.update(3, rows[2])  # a refresh again: new directions, and a summary with their overlap
+    report = trainer.diagnose(3)['damping']
+    assert {'h', 'c', 'h2_over_c', 'factor', 'overlap'} <= set(report['mlp.c_fc'])
+
+    p = params[shaper.names[i]]
+    pending = torch.randn(p.shape, generator=torch.Generator().manual_seed(7))
+    a, b, f = shaper.left[i], shaper.right[i], shaper.factors[i]
+    shaper.refreshing = False
+    assert torch.equal(shaper.direction(p, pending), damp(m.polar(pending), a, b, f))
+    shaper.where = 'pending'
+    assert torch.equal(shaper.direction(p, pending), m.polar(damp(pending, a, b, f)))
+    x = torch.randn(p.shape, generator=torch.Generator().manual_seed(8))
+    coefficient = lambda y: (a.T @ y * b.T).sum(1)
+    assert torch.allclose(coefficient(damp(x, a, b, f)), f * coefficient(x), atol=1e-5)
+    rest = lambda y: y - a @ torch.diag(coefficient(y)) @ b.T
+    assert torch.allclose(rest(damp(x, a, b, f)), rest(x), atol=1e-5)  # other directions are left alone
+
+    # why 'step' is the default: halving a gradient-like matrix's top singular directions before polar() leaves them
+    # at about 1 after it; halving them after polar() halves them
+    U, _ = torch.linalg.qr(torch.randn(128, 128, generator=torch.Generator().manual_seed(9)))
+    V, _ = torch.linalg.qr(torch.randn(128, 128, generator=torch.Generator().manual_seed(10)))
+    G = U @ torch.diag(torch.logspace(0, -3, 128)) @ V.T
+    a, b, half = U[:, :4], V[:, :4], torch.full((4,), 0.5)
+    top = lambda y: (a.T @ y * b.T).sum(1)
+    assert top(m.polar(damp(G, a, b, half))).min() > 0.9
+    assert top(damp(m.polar(G), a, b, half)).max() < 0.6
+
+
+def fisher_factor(scratch):
+    """E9: the sums of d d^T come from the sampled-label gradient at each block matrix's output (checked against an
+    independent forward, token by token), leave the training gradient untouched, and the update is the damped inverse
+    root of S times the pending update at the polar factor's norm."""
+    from loud.fisher import SAMPLE_SEED, inverse_root
+    trainer, m = proxy_trainer(fisher_damping=0.1)
+    plain, _ = proxy_trainer()
+    shaper, model = trainer.shaper, trainer.model
+    rows = batches(1, model.config.vocab_size)[0]
+    trainer.gradient(rows)
+    plain.gradient(rows)
+    for (name, p), q in zip(model.named_parameters(), plain.model.parameters()):
+        assert torch.equal(p.grad, q.grad), f'{name}: the sampled-label backward leaked into the training gradient'
+
+    reference = copy.deepcopy(plain.model).requires_grad_(True)
+    names = [n for n, p in reference.named_parameters() if n.startswith('transformer.h.') and p.ndim == 2
+             and 've_gate' not in n]
+    modules = dict(reference.named_modules())
+    generator = torch.Generator().manual_seed(0 + SAMPLE_SEED)  # the job seed (0) + the label generator's offset
+    expected = [0] * len(names)
+    for micro in rows.split(1):
+        outputs = {}
+        hooks = [modules[n.removesuffix('.weight')].register_forward_hook(
+            lambda mod, args, out, n=n: outputs.__setitem__(n, out)) for n in names]
+        with torch.autocast('cpu', dtype=torch.bfloat16):
+            logits = reference(micro[:, :-1].contiguous())
+        for h in hooks:
+            h.remove()
+        sampled = torch.multinomial(logits.detach().softmax(-1).flatten(0, 1), 1, generator=generator)
+        loss = torch.nn.functional.cross_entropy(logits.flatten(0, 1), sampled.flatten(), reduction='sum')
+        deltas = torch.autograd.grad(loss, [outputs[n] for n in names])
+        for j, d in enumerate(deltas):
+            d = d[0].float()
+            expected[j] = expected[j] + sum(torch.outer(d[t], d[t]) for t in range(d.shape[0]))  # token by token
+    for j, name in enumerate(names):
+        assert torch.allclose(shaper.batch_sum[j], expected[j], rtol=1e-3, atol=1e-6), name
+    tokens = 4 * (SEQ - 1)
+    assert shaper.tokens == tokens
+
+    shaper.before_step(1)
+    S, R = shaper.S[0], shaper.R[0]
+    assert torch.allclose(S, expected[0] / tokens, rtol=1e-3, atol=1e-9)
+    damped = S + 0.1 * torch.linalg.eigvalsh(S).clamp_min(0).mean() * torch.eye(len(S))
+    assert torch.allclose(R @ damped @ R, torch.eye(len(S)), atol=1e-3)
+    assert torch.allclose(inverse_root(S, 0.1), R)
+    p = dict(model.named_parameters())[names[0]]
+    pending = torch.randn(p.shape, generator=torch.Generator().manual_seed(11))
+    update = shaper.direction(p, pending)
+    assert abs(update.norm().item() - min(p.shape) ** 0.5) < 1e-3
+    assert torch.allclose(update / update.norm(), R @ pending / (R @ pending).norm(), atol=1e-6)
+
+
+def population_run(scratch):
+    """E3 end to end on a tiny model, once per rule: every remaining sequence feeds one copy's update at most once,
+    the copies' rates and ANVIL II's clock follow the single run's update numbers, and the rule acts as described."""
+    from loud import population
+    m = refs.trainer_module('boostcut')
+    patch_attention()
+    patch_sequences(population)
+    for rule in ('average', 'select', 'ensemble'):
+        spec = dict(experiment='cpu', variant=rule, seed=0, task='population', args=dict(
+            preset='2m', sequences=72, heldout=4, rule=rule, every=2, official_eval=False))
+        out = Path(scratch) / rule
+        result = population.run(spec, out)
+        config = json.loads((out / 'config.json').read_text())
+        metrics = [json.loads(line) for line in (out / 'metrics.jsonl').read_text().splitlines()]
+        events = [json.loads(line) for line in (out / 'population.jsonl').read_text().splitlines()]
+        # 68 update sequences: 17 updates of 4; 3 before the branch, then 56 left, 14 per copy: 3 rounds of 4 each
+        assert config['branch_step'] == 3 and config['rounds'] == 3 and config['unused_sequences'] == 8
+        assert [r['step'] for r in metrics] == list(range(1, 16)) and result['updates'] == 15
+        turns = [(r['round'], r['copy']) for r in metrics if r['phase'] == 'population']
+        assert turns == [(r, c) for r in (1, 2, 3) for c in range(4)]
+        anvil = m.Anvil([torch.zeros(2, 2)], 1.0, 0.0, 17)
+        for r in metrics:
+            anvil.t = r['step'] - 1
+            assert r['anvil_beta'] == anvil.rail_beta(), 'ANVIL II does not follow the single run'
+        base = metrics[0]['lr']['anvil']
+        assert all(abs(r['lr']['anvil'] - base * min(1.0, (17 - r['step'] + 1) / 17 / 0.3)) < 1e-12 for r in metrics)
+        assert [e['round'] for e in events] == [2, 3] and all(len(e['midpoints']) == 6 for e in events)
+        assert all(abs(e['barriers'][p] - (e['midpoints'][p] - max(e['copies'][int(p[0])], e['copies'][int(p[2])])))
+                   < 1e-12 for e in events for p in e['midpoints'])
+        if rule == 'average':
+            assert all(e['action'] == 'average' for e in events) and result['final'] == 'mean'
+        if rule == 'select':
+            assert all(set(e['action']) == {'select', 'replace'} for e in events)
+            last = events[-1]
+            assert result['final'] == f'copy {last["action"]["select"]}'
+            assert result['heldout_loss'] == min(result['final_copy_scores'])
+        if rule == 'ensemble':
+            mean, best = result['final_mean_score'], min(result['final_copy_scores'])
+            assert result['final'] == ('mean' if mean < best else f'copy {result["final_copy_scores"].index(best)}')
+            assert result['heldout_loss'] == min(mean, best)
+
+
+def population_rules(scratch):
+    """The rules on live copies: averaging leaves every copy at the mean with its own optimizer state; selection gives
+    the worst copy the best's weights and an unaliased copy of its optimizer state."""
+    from loud.heldout import HeldoutScorer
+    from loud.common import JsonlLog
+    from loud.population import Clock, Population
+    trainer, m = proxy_trainer()
+    rows = batches(3, trainer.model.config.vocab_size)
+    for step in (1, 2):
+        trainer.update(step, rows[step - 1])
+    heldout = HeldoutScorer(rows[2], Path(scratch) / 'heldout.jsonl', torch.device('cpu'))
+    events = JsonlLog(Path(scratch) / 'population.jsonl')
+    o = dict(trainer.o, copies=3, rule='average')
+    population = Population(o, trainer, trainer.reference, torch.device('cpu'), 0, heldout, events,
+                            Clock(torch.device('cpu')))
+    for c, member in enumerate(population.copies):  # make them differ
+        member.optimizer.optimizers[0].t = 2 + c
+        member.update(3 + c, rows[c])
+    states = [copy.deepcopy(member.optimizer.optimizers[0].state_dict()) for member in population.copies]
+    population.checkpoint(1, 5)
+    weights = [list(member.model.parameters()) for member in population.copies]
+    for ps in zip(*weights):
+        assert all(torch.equal(ps[0], q) for q in ps[1:]), 'averaging left the copies apart'
+    for member, state in zip(population.copies, states):
+        assert all(torch.equal(member.optimizer.optimizers[0].state[p]['slow'], state['state'][i]['slow'])
+                   for i, p in enumerate(member.optimizer.optimizers[0].param_groups[0]['params']))
+
+    population.o = dict(o, rule='select')
+    for c, member in enumerate(population.copies):
+        member.update(6 + c, rows[(c + 1) % 3])
+    scores = population.checkpoint(2, 8)
+    best, worst = scores.index(min(scores)), scores.index(max(scores))
+    for p, q in zip(population.copies[worst].model.parameters(), population.copies[best].model.parameters()):
+        assert torch.equal(p, q)
+    best_anvil = population.copies[best].optimizer.optimizers[0]
+    kept = {id(p): best_anvil.state[p]['slow'].clone() for p in best_anvil.param_groups[0]['params']}
+    population.copies[worst].update(9, rows[0])  # its state moves; the best copy's must not
+    assert all(torch.equal(best_anvil.state[p]['slow'], kept[id(p)]) for p in best_anvil.param_groups[0]['params'])
 
 
 if __name__ == '__main__':

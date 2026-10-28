@@ -1,0 +1,22 @@
+# E2: smoothing with exact antithetic pairs, against the batch-8 baseline e1.bp_b8. Every update displaces each token
+# at the nine probing sites (the raw embedding, each block's mid stream) by +r, then by the same -r, and averages the
+# two gradients: the gradient of the loss blurred at width tau. |r| is tau probe steps of PR #40's Cut chain
+# (chain_sigma 0.01 of each token's RMS, per coordinate). About 2.3x a baseline update (a clean forward, two backward
+# passes). Logs: train_loss (clean), blurred_loss (at the displaced points), val_loss; read the gap across tau.
+# Success: any tau beats e1.bp_b8 by more than 0.02 on final val loss. Kill: none does, or train loss rises while val
+# does not fall (a pure regularizer).
+experiment: e2
+variant: smooth_t10
+task: proxy
+seeds: [0, 1, 2]
+priority: 55
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 8
+  means: true
+  heldout_every: 50
+  checkpoints: true
+  smooth_tau: 10

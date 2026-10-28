@@ -1,0 +1,15 @@
+# E12: the 30M record (PR #46) re-tuned for 30M, one knob per variant: Boost for twice PR #46's 6.68% of the epoch (13.36%).
+# PR #46 kept the 10M record's rates; compare with e12.record (same seed, same node type). 56 min on 8 x H100 each.
+experiment: e12
+variant: record_boost134
+task: reference
+seeds: [0, 1, 2]
+gpus: 8
+priority: 91
+after: [e12.record_match.s0]
+args:
+  script: [noise, train/val/run.py]
+  argv: [--data-dir, '{data}', --output, '{out}/ref']
+  result: ref/result.json
+  script_seed: true
+  settings: {switch: 0.1336}

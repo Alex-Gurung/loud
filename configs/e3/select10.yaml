@@ -1,0 +1,17 @@
+# E3, rule (b): as avg10's population, but every 10 updates per copy the copies are scored on the 32 held-out sequences
+# (H3) and the worst takes the best's weights and optimizer state; the final weights are the best copy. Success: beats
+# e1.bp_b4 by more than 0.02 (seeds 0-2).
+experiment: e3
+variant: select10
+task: population
+seeds: [0, 1, 2]
+priority: 55
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0,
+        verify.population_smoke.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  rule: select
+  every: 10

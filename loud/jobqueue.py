@@ -188,8 +188,9 @@ class JobQueue:
         else:
             self._move(job, 'running', 'queued')
 
-    def claim(self, worker_id, gpu=None):
-        """The first ready job (by priority, then submission) whose `gpu` requirement, if any, names this worker's GPU."""
+    def claim(self, worker_id, gpu=None, gpus=1):
+        """The first ready job (by priority, then submission) whose `gpu` requirement, if any, names this worker's GPU
+        and whose GPU count is this worker's (so an 8-GPU worker never idles 7 GPUs on a one-GPU job)."""
         with self.locked():
             now = time.time()
             for job in self.jobs('running'):
@@ -200,6 +201,8 @@ class JobQueue:
                 if self.dependency_state(job, finished)[0] != 'ready':
                     continue
                 if job.get('gpu') and job['gpu'] not in (gpu or ''):
+                    continue
+                if job['spec'].get('gpus', 1) != gpus:
                     continue
                 attempt_dir = free_name(Path(job['run_dir']), 'attempt')
                 attempt_dir.mkdir(parents=True)

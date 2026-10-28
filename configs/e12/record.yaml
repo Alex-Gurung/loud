@@ -1,0 +1,16 @@
+# E12: the current 30M track-1 record as published (PR #46: 3.338 in 56 min on 8 x H100, seed 0; plain weights 3.3645
+# before its end merge), on one 8-GPU node, seeds 0-2 (script_seed sets its SEED; seed 0 is the published run, checked
+# by record_match): the baseline the re-tunes are compared with. The plan's E12 was written against the older 3.409
+# record (#2), which trailed backprop (3.340) by 0.07; PR #46 has since closed that gap.
+experiment: e12
+variant: record
+task: reference
+seeds: [0, 1, 2]
+gpus: 8
+priority: 90
+after: [verify.score_record.s0]
+args:
+  script: [noise, train/val/run.py]
+  argv: [--data-dir, '{data}', --output, '{out}/ref']
+  result: ref/result.json
+  script_seed: true

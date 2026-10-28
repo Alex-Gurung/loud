@@ -1,0 +1,19 @@
+# E3, rule (a): branch the batch-4 baseline (e1.bp_b4) at 20% of the epoch into 4 copies, each fed every 4th remaining
+# sequence; every 10 updates per copy, all copies continue from their weights' mean. Calibration: this should land
+# near a single run at batch 16, which the records found worse than batch 4. Success (any E3 variant): beats e1.bp_b4
+# by more than 0.02 on final val loss over seeds 0-2. Kill: none does, and the midpoints (population.jsonl) show no
+# barrier, i.e. the copies never explored anything the single run did not.
+experiment: e3
+variant: avg10
+task: population
+seeds: [0, 1, 2]
+priority: 55
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0,
+        verify.population_smoke.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  rule: average
+  every: 10

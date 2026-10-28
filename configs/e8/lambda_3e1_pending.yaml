@@ -1,0 +1,22 @@
+# E8 (proxy), the plan's literal placement: as lambda_3e1, but the factors scale the pending update before ANVIL II
+# orthogonalizes it. polar() maps the damped directions back to about 1 (loud/curvature.py), so this should be close
+# to e1.bp_b4; it is the control that shows whether the placement matters.
+experiment: e8
+variant: lambda_3e1_pending
+task: proxy
+seeds: [0, 1, 2]
+priority: 66
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0,
+        verify.curvature_smoke.s0]
+after_done: [h6.direction_stats_c20.s0, h6.direction_stats_c100.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  per_sequence_grads: true
+  curvature_damping: 30.0
+  damp_where: pending
+  heldout_every: 100
+  checkpoints: true
+  means: true

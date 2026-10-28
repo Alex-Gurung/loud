@@ -27,6 +27,9 @@ EIDF, the GPU cluster, sharing one volume).
 | H5 identity path, PR #26 on one GPU (`loud/identity.py`), with E6's `rows` and `row_offset_per_step` | done; CPU tests: one update equals PR #26's own |
 | H5 Cut chain, PR #40 on one GPU (`loud/cut.py`, task `cut`), with E6's rows and E7's ramp | done; CPU tests: 4 updates equal PR #40's own loop on 8 processes |
 | H6 diagnostic toolkit (`loud/diagnostics.py`, task `diagnose`): all five tools | done; CPU tests on a tiny model; configs in `configs/h6/` |
+| E2, E4, E10 proxy variants (`loud/variants.py`; `configs/e2/`, `e4/`, `e10/`: 32 jobs) | done; CPU tests: brute force, exact undo |
+| E3 population on split data (`loud/population.py`, task `population`) | done; CPU tests of the split, schedule and rules; `configs/e3/` |
+| E8 and E9 proxy versions (`loud/curvature.py`, `loud/fisher.py`, through `loud/anvil.py`) | done; CPU tests against exact HVPs and per-token sums; `configs/e8/`, `configs/e9/` |
 | H7 runner and results table (`run.py`, `collect.py`); per-experiment plot scripts | runner and table done; plots not started |
 | Port checks against their sources (`compare` task) | done |
 | GPU queue and workers (`loud/jobqueue.py`, `loud/worker.py`, `worker/`) | done; tested end to end on CPU |
@@ -117,6 +120,9 @@ final-loss gate fails, which is when they are needed to tell a port error from a
    batch gradient: checkpoints keep no optimizer state, so they stand in for the plan's pending update. Its curvature
    is a central difference of autograd gradients. The plan asks for a Hessian-vector product, and flex attention has
    no double backward.
+9. E3, E8 and E9 (`configs/e3/`, `configs/e8/`, `configs/e9/`), each first gated on its own complete 1M smoke run
+   (`verify.population_smoke`, `verify.curvature_smoke`, `verify.fisher_smoke`). E8 also waits for H6's
+   `direction_stats`, which the plan runs first and which says where E8's knob should sit.
 
 ### How the queue works
 
@@ -162,6 +168,8 @@ loud/            the harness package (frozen into each job's snapshot)
   heldout.py     H3                                                   checkpoints.py  H4
   score.py       official utils/eval.py scoring in a fresh process    compare.py   per-update loss check of two runs
   diagnostics.py H6: five offline measurements on H4 checkpoints
+  population.py  E3: copies of the proxy on split data                anvil.py     ANVIL II with a hook for E8, E9
+  curvature.py   E8: steps by curvature-to-noise (proxy)              fisher.py    E9: true-Fisher left factor (proxy)
   reference.py   run a pinned external script unmodified               refs.py      pinned external imports
   options.py     task registry, option tables and checks (no torch)   run.py       H7 runner
   collect.py     H7 results table
@@ -186,7 +194,7 @@ Cut chain's checks run it eagerly (no compilation) with a 512-token vocabulary.
 ```yaml
 experiment: e1
 variant: bp_b4          # one change per variant; the file is configs/<experiment>/<variant>.yaml
-task: proxy             # proxy | identity | score | reference | compare | diagnose | noop (options: loud/options.py)
+task: proxy             # proxy | identity | population | score | reference | compare | diagnose | noop (loud/options.py)
 seeds: [0, 1, 2]
 priority: 50            # lower runs first
 after: [verify.bp_b8.s0]
@@ -228,6 +236,29 @@ takes PR #40's rates and betas, its warmdown to 30% and head std 0.02, and batch
   the same forward under bf16 autocast); `final.pt` is always exact. `ckpt_100.pt` exists only for complete runs.
   Verification runs reproduce the published layout and keep only `final.pt`.
 
+**Proxy variants** (`loud/variants.py`) are one option each, off by default and at most one per run. The default
+path is unchanged: the CPU test of the float32 mean still holds bit for bit. All three cells run at batch 8 against
+`e1.bp_b8`.
+- **E2, `smooth_tau`.** The sites are the raw embedding and each block's mid stream. Each token gets a random r of
+  length tau × 0.01 × its RMS × √512. That is PR #40's chain probe, a ±1 Hadamard row times `chain_sigma` (0.01) times
+  the per-token RMS, which answers the plan's open question: the step is relative to each token's RMS. A clean no-grad
+  forward gives the RMS and `train_loss`; two forwards add +r and −r, and the mean of their gradients is the blurred
+  loss's gradient. `blurred_loss` is logged too. A CPU test checks the length, the shared r and the odd-order
+  cancellation (the error falls 4× when r halves). About 2.3× a baseline update.
+- **E4, `step_control`.** `reject`: after the step, one no-grad forward on the same micro-batches; if the loss rose,
+  the weights and all optimizer state (ANVIL II's rails and energy, Adam's moments, both step clocks) are restored
+  from a snapshot, and the batch feeds no update. `adapt` also multiplies every rate (and so ANVIL II's decay) by
+  `accept_up` after an accept and `accept_down` after a reject, on top of the schedule. `warmdown: 0` removes the hand
+  warmdown; ANVIL II's own momentum schedule stays. The plan's 1.05 and 0.8 settle at 82% acceptance, so `adapt_t60`
+  uses 0.9294 for its stated 0.6. Logged: `accepted`, `trial_loss`, `lr_multiplier`, and `lr` is the effective rate.
+  About 1.35× a baseline update.
+- **E10, `token_shaping`.** Every `nn.Linear` weight gradient (blocks, value-embedding gates, LM head; the embedding
+  tables keep theirs) is formed in hooks from each token's credit, the output gradient, and its input, with autograd's
+  own matmul (bit for bit on CPU). `cap` caps each token's credit norm at the batch's `cap_quantile`, per layer; it
+  keeps credits and inputs in bf16 until the batch is done (about 0.3 GB per sequence), roughly 1.1× a baseline update.
+  `agree` keeps entries where at least `agree_threshold` of the tokens with a nonzero contribution share the majority
+  sign; the counts are exact sign matmuls summed over micro-batches, roughly 2× a baseline update.
+
 **The identity path** imports PR #26's `train/speedrun/run.py@2604407` unchanged: its model, init, optimizer,
 settings and `FastRelay` estimator. There is one estimator per virtual GPU, seeded by its rank as on 8 GPUs. Their
 per-sequence gradients are summed where the script all-reduces, then one optimizer step follows. A CPU test checks that
@@ -250,8 +281,9 @@ That script runs at batch 4 on 8 GPUs, two per sequence. The two GPUs of a seque
 cycle and add their parts with an all-reduce in the middle of each estimate. Here the 8 GPUs are virtual ranks with
 the record's seeds and roles (`virtual_gpus`, default 8). The two halves of a sequence are threads that take turns:
 one runs at a time and hands over at each of those all-reduces, where the parts are added. So the run draws the 8-GPU
-run's numbers. A CPU test runs PR #40's own `train_stages` on 8 gloo processes for 2 Boost and 2 Cut updates and finds
-the same losses and weights; only the order of the 8-way gradient sum differs. Differences from PR #40:
+run's numbers. A CPU test runs PR #40's own `train_stages` on 8 gloo processes for 2 Boost and 2 Cut updates, its
+all-reduces summing in rank order as the port does, and finds bit-identical losses and weights (on GPUs, NCCL's
+order changes only the rounding). Differences from PR #40:
 - **Seed:** the job's seed replaces the module's `SEED` constant (seed 0 is the record's). Data order and held-out set
   are the records' (`randperm(seed 1)`, the last 32), which the end merge scores.
 - **The end merge** runs after the last update inside the clock, as in the record. Its means are the shared loop's
@@ -268,6 +300,28 @@ the same losses and weights; only the order of the 8-way gradient sum differs. D
 - **Cost on one H100:** about 1.6 s per Boost update and 16 s per Cut update (8 times the published per-GPU times),
   and about 8 minutes for the end merge. A 1M-slice run takes about 35 minutes; the full 10M epoch about 4.6 hours.
 
+**E3, populations** (task `population`). The job runs the batch-4 baseline's first 20% itself (the same code and
+seed as `e1.bp_b4`, so the same trajectory, about a minute) and branches into 4 copies. Copy c takes every 4th of the
+remaining sequences, `rest[c::4]`, in batches of 4. The copies take turns, so compute equals one run. Each copy update
+counts as the single run's next update number, which sets its rate and ANVIL II's clock, so the warmdown ends where
+the single run's does. Rules: `average` (every N updates per copy, weights only; each copy keeps its optimizer
+state), `select` (the worst copy takes the best's weights and optimizer state, by H3), `ensemble` (the mean at the end
+if H3 prefers it to the best copy). `population.jsonl` logs every N updates each copy's and each pairwise midpoint's
+held-out score, and the barrier (midpoint minus the worse end). Population runs have no H4 files: there is no single
+trajectory to checkpoint after the branch.
+
+**E8 and E9** replace ANVIL II's orthogonalization through one hook (`loud/anvil.py`); a CPU test checks the hooked
+optimizer reproduces boost-cut's ANVIL II bit for bit, and with both off the proxy uses the original.
+- **E8** (`curvature_damping`): every 50 updates, the top 16 singular directions of each block matrix's pending
+  update, with the curvature along each (central differences of float32 gradients on 2 of the batch's sequences: 1,536
+  passes, about 30 s per refresh) and the across-sequence noise of the gradient along it (H2, averaged until the next
+  refresh). Each update's step along a direction is scaled by `1 / (1 + c / (B h^2 lambda))`, lambda in squared
+  ANVIL II steps. About 20 minutes per 10M run on one H100 (an estimate: `verify.curvature_smoke` times it).
+- **E9** (`fisher_damping`): a damped inverse root of the true Fisher's output-side factor (from a backward with
+  labels sampled from the model) multiplies the pending update in place of `polar()`, at the polar factor's norm.
+  About 8 minutes per 10M run (an estimate). The plan's kernel version in the Cut port waits on this test: if no
+  damping beats the batch-4 baseline by 0.02, it is skipped.
+
 ## Review
 
 Every piece and every result goes to two independent reviewers: Codex (run as an unprivileged user on a frozen copy)
@@ -281,3 +335,6 @@ finding is triaged in [review/LEDGER.md](review/LEDGER.md). See [review/README.m
 - The pod image ships torch 2.13. Noise pins torch 2.10.0, and the published runs used 2.10.
   `verify.score_record` (scoring) and the verification runs (training) show whether that matters.
 - The backprop target is boost-cut's ledger, 3.70835 at seed 0. The handoff's 3.708 is the same run rounded.
+- E8 says to damp before ANVIL II's orthogonalization. `polar()` maps every singular value of the pending update to
+  about 1, so damping its top directions there leaves them at about 1 (and slightly enlarges the rest). E8 damps right
+  after `polar()` by default; `damp_where: pending` is the literal placement, run once as a control.

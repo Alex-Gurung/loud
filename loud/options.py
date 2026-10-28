@@ -1,10 +1,15 @@
 """Task registry and option tables (no torch import, so submission checks run on the CPU pod)."""
+import json
 import re
+
+from .launch import settings_fields
+from .paths import PINS, REPO
 
 TASKS = {
     'proxy': ('loud.proxy', 'run'),               # H1 backprop proxy
     'identity': ('loud.identity', 'run'),         # H5 identity-path forward-only estimator (PR #26)
     'cut': ('loud.cut', 'run'),                   # H5 the record's Boost -> Cut chain (PR #40)
+    'population': ('loud.population', 'run'),     # E3: copies of the backprop proxy on split data
     'score': ('loud.score', 'run_task'),          # official rescoring of a checkpoint
     'reference': ('loud.reference', 'run_task'),  # a pinned external script, unmodified, on one GPU
     'compare': ('loud.compare', 'run_task'),      # two runs' per-update losses side by side
@@ -20,7 +25,7 @@ CHECKPOINT_DTYPES = ('bfloat16', 'float32')
 
 # What each task's result.json holds that `expect` may check.
 TRAINING_RESULTS = ('val_loss', 'test_loss', 'heldout_loss', 'train_seconds', 'train_loss_last', 'peak_cuda_gb')
-RESULTS = {'proxy': TRAINING_RESULTS, 'identity': TRAINING_RESULTS,
+RESULTS = {'proxy': TRAINING_RESULTS, 'identity': TRAINING_RESULTS, 'population': TRAINING_RESULTS,
            'cut': TRAINING_RESULTS + ('val_loss_plain', 'test_loss_plain', 'holdout_plain', 'holdout_merged',
                                       'merge_seconds'),
            'score': ('val_loss', 'test_loss'),
@@ -71,12 +76,44 @@ TRAINING = dict(
 
 PROXY = dict(
     TRAINING,
-    recipe='boostcut',          # reference trainer: 'boostcut' (backprop_preset.py) or 'pr40' (PR #40's rates)
+    recipe='boostcut',          # reference trainer: 'boostcut' (backprop_preset.py), 'pr40' (PR #40's rates, the 10M
+                                # record) or 'pr46' (PR #46's, the 30M record)
     micro_batch=1,              # sequences per forward/backward (1 = one GPU's share in the 8-GPU script)
     lr_mult=1.0,                # scales both Adam and ANVIL II rates, as backprop_preset.py --lr-mult
     per_sequence_grads=False,   # H2
     grad_noise_every=0,         # log the H2 across-sequence spread every N updates (needs per_sequence_grads)
+    warmdown=None,              # the recipe's warmdown fraction (None), or another; 0 holds every rate constant
+    # one-change variants (loud/variants.py), at most one per run:
+    smooth_tau=0.0,             # E2: antithetic blur at the nine probing sites, in PR #40 probe steps (0: off)
+    step_control='none',        # E4: 'reject' undoes an update that raised its batch's loss; 'adapt' also scales rates
+    accept_up=1.05,             # E4 adapt: rate multiplier after an accepted update
+    accept_down=0.8,            # E4 adapt: rate multiplier after a rejected one
+    token_shaping='none',       # E10: 'cap' or 'agree', on every nn.Linear weight gradient
+    cap_quantile=0.95,          # E10 cap: each token's credit norm is capped at this quantile over the batch
+    agree_threshold=0.7,        # E10 agree: the share of tokens whose contributions must agree in sign
+    curvature_damping=0.0,      # E8: lambda, in squared ANVIL II steps (loud/curvature.py); 0 = off
+    damp_directions=16,         # E8: tracked top singular directions of each block matrix's pending update
+    damp_every=50,              # E8: updates between refreshes of the directions and their curvature
+    damp_where='step',          # E8: 'step' (after the orthogonalization) or 'pending' (the plan's literal placement)
+    fisher_damping=0.0,         # E9: true-Fisher left factor in place of ANVIL II's polar (loud/fisher.py); 0 = off
 )
+STEP_CONTROLS, SHAPINGS = ('none', 'reject', 'adapt'), ('none', 'cap', 'agree')
+# Each variant option, and the setting (of another option) it acts under.
+VARIANT_OPTIONS = {'accept_up': ('step_control', 'adapt'), 'accept_down': ('step_control', 'adapt'),
+                   'cap_quantile': ('token_shaping', 'cap'), 'agree_threshold': ('token_shaping', 'agree')}
+
+# E3 (loud/population.py): copies of the proxy branched from one trajectory. Only POPULATION_FREE options may change;
+# the rest stay at their defaults (one change per variant, and the population loop has no H4 or monitoring).
+POPULATION = dict(
+    PROXY,
+    batch=4,                    # the batch-4 baseline's (e1.bp_b4)
+    branch=0.2,                 # fraction of the single run's updates done before the copies branch
+    copies=4,
+    rule=None,                  # 'average' | 'select' | 'ensemble'
+    every=10,                   # N: updates per copy between averages or selections (ensemble: between logs)
+)
+POPULATION_FREE = ('sequences', 'heldout', 'batch', 'preset', 'test', 'official_eval', 'recipe', 'micro_batch',
+                   'lr_mult', 'branch', 'copies', 'rule', 'every')
 
 IDENTITY = dict(
     TRAINING,
@@ -103,12 +140,13 @@ ROW_QUANTUM = 64                # E7's ramp moves in steps of 64 rows, so only a
 SCORE = dict(checkpoint=None, splits=['val'])
 
 DIAGNOSE = dict(
-    tool=None,                  # cos_to_autograd | credit_dump | token_map_svd | direction_stats | linearity_check
+    tool=None,                  # cos_to_autograd | credit_dump | token_map_svd | direction_stats | linearity_check |
+                                # credit_recovery
     checkpoint=None,            # '<job id>:<file>' (e.g. e1.bp_b4.s0:ckpt_20.pt) or a path relative to the repo
     row=0,                      # the held-out sequence (0-31 of the 10M order's last 32) measured
     batch=8,                    # direction_stats: sequences for the gradient, its curvature and its spread
 )
-TOOLS = ('cos_to_autograd', 'credit_dump', 'token_map_svd', 'direction_stats', 'linearity_check')
+TOOLS = ('cos_to_autograd', 'credit_dump', 'token_map_svd', 'direction_stats', 'linearity_check', 'credit_recovery')
 
 
 def positive(o, *keys):
@@ -162,7 +200,7 @@ def training_options(args, table, task):
 
 def proxy_options(args):
     o = training_options(args, PROXY, 'proxy')
-    if o['recipe'] not in ('boostcut', 'pr40'):
+    if o['recipe'] not in ('boostcut', 'pr40', 'pr46'):
         raise ValueError(f'unknown recipe {o["recipe"]!r}')
     if o['lr_mult'] <= 0:
         raise ValueError('lr_mult must be positive')
@@ -175,7 +213,71 @@ def proxy_options(args):
         raise ValueError('per-sequence gradients need micro_batch: 1')
     if o['grad_noise_every'] and not o['per_sequence_grads']:
         raise ValueError('grad_noise_every needs per_sequence_grads')
+    warmdown = o['warmdown']
+    if warmdown is not None and (isinstance(warmdown, bool) or not isinstance(warmdown, (int, float))
+                                 or not 0 <= warmdown <= 1):
+        raise ValueError("warmdown must be a fraction in [0, 1] (0: constant rates), or null for the recipe's")
+    if o['step_control'] not in STEP_CONTROLS or o['token_shaping'] not in SHAPINGS:
+        raise ValueError(f'step_control must be one of {STEP_CONTROLS}, token_shaping one of {SHAPINGS}')
+    variants = [key for key, on in (('smooth_tau', o['smooth_tau'] != 0), ('step_control', o['step_control'] != 'none'),
+                                    ('token_shaping', o['token_shaping'] != 'none'),
+                                    ('curvature_damping', o['curvature_damping'] != 0),
+                                    ('fisher_damping', o['fisher_damping'] != 0)) if on]
+    if len(variants) > 1:
+        raise ValueError(f'one change per variant: {variants} are separate experiments')
+    for key, (mode, value) in VARIANT_OPTIONS.items():
+        if key in args and o[mode] != value:
+            raise ValueError(f'{key} acts only with {mode}: {value}')
+    if o['smooth_tau'] < 0:
+        raise ValueError('smooth_tau must be >= 0')
+    if not (o['accept_up'] >= 1 and 0 < o['accept_down'] <= 1):
+        raise ValueError('accept_up must be >= 1 and accept_down in (0, 1]')
+    if not 0 < o['cap_quantile'] <= 1:
+        raise ValueError('cap_quantile must be in (0, 1]')
+    if not 0.5 < o['agree_threshold'] <= 1:
+        raise ValueError('agree_threshold must be in (0.5, 1]: at least half the tokens always share the majority sign')
+    if o['per_sequence_grads'] and variants and variants[0] not in ('step_control', 'curvature_damping'):
+        raise ValueError(f"per_sequence_grads reads each sequence's plain gradient, which {variants[0]} replaces")
+    if o['curvature_damping'] < 0 or o['fisher_damping'] < 0:
+        raise ValueError('curvature_damping and fisher_damping must be >= 0 (0 = off)')
+    if (o['curvature_damping'] or o['fisher_damping']) and o['recipe'] != 'boostcut':
+        raise ValueError("E8 and E9 hook boost-cut's ANVIL II (recipe: boostcut)")
+    if o['curvature_damping']:
+        positive(o, 'damp_directions', 'damp_every')
+        if not o['per_sequence_grads']:
+            raise ValueError('curvature_damping reads its noise from per-sequence gradients: set per_sequence_grads')
+        if o['damp_where'] not in ('step', 'pending'):
+            raise ValueError("damp_where must be 'step' or 'pending'")
+        if o['damp_directions'] > PRESETS[o['preset']][1]:
+            raise ValueError('damp_directions must be at most the width')
     return o
+
+
+def population_options(args):
+    o = training_options(args, POPULATION, 'population')
+    changed = sorted(k for k in POPULATION if k not in POPULATION_FREE and o[k] != POPULATION[k])
+    if changed:
+        raise ValueError(f'population runs keep {changed} at their defaults; they may set {list(POPULATION_FREE)}')
+    proxy_options({k: o[k] for k in PROXY if o[k] != PROXY[k]})  # as if set in a proxy config
+    if o['rule'] not in ('average', 'select', 'ensemble'):
+        raise ValueError("rule must be 'average', 'select' or 'ensemble'")
+    if not 0 < o['branch'] < 1:
+        raise ValueError('branch must be a fraction in (0, 1)')
+    positive(o, 'copies', 'every')
+    if o['copies'] < 2:
+        raise ValueError('a population needs at least two copies')
+    if not o['heldout']:
+        raise ValueError('the copies are scored on the held-out sequences: heldout must be > 0')
+    if branch_rows(o)[1] // o['copies'] < o['batch']:
+        raise ValueError('the sequences left after the branch give a copy no update')
+    return o
+
+
+def branch_rows(o):
+    """(single-run updates before the branch, update sequences left after it)."""
+    n = range_size(o['sequences']) - o['heldout']
+    prefix = round(o['branch'] * (n // o['batch']))
+    return prefix, n - prefix * o['batch']
 
 
 def identity_options(args):
@@ -242,12 +344,25 @@ def score_options(args):
 
 
 def reference_options(args):
-    allowed = {'script', 'cwd', 'argv', 'result'}
+    allowed = {'script', 'cwd', 'argv', 'result', 'settings', 'train_rows', 'script_seed'}
     if set(args) - allowed or not isinstance(args.get('script'), list) or len(args['script']) != 2:
         raise ValueError(f'reference needs script: [repo, path] and accepts only {sorted(allowed)}')
     for arg in args.get('argv', []):
         if set(re.findall(r'{(\w*)}', arg)) - {'data', 'out', 'seed'}:
             raise ValueError(f'reference argv {arg!r}: the placeholders are {{data}}, {{out}} and {{seed}}')
+    if not isinstance(args.get('settings', {}), dict):
+        raise ValueError("reference settings: a mapping of the script's Settings fields to values")
+    if args.get('settings'):
+        repo, relpath = args['script']
+        script = REPO / json.loads(PINS.read_text())['repos'][repo]['path'] / relpath
+        unknown = set(args['settings']) - settings_fields(script)
+        if unknown:
+            raise ValueError(f'reference settings: {relpath} has no Settings field {sorted(unknown)}')
+    rows = args.get('train_rows', 0)
+    if not isinstance(rows, int) or isinstance(rows, bool) or not 0 <= rows <= RANGES['30M']:
+        raise ValueError(f'reference train_rows: a row count up to {RANGES["30M"]} (0: all of train.pt)')
+    if not isinstance(args.get('script_seed', False), bool):
+        raise ValueError('reference script_seed: true or false')
     return args
 
 
@@ -284,6 +399,7 @@ def noop_options(args):
     return args
 
 
-VALIDATE = {'proxy': proxy_options, 'identity': identity_options, 'cut': cut_options, 'score': score_options,
+VALIDATE = {'proxy': proxy_options, 'identity': identity_options, 'cut': cut_options,
+            'population': population_options, 'score': score_options,
             'reference': reference_options, 'compare': compare_options, 'diagnose': diagnose_options,
             'noop': noop_options}

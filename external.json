@@ -17,7 +17,9 @@
         "archive/10M/train/speedrun/kernels.py": "ffc1a50f44c778ae844a86166e5d066f1c708cce675dc6312ae316d269d0c0cd",
         "train/val/run.py": "7c499074fb36c19742e9c731626a1f756780f05d603c8c80c5dc8eb581e40c1c",
         "train/speedrun/run.py": "1f5cfb725a20cfa4ebbc3d724643af74c741b2869e57bd89b220e87f46d06488",
-        "archive/10M/utils/eval.py": "a97d6590ee0233ad862a13e78f03ae27b1872dbf9f3e4e99f1356bdea7145ce3"
+        "archive/10M/utils/eval.py": "a97d6590ee0233ad862a13e78f03ae27b1872dbf9f3e4e99f1356bdea7145ce3",
+        "train/val/log/metrics.jsonl": "5d7aeb46e724ca2b86b43a6abc52b8598accd6a380194f4ef75fb76b25f52365",
+        "train/val/log/result.json": "854ef09dce809808c85f0a4d82a19f34481db3cb94ac5e31e19de798300f53a8"
       }
     },
     "boost-cut": {

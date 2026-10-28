@@ -1,0 +1,17 @@
+# E3, rule (c): the 4 copies run independently to the end; the final weights are their mean if it scores below the
+# best copy on the held-out set (H3), else the best copy. No knob; `every` only sets how often population.jsonl
+# records the copies' and pairwise midpoints' held-out scores. Success: beats e1.bp_b4 by more than 0.02 (seeds 0-2).
+experiment: e3
+variant: ensemble
+task: population
+seeds: [0, 1, 2]
+priority: 55
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0,
+        verify.population_smoke.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  rule: ensemble
+  every: 50

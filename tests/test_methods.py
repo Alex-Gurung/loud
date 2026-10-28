@@ -8,6 +8,8 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 CHECKS = ('proxy_gradient', 'proxy_run', 'identity_window', 'identity_step', 'identity_run', 'diagnostics',
+          'variants_blur', 'variants_control', 'variants_control_pr40', 'variants_shaping', 'variants_run',
+          'anvil_hook', 'curvature_damping', 'fisher_factor', 'population_rules', 'population_run',
           'cut_ranks', 'cut_windows', 'cut_run')
 
 

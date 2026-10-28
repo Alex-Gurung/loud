@@ -1,0 +1,25 @@
+# E8 (proxy): ANVIL II at batch 4 (e1.bp_b4's recipe, the plan's small-batch regime) with each block matrix's step along
+# the top 16 singular directions of its pending update scaled by 1 / (1 + c / (B h^2 lambda)) (loud/curvature.py),
+# lambda = curvature_damping squared ANVIL II steps. One knob, swept over decades (1, 30, 1000): a direction is halved
+# when curvature_damping = 1 / (B delta^2 h^2/c), about 470 / (h^2/c) for a square matrix at the base rate, so check
+# the sweep's centre against the H6 direction_stats medians of h^2/c (these runs wait for them). Success: beats e1.bp_b4
+# by more than 0.02 (seeds 0-2). The plan's real test, E7's 128-row partial Cut chain with and without this damping,
+# needs the Cut port.
+experiment: e8
+variant: lambda_1e0
+task: proxy
+seeds: [0, 1, 2]
+priority: 65
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0,
+        verify.curvature_smoke.s0]
+after_done: [h6.direction_stats_c20.s0, h6.direction_stats_c100.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  per_sequence_grads: true
+  curvature_damping: 1.0
+  heldout_every: 100
+  checkpoints: true
+  means: true

@@ -1,0 +1,18 @@
+# E12: the 30M record (PR #46) with its epoch, schedule and warmdown defined on the first 60% of train.pt (8,788 rows:
+# 8,756 feed updates, 32 score the end merge), to stop near the 3.5 speedrun target. Its untimed val curve (every 406
+# updates) shows when it crosses 3.5. The plan expected about an hour and a speedrun record; the track-2 record has
+# since moved to 8 min 20 s (PR #44, the identity path then Cut-lite at 8 rows), so this is now a calibration point
+# for how the val record's estimator scales, not a record attempt.
+experiment: e12
+variant: record_60pct
+task: reference
+seeds: [0, 1, 2]
+gpus: 8
+priority: 92
+after: [e12.record_match.s0]
+args:
+  script: [noise, train/val/run.py]
+  argv: [--data-dir, '{data}', --output, '{out}/ref']
+  result: ref/result.json
+  script_seed: true
+  train_rows: 8788
