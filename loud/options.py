@@ -130,9 +130,15 @@ CUT = dict(
     end_merge=True,             # the record's end merge on the held-out sequences, timed with the training
     rows=None,                  # E6: Hadamard rows per token at each chain site (None: the full cycle, 512)
     row_offset_per_step=False,  # E6: update s reads rows [(s mod K) * rows, ...) of a basis held for K updates
-    drift_every=0,              # E6: every N updates (Cut phase), a full-cycle estimate on a held-out sequence vs momentum
-    rows_start=None,           # E7: rows per token at the first Cut update, ramped linearly up to the full cycle...
-    rows_full_at=None,          # ...reached at this fraction of the run's updates; each token reads its own window
+    drift_every=0,              # E6: every N updates (Cut phase), a full-cycle estimate on a held-out row vs momentum
+    rows_tiled=False,           # E7's partial cycle at fixed rows: windows tiled across tokens, around the guess
+    rows_start=None,            # E7: rows per token at the first Cut update, ramped linearly up to the full cycle...
+    rows_full_at=None,          # ...reached at this fraction of the run's updates (tiled, as rows_tiled)
+    rows_check=0.0,             # E7's self-check: rows rise when the guess's relative error past them exceeds this
+    target_damping=0.0,         # E11: per-token targets, the writers' ridge fit (x mean diag A^T A); 0 = off
+    curvature_damping=0.0,      # E8: lambda, in squared ANVIL II steps (loud/curvature.py), Cut phase; 0 = off
+    damp_directions=16,         # E8: tracked top singular directions of each block matrix's pending update
+    damp_every=50,              # E8: Cut updates between refreshes of the directions and their curvature
 )
 CUT_SWITCH = 0.2                # PR #40's Boost fraction (Settings.switch): Cut, and its chain, start after it
 ROW_QUANTUM = 64                # E7's ramp moves in steps of 64 rows, so only a few chain shapes compile
@@ -330,6 +336,20 @@ def cut_options(args):
             raise ValueError(f'rows_full_at is a fraction of the run after the Boost phase ({CUT_SWITCH}, 1]')
     if o['drift_every'] and not o['heldout']:
         raise ValueError('the drift check measures a held-out sequence: it needs heldout > 0')
+    if o['rows_tiled'] and (o['rows'] is None or o['row_offset_per_step']):
+        raise ValueError("rows_tiled is E7's partial cycle at a fixed count: rows below the full cycle, no offset")
+    for key in ('rows_check', 'target_damping', 'curvature_damping'):
+        if o[key] < 0:
+            raise ValueError(f'{key} must be >= 0 (0 = off)')
+    if o['rows_check'] and not (o['rows_tiled'] or o['rows_start'] is not None):
+        raise ValueError("rows_check checks E7's guess: it needs tiled rows (rows_tiled or the rows_start ramp)")
+    if o['curvature_damping']:
+        positive(o, 'damp_directions', 'damp_every')
+        if o['damp_directions'] > width:
+            raise ValueError('damp_directions must be at most the width')
+        if not 2 <= batch <= world:
+            raise ValueError('curvature_damping takes its noise across the batch, one sequence per virtual GPU group: '
+                             '2 <= batch <= virtual_gpus')
     return o
 
 

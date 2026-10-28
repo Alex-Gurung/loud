@@ -86,6 +86,12 @@ def test_bad_configs_fail_at_submission(tmp_path, text, error):
     ('{rows: 128, rows_start: 64, rows_full_at: 0.5}', 'not both'),
     ('{heldout: 0}', 'end merge needs'),
     ('{end_merge: false, heldout: 0, drift_every: 10}', 'needs heldout'),
+    ('{rows_tiled: true}', "rows_tiled is E7's partial cycle"),
+    ('{rows: 128, row_offset_per_step: true, rows_tiled: true}', "rows_tiled is E7's partial cycle"),
+    ('{rows: 128, rows_check: 0.5}', 'needs tiled rows'),
+    ('{target_damping: -1.0}', 'must be >= 0'),
+    ('{curvature_damping: 30.0, batch: 1, virtual_gpus: 2}', '2 <= batch'),
+    ('{curvature_damping: 30.0, damp_directions: 1024}', 'at most the width'),
 ])
 def test_bad_cut_options_fail_at_submission(tmp_path, args, error):
     path = tmp_path / 'c.yaml'

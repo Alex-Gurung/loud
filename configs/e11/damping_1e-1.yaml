@@ -1,0 +1,21 @@
+# E11 on the Cut chain (1M slice): per-token targets instead of per-token slopes. Each c_proj writer's token moves its
+# output stream along minus its credit at 2, 4, 8 and 16 chain probe lengths (the chain's own kernel); the runway is
+# how far its loss keeps falling, the target the move there. The writer's gradient becomes minus the batch's ridge fit
+# D^T A (A^T A + lam I)^-1, lam = target_damping x mean(diag A^T A). The knob sweeps a decade either side of this cell:
+# 1e-2 whitens every input direction with at least 1% of the mean variance (the fit nearly a regression), 1 leaves the
+# fit close to the targets' outer product with the inputs (targets in place of slopes, without the whitening); lower
+# would amplify the MLP's rarely active hidden units (mlp.c_proj reads 2,048 of them from 8,192 tokens). Baseline: the
+# unchanged chain, e6.cut_k1 (and e1.cut_1m). Success: lower loss at equal probes (64 more per token, against 4,608).
+experiment: e11
+variant: damping_1e-1
+task: cut
+seeds: [0, 1, 2]
+priority: 65
+after: [verify.score_record.s0, verify.cut_prefix.s0, verify.cut_prefix_match.s0, verify.cut_variants_smoke.s0]
+args:
+  sequences: 1M
+  heldout: 32
+  batch: 4
+  target_damping: 0.1
+  heldout_every: 10
+  checkpoints: true

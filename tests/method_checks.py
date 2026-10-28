@@ -405,7 +405,7 @@ def cut_windows(scratch):
     for k in range(K):
         ours.start = k * rows
         windows.append(ours.chain_credits(*saved['args']))
-    ours.start = None
+    ours.start, ours.top = None, torch.zeros(x.shape[1], width)  # tiled windows around a zero guess
     tiled = ours.chain_credits(*saved['args'])
     tokens = torch.arange(x.shape[1])
     for key, value in full.items():
@@ -414,6 +414,14 @@ def cut_windows(scratch):
         if not isinstance(key, tuple):  # ('lam', site): the mixing scalars' probes do not use the rows
             each = torch.stack([w[key] for w in windows])[tokens % K, tokens]
             assert torch.allclose(tiled[key], each, rtol=1e-4, atol=1e-6), f'{key}: a tiled token misses its window'
+    # E7's control variate: with the full cycle's credit as the guess, the rows measure no residual (the credit is
+    # the guess) and the self-check's rows past each window see no error
+    ours.guesses, ours.check = lambda: {i: full[i] for i in range(s.model.n_layer)}, 8
+    guided = ours.chain_credits(*saved['args'])
+    for i in range(s.model.n_layer):
+        assert torch.allclose(guided[i], full[i], rtol=1e-4, atol=1e-6), f'mid {i}: the residual is not zero'
+        miss, measured = ours.misses[i]
+        assert miss <= 1e-8 * measured, f'mid {i}: the self-check misses the exact guess'
     halves = [Cut(model, s, 0, part, 2, 2, None) for part in range(2)]
     for start in (0, None):
         for half in halves:
@@ -935,6 +943,98 @@ def population_rules(scratch):
     kept = {id(p): best_anvil.state[p]['slow'].clone() for p in best_anvil.param_groups[0]['params']}
     population.copies[worst].update(9, rows[0])  # its state moves; the best copy's must not
     assert all(torch.equal(best_anvil.state[p]['slow'], kept[id(p)]) for p in best_anvil.param_groups[0]['params'])
+
+
+def batched_anvil_hook(scratch):
+    """PR #40's BatchedAnvil and ShapedBatchedAnvil (E8's hook in the Cut port) with a shaper that returns the
+    orthogonalized update: bit-identical weights and state over 3 steps through ANVIL II's engagement."""
+    m = cut_module()
+    from loud.anvil import shaped_optimizer
+    from loud.cut import record_settings
+
+    class Unchanged:
+        @staticmethod
+        def after_polar(p, pending, update):
+            return update
+
+    s = record_settings(m, '2m', 4)
+    model = m.make_model(torch.device('cpu'), 0, s.model, s.projection_std, s.head_std)
+    twin = copy.deepcopy(model)
+    plain, shaped = m.make_optimizer(model, s, 6), shaped_optimizer(m, twin, s, 6, Unchanged(), 'BatchedAnvil')
+    assert type(shaped.optimizers[0]).__name__ == 'ShapedBatchedAnvil' and m.BatchedAnvil.__name__ == 'BatchedAnvil'
+    generator = torch.Generator().manual_seed(8)
+    for step in range(1, 4):
+        for p, q in zip(model.parameters(), twin.parameters()):
+            p.grad = torch.randn(p.shape, generator=generator).to(p.dtype)
+            q.grad = p.grad.clone()
+        for optimizer in (plain, shaped):
+            m.set_rate(optimizer, step, 6, s.warmdown, s.final)
+            optimizer.step()
+        for (name, p), q in zip(model.named_parameters(), twin.parameters()):
+            assert torch.equal(p, q), f'{name} differs after step {step}'
+    for p, q in zip(plain.optimizers[0].param_groups[0]['params'], shaped.optimizers[0].param_groups[0]['params']):
+        assert all(torch.equal(plain.optimizers[0].state[p][k], shaped.optimizers[0].state[q][k])
+                   for k in ('fast', 'slow', 'energy'))
+
+
+def cut_targets(scratch):
+    """E11: the runway walks the distances while the loss keeps falling; the ridge fit of summed statistics is the
+    least-squares fit of the concatenated tokens; and on a real estimate, part 0 keeps each c_proj writer's A^T A and
+    D^T A with every token counted once, most of them falling at the first distance along minus their credit."""
+    m = cut_module()
+    from loud.cut import RUNWAY, estimator_classes, record_settings, ridge_fit, runway
+    changes = torch.tensor([[-1., -2, -3, -4], [1, -2, -3, -4], [-1, -.5, -3, -4], [-1, -2, -1, -5], [0, 0, 0, 0]])
+    assert runway(changes).tolist() == [4, 0, 1, 2, 0]
+    generator = torch.Generator().manual_seed(9)
+    A, D = torch.randn(40, 6, generator=generator), torch.randn(40, 3, generator=generator)
+    halves = [(a.T @ a, d.T @ a) for a, d in ((A[:25], D[:25]), (A[25:], D[25:]))]
+    fit = ridge_fit(halves[0][0] + halves[1][0], halves[0][1] + halves[1][1], 0.1)
+    lam = 0.1 * (A.T @ A).diagonal().mean()
+    stacked = torch.linalg.lstsq(torch.cat([A, lam.sqrt() * torch.eye(6)]), torch.cat([D, torch.zeros(6, 3)])).solution
+    assert torch.allclose(fit, stacked.T, atol=1e-5), 'the summed fit is not the ridge least squares'
+
+    s = record_settings(m, '2m', 4)
+    model = m.make_model(torch.device('cpu'), 0, s.model, s.projection_std, s.head_std)
+    _, Cut = estimator_classes(m)
+    row = cut_rows_data()[:1]
+    x, y = row[:, :-1].contiguous(), row[:, 1:].contiguous()
+    ours = Cut(model, s, 0, 0, 1, 1, None)
+    ours.targets = True
+    ours.estimate(x, y)
+    stats, counts = ours.fit
+    writers = {f'transformer.h.{i}.{kind}.c_proj' for i in range(s.model.n_layer) for kind in ('attn', 'mlp')}
+    assert set(stats) == writers == set(counts)
+    width, hidden = s.model.n_embd, 4 * s.model.n_embd
+    for name, (ata, dta) in stats.items():
+        inputs = hidden if 'mlp' in name else width
+        assert ata.shape == (inputs, inputs) and dta.shape == (width, inputs) and torch.allclose(ata, ata.T)
+        assert counts[name].sum() == x.shape[1] and len(counts[name]) == len(RUNWAY) + 1
+    falling = sum(c[1:].sum() for c in counts.values()) / sum(c.sum() for c in counts.values())
+    assert falling > 0.5, f'only {falling:.2f} of the tokens fall along minus their credit'
+
+
+def cut_variants_run(scratch):
+    """E11, E7's partial cycle with its self-check and E8 together on the 2-layer model, two virtual GPUs on each of
+    two sequences: every update completes (the writers' fits replacing their gradients); the check raises the rows to
+    the full cycle; the runway distribution and the damping summary are logged."""
+    cut_module()
+    import loud.cut
+    loud.cut.RUNWAY_EVERY = 1
+    patch_sequences(length=CUT_SEQ, vocab=CUT_VOCAB)
+    spec = dict(experiment='cpu', variant='cut_variants', seed=0, task='cut', args=dict(
+        preset='2m', sequences=16, heldout=8, batch=2, virtual_gpus=4, rows=64, rows_tiled=True, rows_check=1e-9,
+        target_damping=0.1, curvature_damping=30.0, damp_directions=2, damp_every=2, end_merge=False,
+        official_eval=False))
+    out = Path(scratch) / 'cut_variants'
+    result = loud.cut.run(spec, out)
+    metrics = [json.loads(line) for line in (out / 'metrics.jsonl').read_text().splitlines()]
+    assert result['complete'] and [r['phase'] for r in metrics] == ['boost', 'cut', 'cut', 'cut']
+    assert [r.get('chain_rows') for r in metrics] == [None, 64, 128, 128]  # raised after the first Cut update
+    assert metrics[1]['rows_check']['raised_to'] == 128 and set(metrics[1]['rows_check']['sites']) == {'0', '1'}
+    assert all(set(r['runway']) == {'0.attn.c_proj', '0.mlp.c_proj', '1.attn.c_proj', '1.mlp.c_proj'}
+               for r in metrics[1:])
+    assert all(abs(sum(fractions) - 1) < 1e-3 for r in metrics[1:] for fractions in r['runway'].values())
+    assert [r['step'] for r in metrics if 'damping' in r] == [2, 4]  # refreshes at Cut updates 1 and 3
 
 
 if __name__ == '__main__':
