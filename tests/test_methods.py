@@ -7,7 +7,8 @@ import sys
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-CHECKS = ('proxy_gradient', 'proxy_run', 'identity_window', 'identity_step', 'identity_run', 'diagnostics')
+CHECKS = ('proxy_gradient', 'proxy_run', 'identity_window', 'identity_step', 'identity_run', 'diagnostics', 'anvil_hook',
+          'curvature_damping', 'fisher_factor', 'population_rules', 'population_run')
 
 
 @pytest.mark.parametrize('check', CHECKS)

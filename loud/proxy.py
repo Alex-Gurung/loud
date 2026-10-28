@@ -5,13 +5,17 @@ block matrices, Adam elsewhere), rates and warmdown, with the shared loop's data
 (loud/train.py). The 8-GPU script gives each GPU one sequence, averages the float32 gradients across GPUs and casts
 back to each parameter's dtype; here each micro-batch (default: one sequence) is one GPU's share, and the same float32
 average is formed before the cast. The batch-mean loss is the gradient's objective, as there. Adds H2 (per-sequence
-gradients).
+gradients), and the hooks through which E8 and E9 replace ANVIL II's orthogonalization (loud/anvil.py).
 """
+import copy
 from dataclasses import asdict, is_dataclass
 
 import torch
 
 from . import refs
+from .anvil import shaped_optimizer
+from .curvature import CurvatureDamping
+from .fisher import FisherFactor
 from .options import PRESETS, proxy_options
 from .pergrad import PerSequenceGrads
 from .train import current_rates, rate_labels, set_rate, train
@@ -60,7 +64,10 @@ class Backprop:
 
     def reset(self):
         self.model = self.reference.make_model(self.device, self.seed)
-        self.optimizer = self.reference.make_optimizer(self.model, self.steps)
+        self.shaper = shaper(self.o, self.reference, self.model, self.seed)  # E8 or E9; None leaves ANVIL II alone
+        self.optimizer = (self.reference.make_optimizer(self.model, self.steps) if self.shaper is None else
+                          shaped_optimizer(self.reference.module, self.model, self.reference.settings, self.steps,
+                                           self.shaper))
         self.params = list(self.model.parameters())
         self.accumulators = [torch.zeros_like(p, dtype=torch.float32) for p in self.params]
         self.labels = rate_labels(self.optimizer, self.reference.settings.lr)
@@ -78,6 +85,8 @@ class Backprop:
         for micro in batch.split(self.o['micro_batch']):
             with torch.autocast(self.device.type, dtype=torch.bfloat16):
                 loss = self.model(micro[:, :-1].contiguous(), micro[:, 1:].contiguous())
+            if isinstance(self.shaper, FisherFactor):
+                self.shaper.observe(micro[:, 1:])
             loss.backward()
             if self.pergrad is not None:
                 self.pergrad.capture(self.model)
@@ -96,17 +105,40 @@ class Backprop:
         set_rate(self.optimizer, step, self.steps, self.reference.warmdown, self.reference.final)
         fields = current_rates(self.optimizer, self.labels)
         loss = self.gradient(batch)
+        if self.shaper is not None:
+            self.shaper.before_step(step, self.pergrad)
         self.optimizer.step()
+        if self.shaper is not None:
+            self.shaper.after_step(self.model, batch, self.pergrad)
         self.optimizer.zero_grad(set_to_none=True)
         return loss, fields
 
     def diagnose(self, step):
-        if self.pergrad is None:
-            return {}
-        every = self.o['grad_noise_every']
-        record = dict(grad_noise=self.pergrad.summary()) if every and step % every == 0 else {}
-        self.pergrad.clear()
+        record = self.shaper.report(step) if self.shaper is not None else {}
+        if self.pergrad is not None:
+            every = self.o['grad_noise_every']
+            if every and step % every == 0:
+                record['grad_noise'] = self.pergrad.summary()
+            self.pergrad.clear()
         return record
+
+    def assign(self, other):
+        """Take another trainer's weights and optimizer state (E3: branching a copy, replacing the worst one)."""
+        self.model.load_state_dict(other.model.state_dict())
+        for mine, theirs in zip(self.optimizer.optimizers, other.optimizer.optimizers):
+            mine.load_state_dict(copy.deepcopy(theirs.state_dict()))  # load_state_dict would alias the tensors
+        # load_state_dict replaces the groups: point the wrapper (and set_rate) at the new ones; ANVIL's clock too
+        self.optimizer.param_groups = [g for o in self.optimizer.optimizers for g in o.param_groups]
+        self.optimizer.optimizers[0].t = other.optimizer.optimizers[0].t
+
+
+def shaper(o, reference, model, seed):
+    """E8's curvature damping or E9's Fisher factor in place of ANVIL II's polar(), or None."""
+    if o['curvature_damping']:
+        return CurvatureDamping(o, model, reference.settings.anvil_lr, reference.module.polar)
+    if o['fisher_damping']:
+        return FisherFactor(o, model, seed)
+    return None
 
 
 def run(spec, run_dir):

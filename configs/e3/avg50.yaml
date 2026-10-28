@@ -1,0 +1,15 @@
+# E3, rule (a) with N = 50: as avg10 (see there for calibration, success and kill), averaging every 50 updates per copy.
+experiment: e3
+variant: avg50
+task: population
+seeds: [0, 1, 2]
+priority: 55
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0,
+        verify.population_smoke.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  rule: average
+  every: 50

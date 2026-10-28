@@ -4,6 +4,7 @@ import re
 TASKS = {
     'proxy': ('loud.proxy', 'run'),               # H1 backprop proxy
     'identity': ('loud.identity', 'run'),         # H5 identity-path forward-only estimator (PR #26)
+    'population': ('loud.population', 'run'),     # E3: copies of the backprop proxy on split data
     'score': ('loud.score', 'run_task'),          # official rescoring of a checkpoint
     'reference': ('loud.reference', 'run_task'),  # a pinned external script, unmodified, on one GPU
     'compare': ('loud.compare', 'run_task'),      # two runs' per-update losses side by side
@@ -19,7 +20,8 @@ CHECKPOINT_DTYPES = ('bfloat16', 'float32')
 
 # What each task's result.json holds that `expect` may check.
 TRAINING_RESULTS = ('val_loss', 'test_loss', 'heldout_loss', 'train_seconds', 'train_loss_last', 'peak_cuda_gb')
-RESULTS = {'proxy': TRAINING_RESULTS, 'identity': TRAINING_RESULTS, 'score': ('val_loss', 'test_loss'),
+RESULTS = {'proxy': TRAINING_RESULTS, 'identity': TRAINING_RESULTS, 'population': TRAINING_RESULTS,
+           'score': ('val_loss', 'test_loss'),
            'reference': ('val_loss', 'test_loss', 'train_seconds'),
            'compare': ('train_loss_max_diff', 'train_loss_mean_diff', 'train_loss_max_diff_all', 'val_loss_diff'),
            'diagnose': (),
@@ -72,7 +74,25 @@ PROXY = dict(
     lr_mult=1.0,                # scales both Adam and ANVIL II rates, as backprop_preset.py --lr-mult
     per_sequence_grads=False,   # H2
     grad_noise_every=0,         # log the H2 across-sequence spread every N updates (needs per_sequence_grads)
+    curvature_damping=0.0,      # E8: lambda, in squared ANVIL II steps (loud/curvature.py); 0 = off
+    damp_directions=16,         # E8: tracked top singular directions of each block matrix's pending update
+    damp_every=50,              # E8: updates between refreshes of the directions and their curvature
+    damp_where='step',          # E8: 'step' (after the orthogonalization) or 'pending' (the plan's literal placement)
+    fisher_damping=0.0,         # E9: true-Fisher left factor in place of ANVIL II's polar (loud/fisher.py); 0 = off
 )
+
+# E3 (loud/population.py): copies of the proxy branched from one trajectory. Only POPULATION_FREE options may change;
+# the rest stay at their defaults (one change per variant, and the population loop has no H4 or monitoring).
+POPULATION = dict(
+    PROXY,
+    batch=4,                    # the batch-4 baseline's (e1.bp_b4)
+    branch=0.2,                 # fraction of the single run's updates done before the copies branch
+    copies=4,
+    rule=None,                  # 'average' | 'select' | 'ensemble'
+    every=10,                   # N: updates per copy between averages or selections (ensemble: between logs)
+)
+POPULATION_FREE = ('sequences', 'heldout', 'batch', 'preset', 'test', 'official_eval', 'recipe', 'micro_batch',
+                   'lr_mult', 'branch', 'copies', 'rule', 'every')
 
 IDENTITY = dict(
     TRAINING,
@@ -156,7 +176,48 @@ def proxy_options(args):
         raise ValueError('per-sequence gradients need micro_batch: 1')
     if o['grad_noise_every'] and not o['per_sequence_grads']:
         raise ValueError('grad_noise_every needs per_sequence_grads')
+    if o['curvature_damping'] < 0 or o['fisher_damping'] < 0:
+        raise ValueError('curvature_damping and fisher_damping must be >= 0 (0 = off)')
+    if o['curvature_damping'] and o['fisher_damping']:
+        raise ValueError('curvature_damping (E8) and fisher_damping (E9) are separate variants')
+    if (o['curvature_damping'] or o['fisher_damping']) and o['recipe'] != 'boostcut':
+        raise ValueError("E8 and E9 hook boost-cut's ANVIL II (recipe: boostcut)")
+    if o['curvature_damping']:
+        positive(o, 'damp_directions', 'damp_every')
+        if not o['per_sequence_grads']:
+            raise ValueError('curvature_damping reads its noise from per-sequence gradients: set per_sequence_grads')
+        if o['damp_where'] not in ('step', 'pending'):
+            raise ValueError("damp_where must be 'step' or 'pending'")
+        if o['damp_directions'] > PRESETS[o['preset']][1]:
+            raise ValueError('damp_directions must be at most the width')
     return o
+
+
+def population_options(args):
+    o = training_options(args, POPULATION, 'population')
+    changed = sorted(k for k in POPULATION if k not in POPULATION_FREE and o[k] != POPULATION[k])
+    if changed:
+        raise ValueError(f'population runs keep {changed} at their defaults; they may set {list(POPULATION_FREE)}')
+    proxy_options({k: o[k] for k in PROXY})
+    if o['rule'] not in ('average', 'select', 'ensemble'):
+        raise ValueError("rule must be 'average', 'select' or 'ensemble'")
+    if not 0 < o['branch'] < 1:
+        raise ValueError('branch must be a fraction in (0, 1)')
+    positive(o, 'copies', 'every')
+    if o['copies'] < 2:
+        raise ValueError('a population needs at least two copies')
+    if not o['heldout']:
+        raise ValueError('the copies are scored on the held-out sequences: heldout must be > 0')
+    if branch_rows(o)[1] // o['copies'] < o['batch']:
+        raise ValueError('the sequences left after the branch give a copy no update')
+    return o
+
+
+def branch_rows(o):
+    """(single-run updates before the branch, update sequences left after it)."""
+    n = range_size(o['sequences']) - o['heldout']
+    prefix = round(o['branch'] * (n // o['batch']))
+    return prefix, n - prefix * o['batch']
 
 
 def identity_options(args):
@@ -228,6 +289,7 @@ def noop_options(args):
     return args
 
 
-VALIDATE = {'proxy': proxy_options, 'identity': identity_options, 'score': score_options,
+VALIDATE = {'proxy': proxy_options, 'identity': identity_options, 'population': population_options,
+            'score': score_options,
             'reference': reference_options, 'compare': compare_options, 'diagnose': diagnose_options,
             'noop': noop_options}
