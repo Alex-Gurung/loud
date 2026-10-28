@@ -66,17 +66,28 @@ def metrics(run):
     return read_jsonl(Path(run['run_dir']) / 'metrics.jsonl')
 
 
-def final_plot(plt, by_variant, palette, out, title):
+def final_plot(plt, by_variant, palette, out, title, baseline=None):
+    """baseline: (label, its runs), the plan's reference cell from another experiment, drawn in muted ink with a line
+    at its mean - 0.02 (the plan's success margin)."""
     variants = sorted(by_variant, key=lambda v: statistics.fmean(r['val_loss'] for r in by_variant[v]))
-    fig, ax = plt.subplots(figsize=(6.4, 0.45 * len(variants) + 1.2))
-    for y, v in enumerate(variants):
-        vals = [r['val_loss'] for r in by_variant[v]]
+    rows = [(v, by_variant[v], palette[v]) for v in variants]
+    if baseline:
+        rows.append((baseline[0], baseline[1], MUTED))
+    fig, ax = plt.subplots(figsize=(6.4, 0.45 * len(rows) + 1.2))
+    for y, (v, runs_, color) in enumerate(rows):
+        vals = [r['val_loss'] for r in runs_]
         mean = statistics.fmean(vals)
         sd = statistics.stdev(vals) if len(vals) > 1 else 0.0
-        ax.errorbar(mean, y, xerr=sd, fmt='o', color=palette[v], markersize=7, capsize=0, elinewidth=1.5, zorder=3)
-        ax.scatter(vals, [y] * len(vals), s=18, facecolor=SURFACE, edgecolor=palette[v], linewidth=1.2, zorder=4)
+        ax.errorbar(mean, y, xerr=sd, fmt='o', color=color, markersize=7, capsize=0, elinewidth=1.5, zorder=3)
+        ax.scatter(vals, [y] * len(vals), s=18, facecolor=SURFACE, edgecolor=color, linewidth=1.2, zorder=4)
         ax.annotate(f'{mean:.4f}' + (f' ± {sd:.4f}' if len(vals) > 1 else '') + f'  (n={len(vals)})',
                     (mean, y), xytext=(0, 8), textcoords='offset points', ha='center', fontsize=7.5, color=INK_2)
+    if baseline:
+        line = statistics.fmean(r['val_loss'] for r in baseline[1]) - 0.02
+        ax.axvline(line, color=MUTED, linewidth=1, linestyle='--')
+        ax.annotate('baseline - 0.02', (line, len(rows) - 0.5), xytext=(3, 0), textcoords='offset points',
+                    fontsize=7.5, color=INK_2, va='top')
+    variants = [v for v, _, _ in rows]
     ax.set_yticks(range(len(variants)), variants)
     ax.set_ylim(-0.7, len(variants) - 0.3)
     ax.grid(axis='y', visible=False)
@@ -172,6 +183,100 @@ def val_time_plot(plt, by_variant, palette, out, target=3.5):
     plt.close(fig)
 
 
+def windows(series, width):
+    """{step: value} -> (window starts, mean value per window of `width` steps)."""
+    groups = {}
+    for step, value in series.items():
+        groups.setdefault((step - 1) // width, []).append(value)
+    keys = sorted(groups)
+    return [k * width + 1 for k in keys], [statistics.fmean(groups[k]) for k in keys]
+
+
+def e4_plots(plt, by_variant, palette, out, width=50):
+    """E4: the acceptance rate per 50 updates, and the effective ANVIL II rate against the hand schedule (e1.bp_b8's
+    logged rate), means over seeds."""
+    hand = counted('e1').get('bp_b8', [])
+    fig, (accept_ax, rate_ax) = plt.subplots(1, 2, figsize=(11, 4))
+    for v in sorted(by_variant):
+        accepted = [{m['step']: float(m['accepted']) for m in metrics(r) if 'accepted' in m} for r in by_variant[v]]
+        xs, ys = seed_mean([dict(zip(*windows(a, width))) for a in accepted if a])
+        if xs:
+            accept_ax.plot(xs, ys, color=palette[v], marker='o', markersize=3, label=v)
+        xs, ys = seed_mean([{m['step']: m['lr']['anvil'] for m in metrics(r)} for r in by_variant[v]])
+        rate_ax.plot(xs, ys, color=palette[v], label=v)
+    if hand:
+        xs, ys = seed_mean([{m['step']: m['lr']['anvil'] for m in metrics(r)} for r in hand])
+        rate_ax.plot(xs, ys, color=MUTED, linestyle='--', label='hand schedule (e1.bp_b8)')
+    accept_ax.axhline(0.6, color=MUTED, linewidth=1, linestyle=':')
+    accept_ax.set_title(f'acceptance rate per {width} updates (dotted: the plan\'s 0.6)', loc='left', fontsize=9)
+    rate_ax.set_title('effective ANVIL II rate', loc='left', fontsize=9)
+    for ax in (accept_ax, rate_ax):
+        ax.set_xlabel('update')
+        ax.legend(fontsize=7.5)
+    fig.tight_layout()
+    fig.savefig(out / 'step_control.png')
+    plt.close(fig)
+
+
+def e3_plot(plt, by_variant, palette, out):
+    """E3: the largest pairwise barrier (a midpoint's held-out loss minus the worse of its two copies; above 0, the
+    pair has left one basin) at each logged round, mean over seeds."""
+    fig, ax = plt.subplots(figsize=(6.4, 3.8))
+    for v in sorted(by_variant):
+        series = [{e['step']: max(e['barriers'].values()) for e in read_jsonl(Path(r['run_dir']) / 'population.jsonl')}
+                  for r in by_variant[v]]
+        xs, ys = seed_mean([s for s in series if s])
+        if xs:
+            ax.plot(xs, ys, color=palette[v], marker='o', markersize=3, label=v)
+    ax.axhline(0, color=MUTED, linewidth=1)
+    ax.set_xlabel('update (the single run\'s count)')
+    ax.set_ylabel('largest barrier (nats)')
+    ax.set_title('E3: midpoints between copies (above 0: the copies left one basin)', loc='left', fontsize=9)
+    ax.legend(fontsize=7.5)
+    fig.tight_layout()
+    fig.savefig(out / 'barriers.png')
+    plt.close(fig)
+
+
+def e2_table(out):
+    """E2: final validation loss, the clean training loss over the last 50 updates, the gap between them, and the blur's
+    cost (the displaced passes' loss minus the clean one), means over seeds; e1.bp_b8 as the baseline."""
+    cells = dict(counted('e2'))
+    cells['baseline e1.bp_b8'] = counted('e1').get('bp_b8', [])
+    rows = []
+    for v, runs_ in sorted(cells.items()):
+        if not runs_:
+            continue
+        tails = [metrics(r)[-50:] for r in runs_]
+        val = statistics.fmean(r['val_loss'] for r in runs_)
+        train = statistics.fmean(statistics.fmean(m['train_loss'] for m in t) for t in tails)
+        blur = [m['blurred_loss'] - m['train_loss'] for t in tails for m in t if 'blurred_loss' in m]
+        rows.append([v, len(runs_), f'{val:.4f}', f'{train:.4f}', f'{val - train:+.4f}',
+                     f'{statistics.fmean(blur):+.4f}' if blur else '-'])
+    if not rows:
+        return None
+    text = markdown(['variant', 'n', 'val', 'train (last 50)', 'val - train', 'blurred - clean'], rows)
+    (out / 'gap.md').write_text(text)
+    return text
+
+
+def e8_table(out):
+    """E8: at each run's last refresh, per matrix type: the median curvature-to-noise ratio, damping factor and overlap
+    of the tracked directions with the previous refresh's, means over seeds."""
+    rows = []
+    for v, runs_ in sorted(counted('e8').items()):
+        last = [next((m['damping'] for m in reversed(metrics(r)) if 'damping' in m), None) for r in runs_]
+        last = [d for d in last if d]
+        for kind in sorted(last[0]) if last else []:
+            values = [[d[kind].get(key) for d in last] for key in ('h2_over_c', 'factor', 'overlap')]
+            rows.append([v, kind] + [f'{statistics.fmean(x):.4g}' if None not in x else '-' for x in values])
+    if not rows:
+        return None
+    text = markdown(['variant', 'matrix', 'h2/c', 'factor', 'overlap'], rows)
+    (out / 'damping.md').write_text(text)
+    return text
+
+
 def diagnostic(experiment, variant):
     """The summary JSON of a finished diagnose run (seed 0), or None."""
     run = RUNS / experiment / variant / 's0'
@@ -250,8 +355,11 @@ def e8_plot(plt, out):
     return True
 
 
-EXTRA = {'e6': [drift_plot], 'e12': [val_time_plot]}
-TABLES = {'e5': e5_table, 'e7': e7_table}
+EXTRA = {'e3': [e3_plot], 'e4': [e4_plots], 'e6': [drift_plot], 'e12': [val_time_plot]}
+TABLES = {'e2': e2_table, 'e5': e5_table, 'e7': e7_table, 'e8': e8_table}
+# The plan's reference cell for experiments whose baseline lives in E1.
+BASELINES = {'e2': ('e1', 'bp_b8'), 'e4': ('e1', 'bp_b8'), 'e10': ('e1', 'bp_b8'), 'e3': ('e1', 'bp_b4'),
+             'e8': ('e1', 'bp_b4'), 'e9': ('e1', 'bp_b4')}
 FIGURES = {'e8': e8_plot}
 
 
@@ -265,7 +373,12 @@ def plot(experiment):
         plt = pyplot()
         palette = colors(by_variant)
         title = f'{experiment}: {sum(len(v) for v in by_variant.values())} complete runs'
-        final_plot(plt, by_variant, palette, out, title)
+        baseline = None
+        if experiment in BASELINES:
+            source, variant = BASELINES[experiment]
+            found = counted(source).get(variant)
+            baseline = (f'baseline {source}.{variant}', found) if found else None
+        final_plot(plt, by_variant, palette, out, title, baseline)
         curves_plot(plt, by_variant, palette, out, title)
         for extra in EXTRA.get(experiment, []):
             extra(plt, by_variant, palette, out)

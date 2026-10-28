@@ -1,0 +1,20 @@
+# E9 (proxy test): ANVIL II at batch 4 (e1.bp_b4's recipe) with its orthogonalization of the block matrices replaced by
+# a damped true-Fisher left factor, (S + damping * mean eig(S) * I)^(-1/2), S from sampled-label gradients at each
+# matrix's output (loud/fisher.py). One knob, the damping, at 0.01, 0.1 and 1 times S's mean eigenvalue: from nearly
+# full output-side whitening to a mild one (large damping tends to the raw pending update). Success: beats e1.bp_b4 by
+# more than 0.02 (seeds 0-2). If none does, the kernel version in the Cut port is skipped (the plan).
+experiment: e9
+variant: damp_1e-2
+task: proxy
+seeds: [0, 1, 2]
+priority: 65
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0, verify.fisher_smoke.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  fisher_damping: 0.01
+  heldout_every: 100
+  checkpoints: true
+  means: true

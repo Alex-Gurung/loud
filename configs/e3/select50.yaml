@@ -1,0 +1,15 @@
+# E3, rule (b) with N = 50: as select10, selecting every 50 updates per copy.
+experiment: e3
+variant: select50
+task: population
+seeds: [0, 1, 2]
+priority: 55
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0,
+        verify.population_smoke.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  rule: select
+  every: 50

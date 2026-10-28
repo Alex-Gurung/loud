@@ -29,14 +29,15 @@ def patch_attention():
     um.attention = dense_attention
 
 
-def patch_sequences():
+def patch_sequences(*loops):
     real = data.benchmark_split
 
     def short(*args, **kwargs):
         split = real(*args, **kwargs)
         split.train, split.heldout = split.train[:, :SEQ].contiguous(), split.heldout[:, :SEQ].contiguous()
         return split
-    train.benchmark_split, train.SEQ = short, SEQ
+    for loop in (train, *loops):
+        loop.benchmark_split, loop.SEQ = short, SEQ
 
 
 def proxy_gradient(scratch):
@@ -513,6 +514,241 @@ def variants_run(scratch):
         metrics = [json.loads(line) for line in (out / 'metrics.jsonl').read_text().splitlines()]
         assert result['complete'] and len(metrics) == 5 and all(fields <= set(m) for m in metrics), variant
         assert all(torch.isfinite(torch.tensor(m['train_loss'])) for m in metrics), variant
+
+
+def proxy_trainer(**args):
+    from loud.options import proxy_options
+    from loud.proxy import Backprop, Reference
+    reference = Reference('boostcut', 1.0, '2m')
+    patch_attention()
+    o = proxy_options(dict(dict(preset='2m', batch=4), **args))
+    return Backprop(o, reference, torch.device('cpu'), 0, 10), reference.module
+
+
+def batches(count, vocab, seed=6):
+    return torch.randint(0, vocab, (count, 4, SEQ), generator=torch.Generator().manual_seed(seed))
+
+
+def anvil_hook(scratch):
+    """ShapedAnvil whose shaper returns polar(pending) steps exactly as boost-cut's Anvil, and leaves Anvil in place."""
+    from loud.anvil import shaped_optimizer
+    trainer, m = proxy_trainer()
+    original = m.Anvil
+    twin = copy.deepcopy(trainer.model)
+    polar = type('Polar', (), dict(direction=lambda self, p, pending: m.polar(pending)))()
+    shaped = shaped_optimizer(m, twin, trainer.reference.settings, 10, polar)
+    assert m.Anvil is original and type(trainer.optimizer.optimizers[0]) is original
+    for rows in batches(3, trainer.model.config.vocab_size):
+        for model, optimizer in ((trainer.model, trainer.optimizer), (twin, shaped)):
+            model.requires_grad_(True)
+            model(rows[:, :-1].contiguous(), rows[:, 1:].contiguous()).backward()
+            model.requires_grad_(False)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+    for (name, a), b in zip(trainer.model.named_parameters(), twin.parameters()):
+        assert torch.equal(a, b), f'{name}: ShapedAnvil does not reproduce Anvil'
+
+
+def curvature_damping(scratch):
+    """E8: the tracked directions are the pending update's top singular directions; h matches an exact Hessian-vector
+    product; c is the across-sequence variance of the projections; the factors follow the formula; 'step' damps after
+    polar() and 'pending' before it, where polar() undoes most of it."""
+    from loud.curvature import CURVATURE_ROWS, damp
+    trainer, m = proxy_trainer(per_sequence_grads=True, curvature_damping=3.0, damp_directions=2, damp_every=2)
+    shaper, model = trainer.shaper, trainer.model
+    rows = batches(3, model.config.vocab_size)
+    trainer.update(1, rows[0])  # a refresh: at update 1, fast and slow are multiples of g, so pending is too
+    params = dict(model.named_parameters())
+    for i, name in enumerate(shaper.names):
+        a, b = shaper.left[i], shaper.right[i]
+        assert torch.allclose(a.T @ a, torch.eye(2), atol=1e-5) and torch.allclose(b.T @ b, torch.eye(2), atol=1e-5)
+        u, _, vh = torch.linalg.svd(trainer.accumulators[list(params).index(name)], full_matrices=False)
+        assert (u[:, :2] * a).sum(0).abs().min() > 0.999 and (vh[:2].T * b).sum(0).abs().min() > 0.999, name
+        g = trainer.pergrad.stack(name).float()
+        projections = torch.einsum('brc,rk,ck->bk', g, a, b)
+        assert torch.allclose(shaper.noise[i], projections.var(0), rtol=1e-4)
+
+    i = shaper.names.index('transformer.h.1.mlp.c_fc.weight')
+    d = torch.outer(shaper.left[i][:, 0], shaper.right[i][:, 0])
+    exact_model = copy.deepcopy(model).float().requires_grad_(True)
+    weight = dict(exact_model.named_parameters())[shaper.names[i]]
+    curvature_rows = rows[0][:CURVATURE_ROWS]
+    with torch.enable_grad():
+        loss = exact_model(curvature_rows[:, :-1].contiguous(), curvature_rows[:, 1:].contiguous())
+        g = torch.autograd.grad(loss, weight, create_graph=True)[0]
+        hvp = torch.autograd.grad((g * d).sum(), weight)[0]
+    exact_h = (hvp * d).sum().item()
+    assert abs(shaper.h[i][0].item() - exact_h) < 2e-2 * abs(exact_h) + 1e-6, (shaper.h[i][0].item(), exact_h)
+
+    trainer.diagnose(1)
+    trainer.update(2, rows[1])  # not a refresh: one more noise sample, factors from the formula
+    lr = trainer.reference.settings.anvil_lr
+    for i, name in enumerate(shaper.names):
+        p = params[name]
+        scale = 3.0 * lr ** 2 * max(1, p.size(0) / p.size(1))
+        expected = 1 / (1 + (shaper.noise[i] / 2) / (4 * shaper.h[i].square() * scale))
+        assert shaper.samples == 2 and torch.allclose(shaper.factors[i], expected, rtol=1e-5)
+    trainer.diagnose(2)
+    trainer.update(3, rows[2])  # a refresh again: new directions, and a summary with their overlap
+    report = trainer.diagnose(3)['damping']
+    assert {'h', 'c', 'h2_over_c', 'factor', 'overlap'} <= set(report['mlp.c_fc'])
+
+    p = params[shaper.names[i]]
+    pending = torch.randn(p.shape, generator=torch.Generator().manual_seed(7))
+    a, b, f = shaper.left[i], shaper.right[i], shaper.factors[i]
+    shaper.refreshing = False
+    assert torch.equal(shaper.direction(p, pending), damp(m.polar(pending), a, b, f))
+    shaper.where = 'pending'
+    assert torch.equal(shaper.direction(p, pending), m.polar(damp(pending, a, b, f)))
+    x = torch.randn(p.shape, generator=torch.Generator().manual_seed(8))
+    coefficient = lambda y: (a.T @ y * b.T).sum(1)
+    assert torch.allclose(coefficient(damp(x, a, b, f)), f * coefficient(x), atol=1e-5)
+    rest = lambda y: y - a @ torch.diag(coefficient(y)) @ b.T
+    assert torch.allclose(rest(damp(x, a, b, f)), rest(x), atol=1e-5)  # other directions are left alone
+
+    # why 'step' is the default: halving a gradient-like matrix's top singular directions before polar() leaves them
+    # at about 1 after it; halving them after polar() halves them
+    U, _ = torch.linalg.qr(torch.randn(128, 128, generator=torch.Generator().manual_seed(9)))
+    V, _ = torch.linalg.qr(torch.randn(128, 128, generator=torch.Generator().manual_seed(10)))
+    G = U @ torch.diag(torch.logspace(0, -3, 128)) @ V.T
+    a, b, half = U[:, :4], V[:, :4], torch.full((4,), 0.5)
+    top = lambda y: (a.T @ y * b.T).sum(1)
+    assert top(m.polar(damp(G, a, b, half))).min() > 0.9
+    assert top(damp(m.polar(G), a, b, half)).max() < 0.6
+
+
+def fisher_factor(scratch):
+    """E9: the sums of d d^T come from the sampled-label gradient at each block matrix's output (checked against an
+    independent forward, token by token), leave the training gradient untouched, and the update is the damped inverse
+    root of S times the pending update at the polar factor's norm."""
+    from loud.fisher import SAMPLE_SEED, inverse_root
+    trainer, m = proxy_trainer(fisher_damping=0.1)
+    plain, _ = proxy_trainer()
+    shaper, model = trainer.shaper, trainer.model
+    rows = batches(1, model.config.vocab_size)[0]
+    trainer.gradient(rows)
+    plain.gradient(rows)
+    for (name, p), q in zip(model.named_parameters(), plain.model.parameters()):
+        assert torch.equal(p.grad, q.grad), f'{name}: the sampled-label backward leaked into the training gradient'
+
+    reference = copy.deepcopy(plain.model).requires_grad_(True)
+    names = [n for n, p in reference.named_parameters() if n.startswith('transformer.h.') and p.ndim == 2
+             and 've_gate' not in n]
+    modules = dict(reference.named_modules())
+    generator = torch.Generator().manual_seed(0 + SAMPLE_SEED)  # the job seed (0) + the label generator's offset
+    expected = [0] * len(names)
+    for micro in rows.split(1):
+        outputs = {}
+        hooks = [modules[n.removesuffix('.weight')].register_forward_hook(
+            lambda mod, args, out, n=n: outputs.__setitem__(n, out)) for n in names]
+        with torch.autocast('cpu', dtype=torch.bfloat16):
+            logits = reference(micro[:, :-1].contiguous())
+        for h in hooks:
+            h.remove()
+        sampled = torch.multinomial(logits.detach().softmax(-1).flatten(0, 1), 1, generator=generator)
+        loss = torch.nn.functional.cross_entropy(logits.flatten(0, 1), sampled.flatten(), reduction='sum')
+        deltas = torch.autograd.grad(loss, [outputs[n] for n in names])
+        for j, d in enumerate(deltas):
+            d = d[0].float()
+            expected[j] = expected[j] + sum(torch.outer(d[t], d[t]) for t in range(d.shape[0]))  # token by token
+    for j, name in enumerate(names):
+        assert torch.allclose(shaper.batch_sum[j], expected[j], rtol=1e-3, atol=1e-6), name
+    tokens = 4 * (SEQ - 1)
+    assert shaper.tokens == tokens
+
+    shaper.before_step(1)
+    S, R = shaper.S[0], shaper.R[0]
+    assert torch.allclose(S, expected[0] / tokens, rtol=1e-3, atol=1e-9)
+    damped = S + 0.1 * torch.linalg.eigvalsh(S).clamp_min(0).mean() * torch.eye(len(S))
+    assert torch.allclose(R @ damped @ R, torch.eye(len(S)), atol=1e-3)
+    assert torch.allclose(inverse_root(S, 0.1), R)
+    p = dict(model.named_parameters())[names[0]]
+    pending = torch.randn(p.shape, generator=torch.Generator().manual_seed(11))
+    update = shaper.direction(p, pending)
+    assert abs(update.norm().item() - min(p.shape) ** 0.5) < 1e-3
+    assert torch.allclose(update / update.norm(), R @ pending / (R @ pending).norm(), atol=1e-6)
+
+
+def population_run(scratch):
+    """E3 end to end on a tiny model, once per rule: every remaining sequence feeds one copy's update at most once,
+    the copies' rates and ANVIL II's clock follow the single run's update numbers, and the rule acts as described."""
+    from loud import population
+    m = refs.trainer_module('boostcut')
+    patch_attention()
+    patch_sequences(population)
+    for rule in ('average', 'select', 'ensemble'):
+        spec = dict(experiment='cpu', variant=rule, seed=0, task='population', args=dict(
+            preset='2m', sequences=72, heldout=4, rule=rule, every=2, official_eval=False))
+        out = Path(scratch) / rule
+        result = population.run(spec, out)
+        config = json.loads((out / 'config.json').read_text())
+        metrics = [json.loads(line) for line in (out / 'metrics.jsonl').read_text().splitlines()]
+        events = [json.loads(line) for line in (out / 'population.jsonl').read_text().splitlines()]
+        # 68 update sequences: 17 updates of 4; 3 before the branch, then 56 left, 14 per copy: 3 rounds of 4 each
+        assert config['branch_step'] == 3 and config['rounds'] == 3 and config['unused_sequences'] == 8
+        assert [r['step'] for r in metrics] == list(range(1, 16)) and result['updates'] == 15
+        turns = [(r['round'], r['copy']) for r in metrics if r['phase'] == 'population']
+        assert turns == [(r, c) for r in (1, 2, 3) for c in range(4)]
+        anvil = m.Anvil([torch.zeros(2, 2)], 1.0, 0.0, 17)
+        for r in metrics:
+            anvil.t = r['step'] - 1
+            assert r['anvil_beta'] == anvil.rail_beta(), 'ANVIL II does not follow the single run'
+        base = metrics[0]['lr']['anvil']
+        assert all(abs(r['lr']['anvil'] - base * min(1.0, (17 - r['step'] + 1) / 17 / 0.3)) < 1e-12 for r in metrics)
+        assert [e['round'] for e in events] == [2, 3] and all(len(e['midpoints']) == 6 for e in events)
+        assert all(abs(e['barriers'][p] - (e['midpoints'][p] - max(e['copies'][int(p[0])], e['copies'][int(p[2])])))
+                   < 1e-12 for e in events for p in e['midpoints'])
+        if rule == 'average':
+            assert all(e['action'] == 'average' for e in events) and result['final'] == 'mean'
+        if rule == 'select':
+            assert all(set(e['action']) == {'select', 'replace'} for e in events)
+            last = events[-1]
+            assert result['final'] == f'copy {last["action"]["select"]}'
+            assert result['heldout_loss'] == min(result['final_copy_scores'])
+        if rule == 'ensemble':
+            mean, best = result['final_mean_score'], min(result['final_copy_scores'])
+            assert result['final'] == ('mean' if mean < best else f'copy {result["final_copy_scores"].index(best)}')
+            assert result['heldout_loss'] == min(mean, best)
+
+
+def population_rules(scratch):
+    """The rules on live copies: averaging leaves every copy at the mean with its own optimizer state; selection gives
+    the worst copy the best's weights and an unaliased copy of its optimizer state."""
+    from loud.heldout import HeldoutScorer
+    from loud.common import JsonlLog
+    from loud.population import Clock, Population
+    trainer, m = proxy_trainer()
+    rows = batches(3, trainer.model.config.vocab_size)
+    for step in (1, 2):
+        trainer.update(step, rows[step - 1])
+    heldout = HeldoutScorer(rows[2], Path(scratch) / 'heldout.jsonl', torch.device('cpu'))
+    events = JsonlLog(Path(scratch) / 'population.jsonl')
+    o = dict(trainer.o, copies=3, rule='average')
+    population = Population(o, trainer, trainer.reference, torch.device('cpu'), 0, heldout, events,
+                            Clock(torch.device('cpu')))
+    for c, member in enumerate(population.copies):  # make them differ
+        member.optimizer.optimizers[0].t = 2 + c
+        member.update(3 + c, rows[c])
+    states = [copy.deepcopy(member.optimizer.optimizers[0].state_dict()) for member in population.copies]
+    population.checkpoint(1, 5)
+    weights = [list(member.model.parameters()) for member in population.copies]
+    for ps in zip(*weights):
+        assert all(torch.equal(ps[0], q) for q in ps[1:]), 'averaging left the copies apart'
+    for member, state in zip(population.copies, states):
+        assert all(torch.equal(member.optimizer.optimizers[0].state[p]['slow'], state['state'][i]['slow'])
+                   for i, p in enumerate(member.optimizer.optimizers[0].param_groups[0]['params']))
+
+    population.o = dict(o, rule='select')
+    for c, member in enumerate(population.copies):
+        member.update(6 + c, rows[(c + 1) % 3])
+    scores = population.checkpoint(2, 8)
+    best, worst = scores.index(min(scores)), scores.index(max(scores))
+    for p, q in zip(population.copies[worst].model.parameters(), population.copies[best].model.parameters()):
+        assert torch.equal(p, q)
+    best_anvil = population.copies[best].optimizer.optimizers[0]
+    kept = {id(p): best_anvil.state[p]['slow'].clone() for p in best_anvil.param_groups[0]['params']}
+    population.copies[worst].update(9, rows[0])  # its state moves; the best copy's must not
+    assert all(torch.equal(best_anvil.state[p]['slow'], kept[id(p)]) for p in best_anvil.param_groups[0]['params'])
 
 
 if __name__ == '__main__':

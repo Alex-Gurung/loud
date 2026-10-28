@@ -176,6 +176,22 @@ def test_plots_read_only_the_run_files(tmp_path, monkeypatch):
     fake_run(tmp_path, 'h6', 'credit_dump_c20', 0, None, summary={s: site for s in plots.SITES})
     stats = {'transformer.h.0.attn.c_q.weight': [dict(h2_over_c=2.0), dict(h2_over_c=0.5)]}
     fake_run(tmp_path, 'h6', 'direction_stats_c20', 0, None, summary=stats)
+    for seed in (0, 1):
+        fake_run(tmp_path, 'e1', 'bp_b8', seed, 3.71, lambda s: dict(lr=dict(anvil=0.02 * (1 - s / 120))))
+        fake_run(tmp_path, 'e4', 'adapt', seed, 3.70, lambda s: dict(accepted=s % 3 > 0, lr=dict(anvil=0.02)))
+        fake_run(tmp_path, 'e2', 'smooth_t3', seed, 3.69, lambda s: dict(blurred_loss=8.1 - s / 50))
+        fake_run(tmp_path, 'e8', 'lambda_3e1', seed, 3.70, lambda s: dict(damping={'mlp.c_fc': dict(
+            h=1.0, c=2.0, h2_over_c=0.5, factor=0.9, overlap=0.8)}) if s % 50 == 1 else {})
+        fake_run(tmp_path, 'e3', 'avg10', seed, 3.72)
+        (tmp_path / 'runs' / 'e3' / 'avg10' / f's{seed}' / 'population.jsonl').write_text(''.join(
+            json.dumps(dict(round=r, step=242 + 4 * r, barriers={'0-1': 0.01 * r, '0-2': -0.01})) + '\n'
+            for r in (10, 20)))
+    for experiment in ('e2', 'e3', 'e4', 'e8'):
+        plots.plot(experiment)
+    made = {p.relative_to(tmp_path / 'plots').as_posix() for p in (tmp_path / 'plots').rglob('*.*')}
+    assert {'e4/step_control.png', 'e3/barriers.png', 'e2/gap.md', 'e8/damping.md', 'e2/final.png'} <= made
+    assert '| baseline e1.bp_b8 | 2 | 3.7100 |' in (tmp_path / 'plots' / 'e2' / 'gap.md').read_text()
+    assert '| lambda_3e1 | mlp.c_fc | 0.5 | 0.9 | 0.8 |' in (tmp_path / 'plots' / 'e8' / 'damping.md').read_text()
     timed = lambda s: dict(train_seconds=s * 6.0, val_loss=5 - s / 40) if s % 25 == 0 else {}
     fake_run(tmp_path, 'e12', 'record', 0, 3.34, timed)
     for experiment in ('e6', 'e5', 'e7', 'e8', 'e12'):

@@ -1,0 +1,17 @@
+# Runs before E3: a complete short population run (the 1M range: 23 updates of 4 before the branch, then 4 copies for
+# 22 rounds) on the GPU through the select rule (held-out scoring, copying weights and optimizer state), the
+# midpoint log and official scoring. A few minutes.
+experiment: verify
+variant: population_smoke
+task: population
+seeds: [0]
+priority: 3
+after: [verify.smoke.s0]
+args:
+  recipe: boostcut
+  sequences: 1M
+  heldout: 32
+  batch: 4
+  rule: select
+  every: 5
+notes: Pipeline check only; its numbers are not a result.

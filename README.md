@@ -28,6 +28,8 @@ EIDF, the GPU cluster, sharing one volume).
 | H5 Cut chain, PR #40 on one GPU | not started |
 | H6 diagnostic toolkit (`loud/diagnostics.py`, task `diagnose`): all five tools | done; CPU tests on a tiny model; configs in `configs/h6/` |
 | E2, E4, E10 proxy variants (`loud/variants.py`; `configs/e2/`, `e4/`, `e10/`: 32 jobs) | done; CPU tests: brute force, exact undo |
+| E3 population on split data (`loud/population.py`, task `population`) | done; CPU tests of the split, schedule and rules; `configs/e3/` |
+| E8 and E9 proxy versions (`loud/curvature.py`, `loud/fisher.py`, through `loud/anvil.py`) | done; CPU tests against exact HVPs and per-token sums; `configs/e8/`, `configs/e9/` |
 | H7 runner and results table (`run.py`, `collect.py`); per-experiment plot scripts | runner and table done; plots not started |
 | Port checks against their sources (`compare` task) | done |
 | GPU queue and workers (`loud/jobqueue.py`, `loud/worker.py`, `worker/`) | done; tested end to end on CPU |
@@ -108,6 +110,9 @@ final-loss gate fails, which is when they are needed to tell a port error from a
    batch gradient: checkpoints keep no optimizer state, so they stand in for the plan's pending update. Its curvature
    is a central difference of autograd gradients. The plan asks for a Hessian-vector product, and flex attention has
    no double backward.
+9. E3, E8 and E9 (`configs/e3/`, `configs/e8/`, `configs/e9/`), each first gated on its own complete 1M smoke run
+   (`verify.population_smoke`, `verify.curvature_smoke`, `verify.fisher_smoke`). E8 also waits for H6's
+   `direction_stats`, which the plan runs first and which says where E8's knob should sit.
 
 ### How the queue works
 
@@ -153,6 +158,8 @@ loud/            the harness package (frozen into each job's snapshot)
   heldout.py     H3                                                   checkpoints.py  H4
   score.py       official utils/eval.py scoring in a fresh process    compare.py   per-update loss check of two runs
   diagnostics.py H6: five offline measurements on H4 checkpoints
+  population.py  E3: copies of the proxy on split data                anvil.py     ANVIL II with a hook for E8, E9
+  curvature.py   E8: steps by curvature-to-noise (proxy)              fisher.py    E9: true-Fisher left factor (proxy)
   reference.py   run a pinned external script unmodified               refs.py      pinned external imports
   options.py     task registry, option tables and checks (no torch)   run.py       H7 runner
   collect.py     H7 results table
@@ -176,7 +183,7 @@ tiny models and short sequences, with dense attention instead of flex attention 
 ```yaml
 experiment: e1
 variant: bp_b4          # one change per variant; the file is configs/<experiment>/<variant>.yaml
-task: proxy             # proxy | identity | score | reference | compare | diagnose | noop (options: loud/options.py)
+task: proxy             # proxy | identity | population | score | reference | compare | diagnose | noop (loud/options.py)
 seeds: [0, 1, 2]
 priority: 50            # lower runs first
 after: [verify.bp_b8.s0]
@@ -257,6 +264,28 @@ one update over two virtual GPUs equals PR #26's FastRelay at ranks 0 and 1 with
   sequence (no momentum holds it) against the blend ANVIL II steps along, and against the fast and slow momenta alone.
   One sequence's cosine is noisy: compare it across K.
 
+**E3, populations** (task `population`). The job runs the batch-4 baseline's first 20% itself (the same code and
+seed as `e1.bp_b4`, so the same trajectory, about a minute) and branches into 4 copies. Copy c takes every 4th of the
+remaining sequences, `rest[c::4]`, in batches of 4. The copies take turns, so compute equals one run. Each copy update
+counts as the single run's next update number, which sets its rate and ANVIL II's clock, so the warmdown ends where
+the single run's does. Rules: `average` (every N updates per copy, weights only; each copy keeps its optimizer
+state), `select` (the worst copy takes the best's weights and optimizer state, by H3), `ensemble` (the mean at the end
+if H3 prefers it to the best copy). `population.jsonl` logs every N updates each copy's and each pairwise midpoint's
+held-out score, and the barrier (midpoint minus the worse end). Population runs have no H4 files: there is no single
+trajectory to checkpoint after the branch.
+
+**E8 and E9** replace ANVIL II's orthogonalization through one hook (`loud/anvil.py`); a CPU test checks the hooked
+optimizer reproduces boost-cut's ANVIL II bit for bit, and with both off the proxy uses the original.
+- **E8** (`curvature_damping`): every 50 updates, the top 16 singular directions of each block matrix's pending
+  update, with the curvature along each (central differences of float32 gradients on 2 of the batch's sequences: 1,536
+  passes, about 30 s per refresh) and the across-sequence noise of the gradient along it (H2, averaged until the next
+  refresh). Each update's step along a direction is scaled by `1 / (1 + c / (B h^2 lambda))`, lambda in squared
+  ANVIL II steps. About 20 minutes per 10M run on one H100 (an estimate: `verify.curvature_smoke` times it).
+- **E9** (`fisher_damping`): a damped inverse root of the true Fisher's output-side factor (from a backward with
+  labels sampled from the model) multiplies the pending update in place of `polar()`, at the polar factor's norm.
+  About 8 minutes per 10M run (an estimate). The plan's kernel version in the Cut port waits on this test: if no
+  damping beats the batch-4 baseline by 0.02, it is skipped.
+
 ## Review
 
 Every piece and every result goes to two independent reviewers: Codex (run as an unprivileged user on a frozen copy)
@@ -270,3 +299,6 @@ finding is triaged in [review/LEDGER.md](review/LEDGER.md). See [review/README.m
 - The pod image ships torch 2.13. Noise pins torch 2.10.0, and the published runs used 2.10.
   `verify.score_record` (scoring) and the verification runs (training) show whether that matters.
 - The backprop target is boost-cut's ledger, 3.70835 at seed 0. The handoff's 3.708 is the same run rounded.
+- E8 says to damp before ANVIL II's orthogonalization. `polar()` maps every singular value of the pending update to
+  about 1, so damping its top directions there leaves them at about 1 (and slightly enlarges the rest). E8 damps right
+  after `polar()` by default; `damp_where: pending` is the literal placement, run once as a control.
