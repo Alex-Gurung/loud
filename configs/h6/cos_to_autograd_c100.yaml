@@ -1,0 +1,11 @@
+# H6 on e1.bp_b4.s0's 100% checkpoint. The identity-path gradient estimate against autograd's, per matrix type and block (check_relay.py's
+# comparison): how good the cheapest estimator's credit is at this point of training.
+experiment: h6
+variant: cos_to_autograd_c100
+task: diagnose
+seeds: [0]
+priority: 70
+after: [e1.bp_b4.s0]
+args:
+  tool: cos_to_autograd
+  checkpoint: e1.bp_b4.s0:ckpt_100.pt

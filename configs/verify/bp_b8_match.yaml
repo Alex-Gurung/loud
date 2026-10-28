@@ -1,0 +1,16 @@
+# The proxy with whole-batch forwards (bp_b8_onefwd) against the unmodified backprop_preset.py (bp_b8_script), both on
+# one GPU: the per-update training losses must agree. A mismatch means the port's model, init, optimizer, schedule or
+# data order differs from the script's.
+experiment: verify
+variant: bp_b8_match
+task: compare
+seeds: [0]
+priority: 10
+after_done: [verify.bp_b8_onefwd.s0, verify.bp_b8_script.s0]  # runs even when a final-loss gate failed: it says why
+args:
+  a: verify.bp_b8_onefwd.s0
+  b: verify.bp_b8_script.s0
+  first: 50
+expect:
+  train_loss_max_diff: [0, 0.002]
+  val_loss_diff: [0, 0.01]

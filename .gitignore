@@ -1,0 +1,7 @@
+# Shared-volume state; never committed (see README: Layout)
+external/
+data/
+artifacts/
+__pycache__/
+.pytest_cache/
+*.pyc

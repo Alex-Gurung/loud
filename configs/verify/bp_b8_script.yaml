@@ -1,0 +1,17 @@
+# The unmodified backprop_preset.py @539386e on one GPU (one process: each batch's 8 sequences in one forward). Its
+# val_loss is the script's own in-process evaluate(), the same computation as utils/eval.py. Pairs with
+# verify.bp_b8_onefwd (verify.bp_b8_match).
+experiment: verify
+variant: bp_b8_script
+task: reference
+seeds: [0]
+priority: 10
+after: [verify.smoke.s0]
+args:
+  script: [boost-cut, noise/analysis/backprop_preset.py]
+  cwd: noise
+  argv: [--data-dir, '{data}', --output, '{out}/ref', --batch, '8', --test-file, test.pt, --seed, '{seed}']
+  result: ref/result.json
+expect:
+  val_loss: [3.7083, 0.01]
+  test_loss: [3.7014, 0.01]

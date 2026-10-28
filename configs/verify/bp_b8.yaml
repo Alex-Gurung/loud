@@ -1,0 +1,17 @@
+# Section 2, verification 2: backprop_preset.py @539386e on the 10M set, seed 0, one GPU (one sequence per forward,
+# the 8-GPU layout). Target: boost-cut's ledger run bp38_s0 of that script (8xH100, torch 2.10): val 3.70835, test
+# 3.70142 (seeds 0-2 spread 0.009). All 4,880 sequences feed updates (no held-out split), exactly as that script.
+experiment: verify
+variant: bp_b8
+task: proxy
+seeds: [0]
+priority: 10
+after: [verify.smoke.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 0
+  batch: 8
+expect:
+  val_loss: [3.7083, 0.01]
+  test_loss: [3.7014, 0.01]

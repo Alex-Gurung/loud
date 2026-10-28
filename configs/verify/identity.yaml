@@ -1,0 +1,14 @@
+# Section 2, verification 3: the identity-path estimator (PR #26 @2604407, unchanged) for a full 10M epoch, seed 0, on
+# one GPU. Published: 4.1772 in 46.96 s on 8xH100 (torch 2.10). All 4,880 sequences feed updates, as in that run.
+experiment: verify
+variant: identity
+task: identity
+seeds: [0]
+priority: 10
+after: [verify.smoke.s0, verify.identity_smoke.s0]
+args:
+  sequences: 10M
+  heldout: 0
+  batch: 8
+expect:
+  val_loss: [4.1772, 0.01]

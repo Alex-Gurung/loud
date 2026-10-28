@@ -1,0 +1,14 @@
+# verify.bp_b8 (one GPU, one sequence per forward) against boost-cut's published 8-GPU log of the same script and seed
+# (ledger bp38_s0: train loss every 61 updates). Two seed-0 runs in that ledger end 1e-4 apart, so the trajectories
+# are stable; a gap above 0.01 at any logged update means the single-GPU emulation differs.
+experiment: verify
+variant: bp_b8_ledger
+task: compare
+seeds: [0]
+priority: 10
+after_done: [verify.bp_b8.s0]  # runs even when a final-loss gate failed: it says why
+args:
+  a: verify.bp_b8.s0
+  b: [boost-cut, ledger/logs/bp38_s0.log]
+expect:
+  train_loss_max_diff: [0, 0.01]

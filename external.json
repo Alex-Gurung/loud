@@ -1,0 +1,83 @@
+{
+  "repos": {
+    "noise": {
+      "url": "https://github.com/qlabs-eng/noise.git",
+      "commit": "48e9ea73a7d74c6811a52eaa3deb4c2d76977367",
+      "path": "external/noise",
+      "files": {
+        "utils/model.py": "86cf493dd8aa133c609050b289762050333bb4af7835d06cc542a9efffdcc919",
+        "utils/eval.py": "0f02d22394d816b0d01f8098406dd60b2e3e685b81fe7f9747e28ffd5daf623a",
+        "utils/prepare_data.py": "a372579ec0c41432d1dce9778cd36f8824f3c35d8fd12109dd055d48db1f31ad",
+        "archive/10M/utils/model.py": "86cf493dd8aa133c609050b289762050333bb4af7835d06cc542a9efffdcc919",
+        "archive/10M/utils/prepare_data.py": "5f4bab42c4932bcf70541d0e0180a7bc21924fea5aa6d6fbc667c6beab48da9b",
+        "archive/10M/train/val/run.py": "1d192e360e4a6aca2abb44f2b322314fc59f7d2811704759f2820823baac4e43",
+        "archive/10M/train/speedrun/run.py": "67613ea53f5fa832fe632f66c79816f7d875a935e79bc72832173b1c2e5353e0",
+        "archive/10M/train/speedrun/kernels.py": "ffc1a50f44c778ae844a86166e5d066f1c708cce675dc6312ae316d269d0c0cd",
+        "train/val/run.py": "7c499074fb36c19742e9c731626a1f756780f05d603c8c80c5dc8eb581e40c1c",
+        "train/speedrun/run.py": "1f5cfb725a20cfa4ebbc3d724643af74c741b2869e57bd89b220e87f46d06488",
+        "archive/10M/utils/eval.py": "a97d6590ee0233ad862a13e78f03ae27b1872dbf9f3e4e99f1356bdea7145ce3"
+      }
+    },
+    "boost-cut": {
+      "url": "https://github.com/spicylemonade/boost-cut.git",
+      "commit": "539386e7faf07767f48f8a443a88a3c72b7ef159",
+      "path": "external/boost-cut",
+      "files": {
+        "noise/utils/model.py": "86cf493dd8aa133c609050b289762050333bb4af7835d06cc542a9efffdcc919",
+        "noise/utils/prepare_data.py": "bedfea008550a9db04630ac4c4079fb2dac9119fcbc73ff4cf5e55464cc3ee8e",
+        "noise/train/boostcut/run.py": "2c0f460ed9e7ebdc7cf527665885992e674cecdccb24db3ece04330e8fa1d7fb",
+        "noise/analysis/backprop_preset.py": "257cae58bee9e6535ae31fc5688a818cfbf09634b2846e4ab02493a6c364633c",
+        "noise/analysis/prepare_test.py": "81c630a547f7fdc33ae3fd7690f5b59f287ffcf7a99b4bb88a45cf3354ce6001",
+        "ledger/logs/bp38_s0.log": "53b6e7d0826f5095a44d1f2859ddc8fccc07e6e589ebb60ed14310eaf33f210b",
+        "ledger/runs.json": "163d5ba42cf2a4774b27696787bb6525e2dac663b882517b1b63c9b5932144a0"
+      }
+    },
+    "noise-pr26": {
+      "url": "https://github.com/qlabs-eng/noise.git",
+      "commit": "2604407b6035cdb4d091c3bba8515991e1ab6d31",
+      "path": "external/noise-pr26",
+      "note": "Merge PR #26: identity-path credit with fused kernels (track 2), 4.1772 in 46.96 s on 8xH100",
+      "files": {
+        "train/speedrun/run.py": "f090a3a3768333ed39711212ebe46d88339fde476b135d0698b1fec749b21203",
+        "train/speedrun/log/config.json": "450ac0db3c06eb8fa953dc7c9eff53e97b69d87db2a54f061fca2ddc5d573584",
+        "train/speedrun/log/metrics.jsonl": "854ff9210a5b5ed07e8740ee71e9a4a85a005141aff08bf8db792343f1250069",
+        "train/speedrun/log/result.json": "caab31cd9950fe013d1413ebef2adce7f0aa641b632e36208d9a19ac7d773581",
+        "utils/model.py": "86cf493dd8aa133c609050b289762050333bb4af7835d06cc542a9efffdcc919",
+        "utils/prepare_data.py": "bedfea008550a9db04630ac4c4079fb2dac9119fcbc73ff4cf5e55464cc3ee8e",
+        "utils/eval.py": "a97d6590ee0233ad862a13e78f03ae27b1872dbf9f3e4e99f1356bdea7145ce3"
+      }
+    }
+  },
+  "downloads": {
+    "check_relay": {
+      "url": "https://github.com/erodola/noise/releases/download/relay-track1-v1/check_relay.py",
+      "path": "external/relay/check_relay.py",
+      "sha256": "b0a5292b1a439462ce7c9591c549747d90f32cca21c98b13ec6604201f3ad071"
+    },
+    "record_boostcut_track1": {
+      "url": "https://github.com/spicylemonade/boost-cut/releases/download/entries-v1/track1_boostcut_final.pt",
+      "path": "artifacts/reference/track1_boostcut_final.pt",
+      "sha256": "499dff9fb4d3fcb4fcc5b6c5475ecf5443295462f572c04ed4312605c5bcbcea",
+      "official_val": 3.944811870070065
+    }
+  },
+  "data": {
+    "train.pt": {
+      "rows": 14648,
+      "token_sha256": "2a92b8e9c3bc418c39880d337951775b9d29d0389bf1059cc826c412c44def37"
+    },
+    "train.pt[:4880]": {
+      "rows": 4880,
+      "token_sha256": "36ccb57eba6f5474b18acf99edd4a4793187260f7da7cc7053322cce59154bde"
+    },
+    "val.pt": {
+      "rows": 544,
+      "token_sha256": "5fdb9242ce8ab83e519ab5dd5cf8d64f4d8a99f6e74c137f4ca0f723da5f7437"
+    },
+    "test.pt": {
+      "rows": 544,
+      "token_sha256": "cb7a29f079ae2de5e96dd472497b67a6ec3c827bf6efbd8c263c7ab1001f6d7d"
+    }
+  },
+  "fixed_model_sha256": "86cf493dd8aa133c609050b289762050333bb4af7835d06cc542a9efffdcc919"
+}

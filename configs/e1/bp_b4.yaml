@@ -1,0 +1,20 @@
+# E1: backprop proxy at batch 4 (the record's own batch) with boost-cut's rates, as the plan's H1 (backprop_preset.py)
+# defines the proxy; bp_b4_pr40 is the same with PR #40's recipe. Its H4 checkpoints are the diagnostic checkpoints for
+# E5, E7 and E8 (with ANVIL II's state, for E8's pending-update directions); its saved trajectory means are the
+# ones merge experiments reuse.
+experiment: e1
+variant: bp_b4
+task: proxy
+seeds: [0, 1, 2]
+priority: 50
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  means: true
+  save_means: true
+  heldout_every: 100
+  checkpoints: true
+  checkpoint_optimizer: true

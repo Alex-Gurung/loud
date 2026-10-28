@@ -1,0 +1,16 @@
+# E1: backprop proxy at batch 8 (the record's reference). The last 32 sequences of the order are held out (H3) in
+# every experiment cell, so baselines and variants train on the same 4,848 sequences.
+experiment: e1
+variant: bp_b8
+task: proxy
+seeds: [0, 1, 2]
+priority: 50
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 8
+  means: true
+  heldout_every: 50
+  checkpoints: true

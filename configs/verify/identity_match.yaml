@@ -1,0 +1,15 @@
+# The single-GPU identity-path port against PR #26's published 8-GPU log (same seed, data order and draws): the first
+# per-update training losses must agree. The published losses are rounded to 4 decimals.
+experiment: verify
+variant: identity_match
+task: compare
+seeds: [0]
+priority: 10
+after_done: [verify.identity.s0]  # runs even when a final-loss gate failed: it says why
+args:
+  a: verify.identity.s0
+  b: [noise-pr26, train/speedrun/log/metrics.jsonl]
+  first: 20
+expect:
+  train_loss_max_diff: [0, 0.005]
+  val_loss_diff: [0, 0.01]

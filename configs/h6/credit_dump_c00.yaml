@@ -1,0 +1,11 @@
+# H6 on e1.bp_b4.s0's 0% checkpoint. E7's diagnostic: per site, the per-token cosine between the identity-path credit guess and the true
+# credit. E7 has a saving to take if the median is above 0.9 at 20% and below 0.7 at 100%.
+experiment: h6
+variant: credit_dump_c00
+task: diagnose
+seeds: [0]
+priority: 70
+after: [e1.bp_b4.s0]
+args:
+  tool: credit_dump
+  checkpoint: e1.bp_b4.s0:ckpt_00.pt

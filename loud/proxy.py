@@ -1,0 +1,116 @@
+"""H1: the single-GPU backprop proxy (development stand-in for the forward-only estimator; never a Noise entry).
+
+backprop_preset.py (boost-cut @539386e) in one process: the reference trainer's model, init, optimizer (ANVIL II on
+block matrices, Adam elsewhere), rates and warmdown, with the shared loop's data order and untimed warmup
+(loud/train.py). The 8-GPU script gives each GPU one sequence, averages the float32 gradients across GPUs and casts
+back to each parameter's dtype; here each micro-batch (default: one sequence) is one GPU's share, and the same float32
+average is formed before the cast. The batch-mean loss is the gradient's objective, as there. Adds H2 (per-sequence
+gradients).
+"""
+from dataclasses import asdict, is_dataclass
+
+import torch
+
+from . import refs
+from .options import PRESETS, proxy_options
+from .pergrad import PerSequenceGrads
+from .train import current_rates, rate_labels, set_rate, train
+
+
+class Reference:
+    """The reference trainer's model, init, optimizer and schedule constants, used verbatim."""
+
+    def __init__(self, key, lr_mult, preset):
+        m = self.module = refs.trainer_module(key)
+        n_layer, width = PRESETS[preset]
+        if hasattr(m, 'WIDTH'):
+            m.WIDTH, m.HIDDEN = width, 4 * width  # as the reference main() does before anything compiles
+        self.config = m.GPTConfig(n_layer=n_layer, n_head=width // 64, n_kv_head=width // 64, n_embd=width)
+        if key == 'boostcut':
+            s = m.Recipe()
+            s.lr, s.anvil_lr = s.lr * lr_mult, s.anvil_lr * lr_mult
+            self.warmdown, self.final = s.warmdown, 0.0
+            self.make_model = lambda device, seed: m.make_model(device, seed, self.config)
+            self.extra = dict(polar_margin=m.POLAR_MARGIN)
+        elif key == 'pr40':
+            s = m.Settings()
+            s.lr, s.anvil_lr, s.model = s.lr * lr_mult, s.anvil_lr * lr_mult, self.config
+            self.warmdown, self.final = s.warmdown, s.final
+            self.make_model = lambda device, seed: m.make_model(device, seed, self.config, s.projection_std, s.head_std)
+            self.extra = {}
+        else:
+            raise ValueError(f'unknown recipe {key!r}')
+        self.settings, self.key = s, key
+        self.make_optimizer = lambda model, steps: m.make_optimizer(model, s, steps)
+
+    def describe(self):
+        settings = asdict(self.settings) if is_dataclass(self.settings) else dict(vars(self.settings))
+        if self.key == 'pr40':  # only the optimizer/schedule/init fields act on backprop
+            keep = ('lr', 'betas', 'warmdown', 'final', 'head_std', 'projection_std', 'anvil_lr', 'anvil_wd',
+                    'fast_weight', 'polar_margin')
+            settings = {k: settings[k] for k in keep}
+        return dict(name=self.key, file=refs.TRAINERS[self.key], settings=settings, warmdown=self.warmdown,
+                    final=self.final, model=asdict(self.config), **self.extra)
+
+
+class Backprop:
+    def __init__(self, o, reference, device, seed, steps):
+        self.o, self.reference, self.device, self.seed, self.steps = o, reference, device, seed, steps
+        self.reset()
+
+    def reset(self):
+        self.model = self.reference.make_model(self.device, self.seed)
+        self.optimizer = self.reference.make_optimizer(self.model, self.steps)
+        self.params = list(self.model.parameters())
+        self.accumulators = [torch.zeros_like(p, dtype=torch.float32) for p in self.params]
+        self.labels = rate_labels(self.optimizer, self.reference.settings.lr)
+        self.pergrad = PerSequenceGrads(self.model.named_parameters()) if self.o['per_sequence_grads'] else None
+
+    def describe(self):
+        return self.reference.describe()
+
+    def gradient(self, batch):
+        """Mean of the micro-batches' float32 gradients, cast to each parameter's dtype (backprop_preset's all-reduce
+        and divide by world). Returns the mean training loss (a tensor)."""
+        torch._foreach_zero_(self.accumulators)
+        losses = []
+        self.model.requires_grad_(True)
+        for micro in batch.split(self.o['micro_batch']):
+            with torch.autocast(self.device.type, dtype=torch.bfloat16):
+                loss = self.model(micro[:, :-1].contiguous(), micro[:, 1:].contiguous())
+            loss.backward()
+            if self.pergrad is not None:
+                self.pergrad.capture(self.model)
+            pairs = [(a, p.grad.float()) for a, p in zip(self.accumulators, self.params) if p.grad is not None]
+            torch._foreach_add_([a for a, _ in pairs], [g for _, g in pairs])
+            for p in self.params:
+                p.grad = None
+            losses.append(loss.detach().float())
+        self.model.requires_grad_(False)
+        torch._foreach_div_(self.accumulators, len(losses))
+        for a, p in zip(self.accumulators, self.params):
+            p.grad = a.to(p.dtype)  # float32 parameters take the accumulator itself; it is zeroed only next update
+        return torch.stack(losses).mean()
+
+    def update(self, step, batch):
+        set_rate(self.optimizer, step, self.steps, self.reference.warmdown, self.reference.final)
+        fields = current_rates(self.optimizer, self.labels)
+        loss = self.gradient(batch)
+        self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
+        return loss, fields
+
+    def diagnose(self, step):
+        if self.pergrad is None:
+            return {}
+        every = self.o['grad_noise_every']
+        record = dict(grad_noise=self.pergrad.summary()) if every and step % every == 0 else {}
+        self.pergrad.clear()
+        return record
+
+
+def run(spec, run_dir):
+    o = proxy_options(spec.get('args', {}))
+    reference = Reference(o['recipe'], o['lr_mult'], o['preset'])
+    return train(spec, run_dir, o, lambda device, seed, steps, heldout: Backprop(o, reference, device, seed, steps),
+                 method='backprop')

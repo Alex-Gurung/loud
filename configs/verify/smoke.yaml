@@ -1,0 +1,22 @@
+# Runs first: a complete short run (the 1M range: 57 updates of 8, with 32 sequences held out) through every training
+# path on the GPU: H2 per-sequence gradients and noise scale, H3 scoring, all five H4 checkpoints with optimizer state,
+# the nine means (scored and saved) and the official val and test scores. A few minutes. Every other verification job
+# waits for it, so a broken path blocks them at once instead of failing each after a full run.
+experiment: verify
+variant: smoke
+task: proxy
+seeds: [0]
+priority: 1
+args:
+  recipe: boostcut
+  sequences: 1M
+  heldout: 32
+  batch: 8
+  checkpoints: true
+  checkpoint_optimizer: true
+  means: true
+  save_means: true
+  heldout_every: 10
+  per_sequence_grads: true
+  grad_noise_every: 5
+notes: Pipeline check only; its numbers are not a result.

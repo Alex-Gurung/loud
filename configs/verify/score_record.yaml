@@ -1,0 +1,14 @@
+# Section 2, verification 1: the published record checkpoint must rescore to 3.94481 (data and scorer match).
+# boost-cut entries-v1 track1_boostcut_final.pt, sha256 499dff9f...; rescored val 3.944811870070065, test 3.936955592211555.
+experiment: verify
+variant: score_record
+task: score
+seeds: [0]
+priority: 5
+after: [verify.smoke.s0]
+args:
+  checkpoint: artifacts/reference/track1_boostcut_final.pt
+  splits: [val, test]
+expect:
+  val_loss: [3.944812, 0.00001]
+  test_loss: [3.936956, 0.00001]

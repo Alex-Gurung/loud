@@ -1,0 +1,20 @@
+# E6 on the identity path: the top-stream probe's 512 Hadamard rows spread over K = 4 updates (128 rows per update,
+# scaled by K, so the estimate stays unbiased), momentum unchanged. Every 50 updates, a full-cycle estimate on a held-out
+# sequence is compared with ANVIL II's momenta (the drift check). Success: K = 4 within 0.02 of K = 1; K = 16 within
+# 0.05. Kill: K = 4 already loses more than 0.02.
+experiment: e6
+variant: identity_k4
+task: identity
+seeds: [0, 1, 2]
+priority: 60
+after: [verify.score_record.s0, verify.identity.s0, verify.identity_match.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 8
+  rows: 128
+  row_offset_per_step: true
+  drift_every: 50
+  heldout_every: 50
+  checkpoints: true
+  means: true
