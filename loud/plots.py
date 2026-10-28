@@ -277,6 +277,31 @@ def e8_table(out):
     return text
 
 
+def e12_table(out, target=3.5):
+    """E12: per variant, the final validation loss (the records' after their end merge), the plain weights' where a
+    record kept them, and when the untimed validation curve first reached the speedrun target (linear between the
+    logged points), means over seeds."""
+    rows = []
+    for v, runs_ in sorted(counted('e12').items()):
+        results = [read_json(Path(r['run_dir']) / 'result.json') for r in runs_]
+        plain = [x['val_loss_plain'] for x in results if 'val_loss_plain' in x]
+        crossings = []
+        for r in runs_:
+            curve = [(m['train_seconds'], m['val_loss']) for m in metrics(r) if 'val_loss' in m]
+            crossings += [t0 + (t1 - t0) * (y0 - target) / (y0 - y1) for (t0, y0), (t1, y1) in zip(curve, curve[1:])
+                          if y0 > target >= y1][:1]
+        rows.append([v, len(runs_), f'{statistics.fmean(r["val_loss"] for r in runs_):.4f}',
+                     f'{statistics.fmean(plain):.4f}' if plain else '-',
+                     f'{statistics.fmean(crossings) / 60:.1f} min (n={len(crossings)})' if crossings else '-'])
+    if not rows:
+        return None
+    text = markdown(['variant', 'n', 'val', 'val, plain weights', f'reaches {target}'], rows)
+    text += ('\nThe records\' val is after their end merge; the backprop proxies (bp_*) have no merge, so compare them '
+             'with the plain column.\n')
+    (out / 'summary.md').write_text(text)
+    return text
+
+
 def diagnostic(experiment, variant):
     """The summary JSON of a finished diagnose run (seed 0), or None."""
     run = RUNS / experiment / variant / 's0'
@@ -291,26 +316,29 @@ def markdown(header, rows):
     return '\n'.join(lines) + '\n'
 
 
-def e5_table(out):
-    """The plan's 9 x 2 table: per site, the median cosine of the recovered credit with a direct cycle's and the
-    median condition number, on the 20% and 100% checkpoints (bf16 probes, as a kernel runs them)."""
+def e5_table(out, ridge=1e-4):
+    """The plan's 9 x 2 table: per site, the median cosine of the credit recovered from the embedding's launch with the
+    direct cycle's there (at one ridge) and the median condition number without the radial direction, on the 20%
+    and 100% checkpoints; beside them, the recovery from block 0's cycle read further up, and the identity-path
+    guess's cosine (the ridge's prior). bf16, as a kernel runs it."""
     found = {c: diagnostic('e5', f'recovery_c{c}') for c in (20, 100)}
     if not any(found.values()):
         return None
-    ridges = next(s for s in found.values() if s)['settings']['ridges']
     header = ['site'] + [f'{c}%: {what}' for c in found for what in
-                         [f'cos ridge {r}' for r in ridges] + ['condition', 'guess cos']]
+                         (f'emb launch cos (ridge {ridge})', 'condition', 'mid0 launch cos (ridge 0)', 'guess cos')]
+    pick = lambda s, key: s[key]['median'] if s and key in s else '-'
     rows = []
     for site in SITES:
         row = [site]
-        for c, summary in found.items():
+        for summary in found.values():
             s = (summary or {}).get(site)
-            row += ([s[f'bf16 ridge {r}']['median'] for r in ridges] + [s['bf16 condition']['median'],
-                    s['guess_vs_direct']['median']]) if s else ['-'] * (len(ridges) + 2)
+            row += [pick(s, f'bf16 emb ridge {ridge}'), pick(s, 'bf16 emb condition without_radial'),
+                    pick(s, 'bf16 mid0 ridge 0.0'), pick(s, 'guess_vs_direct')]
         rows.append(row)
     text = markdown(header, rows)
     text += '\nDecision (plan E5): cosine >= 0.95 at all sites: implement; failing only at the top two or three ' \
-            'sites: the hybrid; failing at most sites at 100%: drop.\n'
+            'sites: the hybrid; failing at most sites at 100%: drop. The mid0 column is a second hybrid: two cycles ' \
+            '(the embedding\'s, then mid0\'s read at mid1-mid7) in place of nine.\n'
     (out / 'recovery.md').write_text(text)
     return text
 
@@ -356,7 +384,7 @@ def e8_plot(plt, out):
 
 
 EXTRA = {'e3': [e3_plot], 'e4': [e4_plots], 'e6': [drift_plot], 'e12': [val_time_plot]}
-TABLES = {'e2': e2_table, 'e5': e5_table, 'e7': e7_table, 'e8': e8_table}
+TABLES = {'e2': e2_table, 'e5': e5_table, 'e7': e7_table, 'e8': e8_table, 'e12': e12_table}
 # The plan's reference cell for experiments whose baseline lives in E1.
 BASELINES = {'e2': ('e1', 'bp_b8'), 'e4': ('e1', 'bp_b8'), 'e10': ('e1', 'bp_b8'), 'e3': ('e1', 'bp_b4'),
              'e8': ('e1', 'bp_b4'), 'e9': ('e1', 'bp_b4')}

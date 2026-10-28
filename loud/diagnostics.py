@@ -11,7 +11,7 @@ stream after attention and before the MLP (its input plus the attention output).
                       cosine. The guess at mid<i> is the top-stream credit carried down the residual scalars; at emb,
                       PR #26's RMS-norm cycle of it
     token_map_svd     per site: singular values of each token's map from its raw embedding to the site, with the
-                      attention outputs frozen at their clean values (torch.func.jacrev per token)
+                      attention outputs frozen at their clean values (torch.func.jacfwd per token)
     direction_stats   per block matrix: the top singular directions of the pending update (from the optimizer state
                       the checkpoint saved with checkpoint_optimizer; else of the batch gradient), the curvature along
                       each (a central difference of the batch gradient) and the across-sequence variance along it
@@ -118,6 +118,15 @@ def hadamard(d, device):
     while H.shape[0] < d:
         H = torch.cat([torch.cat([H, H], 1), torch.cat([H, -H], 1)], 0)
     return H
+
+
+def norm_difference(x, delta):
+    """norm(x + delta) - norm(x) without the cancellation, as PR #40's chain forms it: x [t, 1, W], delta [t, P, W]."""
+    width, eps = x.shape[-1], torch.finfo(torch.float32).eps
+    sq = x.square().sum(-1, keepdim=True)
+    inv0 = torch.rsqrt(sq / width + eps)
+    inv = torch.rsqrt((sq + 2 * (x * delta).sum(-1, keepdim=True) + delta.square().sum(-1, keepdim=True)) / width + eps)
+    return delta * inv + x * (inv - inv0)
 
 
 def per_token_cosine(a, b):
@@ -322,7 +331,7 @@ class Toolkit:
             summary[site] = row
         return summary, {}
 
-    def credit_recovery(self, ridges=(0.0, 1e-3, 1e-1), sigma=0.01, route_k=512, chunk=16):
+    def credit_recovery(self, ridges=(0.0, 1e-5, 1e-4, 1e-3), sigma=0.01, route_k=512, chunk=16):
         """E5: one cycle launched at the embedding, read at every site, against a direct cycle at each site, both run
         as PR #40's chain runs its cycles (chain_chunk_eager): forward differences against the clean pass, each
         token's MLPs through its route_k strongest units (the record's routes: activation x |c_proj column|; None:
@@ -335,7 +344,11 @@ class Toolkit:
         A c = d). It is compared per token with the direct cycle's credit at the site (what the unchanged chain
         measures there), which is compared in turn with autograd (the token's own loss, attention and x0 held, every
         unit) and with autograd's full credit. The probe also moves x0 = norm(emb), which every later block reads,
-        so d carries paths that skip site k: those, the conditioning of A and rounding are what this measures."""
+        so d carries paths that skip site k: those, the conditioning of A and rounding are what this measures.
+        A second launch, block 0's own direct cycle read at the later sites (x0 held, so every path passes each of
+        them), says whether two cycles (the embedding's and mid0's) could stand in for nine. Condition numbers are
+        reported with and without the smallest singular value (the embedding's RMS norm hides its radial direction
+        to first order). One SVD per site and chunk gives every ridge's solution."""
         model, norm = copy.deepcopy(self.model).float(), self.m.norm
         values, frozen, x0_clean, targets = self.frozen(model)
         blocks, loss, from_site = self.paths(model)
@@ -375,7 +388,7 @@ class Toolkit:
                 fc = layers[b].mlp.c_fc.weight.to(dtype)[idx]  # [t, k, W]: each token's routed units
                 wo = layers[b].mlp.c_proj.weight.to(dtype).T[idx]
                 h = pre[b][sl].gather(-1, idx)[:, None]
-                dh = torch.bmm((norm(mid + delta) - norm(mid)).to(dtype), fc.mT).float()
+                dh = torch.bmm(norm_difference(mid, delta).to(dtype), fc.mT).float()
                 up, down = F.relu(h + dh), F.relu(h)
                 delta = delta + torch.bmm(((up - down) * (up + down)).to(dtype), wo).float()
             y = targets[sl, None]
@@ -390,34 +403,37 @@ class Toolkit:
         tokens, width = acts[0].shape
         signs = torch.randint(0, 2, (width,), generator=torch.Generator().manual_seed(0)).to(acts[0]) * 2 - 1
         basis = hadamard(width, acts[0].device) * signs  # rows: the cycle's W orthogonal directions
-        eye = torch.eye(width, device=basis.device)
         precisions = {'float32': torch.float32, 'bf16': torch.bfloat16}
-        cos = {(p, s, r): [] for p in precisions for s in names for r in ridges}
-        condition = {(p, s): [] for p in precisions for s in names}
+        launches = {'emb': 0, 'mid0': 1}  # the plan's launch, and block 0's direct cycle read further up (x0 held)
+        later = {launch: names[j + 1:] for launch, j in launches.items()}
+        cos = {(p, l, s, r): [] for p in precisions for l in launches for s in later[l] for r in ridges}
+        condition = {(p, l, s, kind): [] for p in precisions for l in launches for s in later[l]
+                     for kind in ('all', 'without_radial')}
         direct = {(p, s): [] for p in precisions for s in names}
         with exact(), torch.no_grad():
             for precision, dtype in precisions.items():
                 for t0 in range(0, tokens, chunk):
                     sl = slice(t0, t0 + chunk)
-                    step = lambda j: sigma * acts[j][sl, None].square().mean(-1, keepdim=True).sqrt()  # [t, 1, 1]
-                    launched, d = changes(sl, 0, step(0) * basis, dtype)
-                    d = d.unsqueeze(-1)
-                    for j, (site, A) in enumerate(zip(names, launched)):
-                        # the direct cycle at the site: its credit is the decoded slope, as chain_credits decodes it
-                        own = d[..., 0] if j == 0 else changes(sl, j, step(j) * basis, dtype)[1]
-                        measured = (own / step(j)[..., 0]) @ basis / width
-                        direct[precision, site].append(measured)
-                        s = torch.linalg.svdvals(A)
-                        condition[precision, site].append(s[:, 0] / s[:, -1].clamp_min(1e-30))
-                        gram, rhs = A.mT @ A, A.mT @ d
-                        scale = gram.diagonal(dim1=-2, dim2=-1).mean(-1)[:, None, None]
-                        for ridge in ridges:
-                            if ridge:
-                                c = torch.linalg.solve(gram + ridge * scale * eye,
-                                                       rhs + ridge * scale * guess[site][sl, :, None].float())
-                            else:
-                                c = torch.linalg.solve(A, d)
-                            cos[precision, site, ridge].append(per_token_cosine(c[..., 0], measured))
+                    steps = [sigma * a[sl, None].square().mean(-1, keepdim=True).sqrt() for a in acts]  # [t, 1, 1]
+                    cycles = [changes(sl, j, steps[j] * basis, dtype) for j in range(len(names))]
+                    for site, (_, d), step in zip(names, cycles, steps):  # each site's credit, decoded as the chain does
+                        direct[precision, site].append((d / step[..., 0]) @ basis / width)
+                    for launch, j0 in launches.items():
+                        moved, d = cycles[j0]
+                        d = d.unsqueeze(-1)
+                        for site, A in zip(later[launch], moved[1:]):  # moved[0] is the probe itself
+                            U, S, Vh = torch.linalg.svd(A)
+                            condition[precision, launch, site, 'all'].append(S[:, 0] / S[:, -1].clamp_min(1e-30))
+                            condition[precision, launch, site, 'without_radial'].append(
+                                S[:, 0] / S[:, -2].clamp_min(1e-30))
+                            # min |A c - d|^2 + lam |c - g|^2: c = V (S^2 + lam)^-1 (S U^T d + lam V^T g)
+                            Ud, Vg, S = U.mT @ d, Vh @ guess[site][sl, :, None].float(), S[..., None]
+                            scale = S.square().mean(1, keepdim=True)  # mean(diag A^T A)
+                            measured = direct[precision, site][-1]
+                            for ridge in ridges:
+                                lam = ridge * scale
+                                c = Vh.mT @ ((S * Ud + lam * Vg) / (S.square() + lam).clamp_min(1e-30))
+                                cos[precision, launch, site, ridge].append(per_token_cosine(c[..., 0], measured))
         summary, tensors = {}, {}
         for site in names:
             measured = torch.cat(direct['float32', site])
@@ -425,13 +441,19 @@ class Toolkit:
                        direct_vs_autograd=quantiles(per_token_cosine(measured, autograd[site])),
                        autograd_vs_full=quantiles(per_token_cosine(autograd[site], full[site])))
             for precision in precisions:
-                row[f'{precision} condition'] = quantiles(torch.cat(condition[precision, site]))
-                for ridge in ridges:
-                    per_token = torch.cat(cos[precision, site, ridge])
-                    row[f'{precision} ridge {ridge}'] = quantiles(per_token)
-                    tensors[f'{site} {precision} ridge {ridge}'] = per_token.cpu()
+                for launch in launches:
+                    if site not in later[launch]:
+                        continue
+                    for kind in ('all', 'without_radial'):
+                        row[f'{precision} {launch} condition {kind}'] = quantiles(
+                            torch.cat(condition[precision, launch, site, kind]))
+                    for ridge in ridges:
+                        per_token = torch.cat(cos[precision, launch, site, ridge])
+                        row[f'{precision} {launch} ridge {ridge}'] = quantiles(per_token)
+                        tensors[f'{site} {precision} {launch} ridge {ridge}'] = per_token.cpu()
             summary[site] = row
-        summary['settings'] = dict(sigma=sigma, ridges=list(ridges), route_k=k, probes=width, tokens=tokens)
+        summary['settings'] = dict(sigma=sigma, ridges=list(ridges), route_k=k, probes=width, tokens=tokens,
+                                   launches=list(launches))
         return summary, tensors
 
 

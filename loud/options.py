@@ -1,5 +1,9 @@
 """Task registry and option tables (no torch import, so submission checks run on the CPU pod)."""
+import json
 import re
+
+from .launch import settings_fields
+from .paths import PINS, REPO
 
 TASKS = {
     'proxy': ('loud.proxy', 'run'),               # H1 backprop proxy
@@ -293,6 +297,12 @@ def reference_options(args):
             raise ValueError(f'reference argv {arg!r}: the placeholders are {{data}}, {{out}} and {{seed}}')
     if not isinstance(args.get('settings', {}), dict):
         raise ValueError("reference settings: a mapping of the script's Settings fields to values")
+    if args.get('settings'):
+        repo, relpath = args['script']
+        script = REPO / json.loads(PINS.read_text())['repos'][repo]['path'] / relpath
+        unknown = set(args['settings']) - settings_fields(script)
+        if unknown:
+            raise ValueError(f'reference settings: {relpath} has no Settings field {sorted(unknown)}')
     rows = args.get('train_rows', 0)
     if not isinstance(rows, int) or isinstance(rows, bool) or not 0 <= rows <= RANGES['30M']:
         raise ValueError(f'reference train_rows: a row count up to {RANGES["30M"]} (0: all of train.pt)')

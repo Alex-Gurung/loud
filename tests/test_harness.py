@@ -135,7 +135,7 @@ def test_launch_replaces_settings_and_rows_but_not_the_script(tmp_path):
         '    print(json.dumps(dict(seed=SEED, settings=asdict(Settings()), rows=len(load_rows("x/train.pt", 10)),'
         ' val=len(load_rows("x/val.pt", 4)), argv=sys.argv[1:])))\n'
         "if __name__ == '__main__':\n    main()\n")
-    launch = paths.REPO / 'loud' / 'launch.py'
+    launch = paths.SOURCE / 'loud' / 'launch.py'  # the code under test, not the live repo's
     run = lambda *a: subprocess.run([sys.executable, str(launch), str(script), *a], capture_output=True, text=True)
     out = json.loads(run('{"lr": 0.5}', '6', '2', '--output', 'o').stdout)
     assert out == dict(seed=2, settings=dict(lr=0.5, switch=0.2), rows=6, val=4, argv=['--output', 'o'])
@@ -143,6 +143,12 @@ def test_launch_replaces_settings_and_rows_but_not_the_script(tmp_path):
                                                          argv=[])
     bad = run('{"lrr": 0.5}', '0', '-')
     assert bad.returncode and 'Settings has no' in bad.stderr
+    from loud.launch import settings_fields
+    assert settings_fields(script) == {'lr', 'switch'}
+    record = paths.REPO / 'external' / 'noise' / 'train' / 'val' / 'run.py'
+    if record.exists():  # PR #46's record: boost_hub and mlp_output_credit are init=False
+        fields = settings_fields(record)
+        assert {'lr', 'anvil_lr', 'switch', 'betas'} <= fields and 'boost_hub' not in fields
 
 
 def fake_run(root, experiment, variant, seed, val, extra=None, summary=None):
@@ -170,9 +176,9 @@ def test_plots_read_only_the_run_files(tmp_path, monkeypatch):
         fake_run(tmp_path, 'e6', 'identity_k1', seed, 4.17 + 0.01 * seed, drift)
         fake_run(tmp_path, 'e6', 'identity_k4', seed, 4.19 + 0.01 * seed, drift)
     site = dict(p10=0.8, median=0.9, p90=0.95)
-    recovery = {s: {'guess_vs_direct': site, 'bf16 condition': site, 'bf16 ridge 0.0': site, 'bf16 ridge 0.1': site}
-                for s in plots.SITES}
-    fake_run(tmp_path, 'e5', 'recovery_c20', 0, None, summary=dict(recovery, settings=dict(ridges=[0.0, 0.1])))
+    recovery = {s: {'guess_vs_direct': site, 'bf16 emb condition without_radial': site, 'bf16 emb ridge 0.0001': site,
+                    'bf16 mid0 ridge 0.0': site} for s in plots.SITES}
+    fake_run(tmp_path, 'e5', 'recovery_c20', 0, None, summary=dict(recovery, settings=dict(ridges=[0.0, 1e-4])))
     fake_run(tmp_path, 'h6', 'credit_dump_c20', 0, None, summary={s: site for s in plots.SITES})
     stats = {'transformer.h.0.attn.c_q.weight': [dict(h2_over_c=2.0), dict(h2_over_c=0.5)]}
     fake_run(tmp_path, 'h6', 'direction_stats_c20', 0, None, summary=stats)
@@ -197,6 +203,7 @@ def test_plots_read_only_the_run_files(tmp_path, monkeypatch):
     for experiment in ('e6', 'e5', 'e7', 'e8', 'e12'):
         plots.plot(experiment)
     assert (tmp_path / 'plots' / 'e12' / 'val_time.png').exists()
+    assert '| record | 1 | 3.3400 | - | 6.0 min (n=1) |' in (tmp_path / 'plots' / 'e12' / 'summary.md').read_text()
     assert {p.name for p in (tmp_path / 'plots' / 'e6').iterdir()} == {'final.png', 'curves.png', 'drift.png'}
     assert '| mid7 | 0.9 | 0.9 | 0.9 | 0.9 |' in (tmp_path / 'plots' / 'e5' / 'recovery.md').read_text()
     assert '| emb | - | - | 0.9 | - | - |' in (tmp_path / 'plots' / 'e7' / 'credit_dump.md').read_text()
@@ -212,3 +219,12 @@ def test_one_gpu_jobs_keep_their_config_hash(tmp_path):
     spec, _ = specs_from_config(path)[0]
     assert config_hash(spec) == digest({k: spec[k] for k in ('experiment', 'variant', 'seed', 'task', 'args', 'expect')})
     assert config_hash(dict(spec, task='reference', gpus=8)) != config_hash(dict(spec, task='reference'))
+
+
+@pytest.mark.skipif(not (paths.REPO / 'external' / 'noise').exists(), reason='needs the pinned Noise checkout')
+def test_reference_settings_are_checked_at_submission(tmp_path):
+    path = tmp_path / 'c.yaml'
+    path.write_text('experiment: e\nvariant: v\ntask: reference\ngpus: 8\n'
+                    'args: {script: [noise, train/val/run.py], settings: {lrr: 0.001}}\n')
+    with pytest.raises(ValueError, match=r"no Settings field \['lrr'\]"):
+        specs_from_config(path)

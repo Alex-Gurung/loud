@@ -211,3 +211,20 @@ wrong or not worth it) or **deferred** (why, and what it waits on). "Same as" po
 | 1 | major | E5's diagnostic measures a different credit from PR #40's chain (every MLP unit, autograd target, no own-query) | fixed (partly) | Probes now go through the chain's routed units (`route_k` 512, its ranking), and the target is a finite-difference direct cycle at each site run the same way; autograd is reported beside it. Attention stays frozen, as the plan's diagnostic says; the docstring and configs state that the own-query response is left out |
 | 2 | major | E12's re-tunes and baseline have one seed; the record script fixes `SEED = 0` | fixed | `script_seed: true` sets the script's SEED from the job seed (`loud/launch.py`); record and every re-tune run seeds 0-2. Seed 0's reproduction is a separate compare job, `e12.record_match` (PR #46's published log pinned), which the re-tunes wait for |
 | 3 | minor | No E12 plot of validation loss over time with the 3.5 target | fixed | `val_time.png` for e12 |
+
+### 20261028T215315Z-code-claude.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | major | E5's embedding launch is biased by x0's skip paths (recovery 0.83-0.92 at mid0-mid2 on the record checkpoint); a mid0 launch recovers 0.9999 | fixed | Not a code error: that bias is what E5 asks about, now reported for the real checkpoints. The reviewer's alternative is added as a second launch (block 0's direct cycle read at mid1-mid7, x0 held): a two-cycle hybrid. The E5 table shows both, and the method check tests the mid0 launch on a live model |
+| 2 | major | `gpus` in every config hash breaks resubmission | fixed | Same as 20261028T215315Z-code-codex.md #1 |
+| 3 | major | E12 re-tunes run one seed; the record script fixes SEED | fixed | Same as 20261028T220115Z-research-codex.md #2 |
+| 4 | major | The README is stale: five tools, plots not started, one GPU per worker; nothing on E5, E12, `gpus`, `launch.py`, `pr46`, plots, `cpu_env.sh`; PR #46 has no future-draw knob | fixed | README rewritten after the merges (status, the 8-GPU worker, E12's adaptation and its dropped future-draw knob) |
+| 5 | minor | The condition number is dominated by the RMS norm's radial direction | fixed | Reported with and without the smallest singular value; the E5 table uses the latter |
+| 6 | minor | Ridge 1e-3 x mean diagonal pulls well-conditioned directions to the guess | fixed | Ridges 0, 1e-5, 1e-4, 1e-3; the table reads 1e-4 |
+| 7 | minor | The method check cannot catch an MLP or bf16 error (zeroed writers, x0 lambdas zeroed) | fixed | A live random model: the chain arithmetic's direct cycles must match autograd at every site (p10 > 0.999), and the mid0 launch must recover the later sites with bf16 tracking float32. Doing so found and fixed a cancellation: the MLP input now uses PR #40's exact `norm_difference` |
+| 8 | minor | `test_launch` runs the live repo's `launch.py` | fixed | `paths.SOURCE` |
+| 9 | minor | 36,864 SVDs plus ~110k solves; one SVD per site gives everything | fixed | One SVD per site and chunk gives the condition numbers and every ridge's solution; the site that is the probe itself needs none |
+| 10 | minor | Nothing extracts when the 60% run crosses 3.5; E12's final plot mixes merged records with unmerged proxies | fixed | `plots/e12/summary.md`: final, plain-weights val and the time to 3.5, with the merged/plain note |
+| 11 | minor | A misspelt `settings` field fails only on the 8-GPU node; JSON lists replace tuple fields | fixed | Fields checked at submission from the script's source (`launch.settings_fields`, no torch); lists become tuples where the default is a tuple |
+| nits | nit | jacrev docstring; no progress during reference runs; "queued" wording; `cpu_env.sh` rebuilds on any failed import | fixed (partly) | Docstring and wording fixed; reference progress and a narrower rebuild left as they are (the reference log is copied at the end; a rebuild takes a minute) |
