@@ -6,8 +6,13 @@ A method supplies a trainer with
     update(step, batch)        one update; returns (mean train loss as a tensor, fields for the metrics record)
     diagnose(step)             untimed per-update diagnostics; returns fields for the record
     describe()                 what config.json records about the method
+and optionally
+    warmup(batch)              the untimed compilation on random tokens (default: update(1, batch))
+    finish                     None, or finish(means): work after the last update of a complete run that is timed
+                               with the training and may change the weights (the record's end merge); returns result
+                               fields. The weights before it are kept as final_plain.pt and scored too.
 
-The loop follows the record scripts: an untimed warmup update on random tokens (compilation), then a fresh trainer;
+The loop follows the record scripts: an untimed warmup on random tokens (compilation), then a fresh trainer;
 the clock covers the updates only (diagnostics, held-out scoring and checkpoints are paused out); then final.pt and
 the official validation (and test) score in a fresh process. Writes config.json, metrics.jsonl (per update: step,
 sequences, tokens, train loss, step time, effective rates), heldout.jsonl, the H4 files and result.json.
@@ -69,7 +74,10 @@ def train(spec, run_dir, o, build, method):
     held = len(split.heldout)
     noise = torch.randint(0, trainer.model.config.vocab_size, (max(o['batch'], held), SEQ),
                           generator=torch.Generator().manual_seed(0)).to(dev)
-    trainer.update(1, noise[:o['batch']])
+    if hasattr(trainer, 'warmup'):
+        trainer.warmup(noise[:o['batch']])
+    else:
+        trainer.update(1, noise[:o['batch']])
     if held:
         mean_loss(trainer.model, noise[:held], dev, held)
     trainer.reset()
@@ -119,9 +127,17 @@ def train(spec, run_dir, o, build, method):
         pause_total += time.perf_counter() - pause
 
     complete = last == steps
+    finish, plain, finished = getattr(trainer, 'finish', None), None, {}
+    if complete and finish is not None:
+        plain = checkpoints.save_final(trainer.model, 'final_plain.pt')
+        begin = time.perf_counter()
+        finished = finish(means)
+        if dev.type == 'cuda':
+            torch.cuda.synchronize()
+        elapsed += time.perf_counter() - begin
     final = checkpoints.save_final(trainer.model)
     result = dict(steps=steps, updates=last, complete=complete, train_seconds=round(elapsed, 2),
-                  update_sequences=last * o['batch'], train_loss_last=loss)
+                  update_sequences=last * o['batch'], train_loss_last=loss, **finished)
     if heldout:
         result['heldout_loss'] = heldout.score(trainer.model, last, 'monitor', final=True)
     if means.means is not None:
@@ -143,5 +159,9 @@ def train(spec, run_dir, o, build, method):
         del trainer
         if dev.type == 'cuda':
             torch.cuda.empty_cache()
-        result.update(score_in_subprocess(final, ['val', 'test'] if o['test'] else ['val'], run_dir / 'score.json'))
+        splits = ['val', 'test'] if o['test'] else ['val']
+        result.update(score_in_subprocess(final, splits, run_dir / 'score.json'))
+        if plain is not None:
+            scores = score_in_subprocess(plain, splits, run_dir / 'score_plain.json')
+            result.update({f'{k}_plain': v for k, v in scores.items()})
     return run.finish(result, spec.get('expect'))

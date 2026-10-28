@@ -1,0 +1,19 @@
+# Runs before the long Cut-chain jobs: a complete short run (96 sequences: 64 feed 16 updates of 4, 3 of them Boost; 32
+# score the end merge) of PR #40's chain through E7's ramp (row windows tiled across tokens, 64 to 448 rows, then the
+# full cycle), E6's drift check, H4, the end merge and official scoring of the merged and plain weights. About 20
+# minutes on one H100, most of it the warmup of the chain's 8 shapes and the end merge.
+experiment: verify
+variant: cut_smoke
+task: cut
+seeds: [0]
+priority: 3
+after: [verify.smoke.s0]
+args:
+  sequences: 96
+  heldout: 32
+  batch: 4
+  rows_start: 64
+  rows_full_at: 0.6
+  drift_every: 4
+  checkpoints: true
+notes: Pipeline check only; its numbers are not a result.

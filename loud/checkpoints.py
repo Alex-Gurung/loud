@@ -67,9 +67,9 @@ class FractionCheckpoints:
             self.saved[link.name] = dict(self.saved[path.name], fraction=f, link=path.name)
         return path
 
-    def save_final(self, model):
-        """final.pt, the exact trained weights."""
-        path = self.dir / 'final.pt'
+    def save_final(self, model, name='final.pt'):
+        """The exact trained weights (final.pt; final_plain.pt, before a trainer's finish)."""
+        path = self.dir / name
         torch.save(state_dict_cpu(model), path)
         return path
 

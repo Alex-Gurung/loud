@@ -11,6 +11,8 @@
         "archive/10M/utils/model.py": "86cf493dd8aa133c609050b289762050333bb4af7835d06cc542a9efffdcc919",
         "archive/10M/utils/prepare_data.py": "5f4bab42c4932bcf70541d0e0180a7bc21924fea5aa6d6fbc667c6beab48da9b",
         "archive/10M/train/val/run.py": "1d192e360e4a6aca2abb44f2b322314fc59f7d2811704759f2820823baac4e43",
+        "archive/10M/train/val/log/metrics.jsonl": "fccd3cb64fa54296d07c454aede94bccd22e5b8e61a0c2b56dcf8f14b85a86e4",
+        "archive/10M/train/val/log/result.json": "d36b516a2c9c31a01de4fc7e85589851ab2d8849961364e605ad3f920322bada",
         "archive/10M/train/speedrun/run.py": "67613ea53f5fa832fe632f66c79816f7d875a935e79bc72832173b1c2e5353e0",
         "archive/10M/train/speedrun/kernels.py": "ffc1a50f44c778ae844a86166e5d066f1c708cce675dc6312ae316d269d0c0cd",
         "train/val/run.py": "7c499074fb36c19742e9c731626a1f756780f05d603c8c80c5dc8eb581e40c1c",

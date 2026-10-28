@@ -25,7 +25,7 @@ EIDF, the GPU cluster, sharing one volume).
 | H3 held-out scorer (`loud/heldout.py`) | done; every call logged to `heldout.jsonl` |
 | H4 fraction checkpoints and the record's nine trajectory means (`loud/checkpoints.py`) | done; means scored on H3 |
 | H5 identity path, PR #26 on one GPU (`loud/identity.py`), with E6's `rows` and `row_offset_per_step` | done; CPU tests: one update equals PR #26's own |
-| H5 Cut chain, PR #40 on one GPU | not started |
+| H5 Cut chain, PR #40 on one GPU (`loud/cut.py`, task `cut`), with E6's rows and E7's ramp | done; CPU tests: 4 updates equal PR #40's own loop on 8 processes |
 | H6 diagnostic toolkit (`loud/diagnostics.py`, task `diagnose`): all five tools | done; CPU tests on a tiny model; configs in `configs/h6/` |
 | E2, E4, E10 proxy variants (`loud/variants.py`; `configs/e2/`, `e4/`, `e10/`: 32 jobs) | done; CPU tests: brute force, exact undo |
 | E3 population on split data (`loud/population.py`, task `population`) | done; CPU tests of the split, schedule and rules; `configs/e3/` |
@@ -93,16 +93,26 @@ its gates. A job runs only when each job in its `after` list is done and passed 
 5. `verify.identity` (verification 3): the identity path for a full 10M epoch, against PR #26's 4.1772 (within 0.01).
    `verify.identity_match` compares its first 20 updates with PR #26's published 8-GPU log (same seed, data and draws).
 
+6. `verify.cut_smoke`: a complete 16-update Cut-chain run through E7's ramp, the drift check, H4 and the end merge.
+   `verify.cut_prefix` then runs the 10M schedule for 262 updates (all 242 Boost and 20 Cut), and
+   `verify.cut_prefix_match` holds them against PR #40's published 8-GPU log: within 0.003 over the first 20 updates
+   (the plan's steps 2 and 10), within 0.02 over all 262 (step 100 and the first Cut updates). Same seed, data and
+   draws, so only float rounding separates them. The Cut-chain cells wait for both.
+
 The comparison jobs wait only for their runs to finish (`after_done`), not to pass, so they still run when a
 final-loss gate fails, which is when they are needed to tell a port error from an environment difference.
-6. E1: backprop at batch 8 and batch 4, three seeds each, with held-out scoring and the nine means:
+7. E1: backprop at batch 8 and batch 4, three seeds each, with held-out scoring and the nine means:
    - `bp_b4` saves H4 checkpoints and means for later diagnostics;
    - `bp_b4_pr40` is batch 4 with PR #40's own recipe, since no published run anchors boost-cut's rates at batch 4;
    - `e1.identity`, seed 0.
-7. E6 on the identity path: K = 1, 4, 16 (512, 128, 32 probe rows per update), three seeds each, with the drift check
+8. E6 on the identity path: K = 1, 4, 16 (512, 128, 32 probe rows per update), three seeds each, with the drift check
    every 50 updates. A control cell, `identity_k4_fresh`, reads 128 rows of a fresh basis each update, so E6 can say
    whether stitching a cycle over K updates matters or only the row count does.
-8. H6 on `e1.bp_b4.s0`'s checkpoints (`configs/h6/`), the diagnostics behind E5, E7 and E8:
+   - The Cut chain on the 1M slice: `e1.cut_1m` (seed 0); E6's `cut_k1`, `cut_k4`, `cut_k16` and the control
+     `cut_k4_fresh` (three seeds each, drift check every 10 updates); E7's four ramps (`configs/e7/`, two seeds each,
+     against `e6.cut_k1`). About 35 minutes per run on one H100. E7 is the plan's to run only if H6's `credit_dump`
+     shows the identity-path guess good early and poor late, so read that before submitting `configs/e7`.
+9. H6 on `e1.bp_b4.s0`'s checkpoints (`configs/h6/`), the diagnostics behind E5, E7 and E8:
    - `credit_dump` and `cos_to_autograd` at all five fractions;
    - `token_map_svd`, `linearity_check` and `direction_stats` at 20% and 100%.
 
@@ -175,8 +185,9 @@ external/  data/  artifacts/        shared-volume state, gitignored
 
 Recreate `external/` with `scripts/fetch_external.sh` (it clones Noise again at PR #26's commit as
 `external/noise-pr26`), and the data with `scripts/prepare_data.sh`. Run the tests with
-`PYTHONPATH=. /opt/loud-cpu-venv/bin/python -m pytest tests`, under 2 minutes on this pod. The method tests use
-tiny models and short sequences, with dense attention instead of flex attention (which has no CPU backward).
+`PYTHONPATH=. /opt/loud-cpu-venv/bin/python -m pytest tests`, about 6 minutes on this pod. The method tests use
+tiny models and short sequences, with dense attention instead of flex attention (which has no CPU backward); the
+Cut chain's checks run it eagerly (no compilation) with a 512-token vocabulary.
 
 ## Run configs
 
@@ -285,6 +296,29 @@ optimizer reproduces boost-cut's ANVIL II bit for bit, and with both off the pro
   labels sampled from the model) multiplies the pending update in place of `polar()`, at the polar factor's norm.
   About 8 minutes per 10M run (an estimate). The plan's kernel version in the Cut port waits on this test: if no
   damping beats the batch-4 baseline by 0.02, it is skipped.
+**The Cut chain** (task `cut`) imports PR #40's `archive/10M/train/val/run.py@4ef285e` (10M record #14, 3.676 in
+2101 s on 8×H100) unchanged: model, init, settings, the Boost and Cut estimators, optimizers, schedule and end merge.
+That script runs at batch 4 on 8 GPUs, two per sequence. The two GPUs of a sequence take complementary halves of every
+cycle and add their parts with an all-reduce in the middle of each estimate. Here the 8 GPUs are virtual ranks with
+the record's seeds and roles (`virtual_gpus`, default 8). The two halves of a sequence are threads that take turns:
+one runs at a time and hands over at each of those all-reduces, where the parts are added. So the run draws the 8-GPU
+run's numbers. A CPU test runs PR #40's own `train_stages` on 8 gloo processes for 2 Boost and 2 Cut updates and finds
+the same losses and weights; only the order of the 8-way gradient sum differs. Differences from PR #40:
+- **Seed:** the job's seed replaces the module's `SEED` constant (seed 0 is the record's). Data order and held-out set
+  are the records' (`randperm(seed 1)`, the last 32), which the end merge scores.
+- **The end merge** runs after the last update inside the clock, as in the record. Its means are the shared loop's
+  (the same rule), and its held-out scorer adds the 32 sequences rank by rank, as the record's all-reduce does.
+  `final_plain.pt` keeps the weights before the merge, scored as `val_loss_plain` (the record's 3.703 to 3.676).
+- **E6** (`rows`, `row_offset_per_step`, `drift_every`) and **E7** (`rows_start`, `rows_full_at`) act only on the
+  Cut phase's chain, at its nine sites (the embedding and the 8 mid streams). Boost, the head-only top probe and the
+  key, gate, query and future probes keep their budgets. A token's credit at a site comes from its rows of the site's
+  signed basis, scaled by 512 / rows. E6 reads window `s mod K` of bases held for a cycle of K updates. E7 grows the
+  rows from `rows_start` at the first Cut update to 512 at the fraction `rows_full_at` of the run, in steps of 64;
+  token t reads the window starting at `(t * rows) mod 512`, so every row is read in every update. Every shape the
+  run will use compiles in the warmup. The full cycle runs the record's `chain_credits` itself. CPU tests check that,
+  that the K windows of a cycle average to the full cycle, and that each tiled token gets its window's credit.
+- **Cost on one H100:** about 1.6 s per Boost update and 16 s per Cut update (8 times the published per-GPU times),
+  and about 8 minutes for the end merge. A 1M-slice run takes about 35 minutes; the full 10M epoch about 4.6 hours.
 
 ## Review
 

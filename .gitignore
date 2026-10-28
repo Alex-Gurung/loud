@@ -1,6 +1,6 @@
-# Shared-volume state; never committed (see README: Layout)
-external/
-data/
+# Shared-volume state; never committed (see README: Layout). Anchored without a slash so a worktree's symlinks match.
+/external
+/data
 artifacts/
 __pycache__/
 .pytest_cache/

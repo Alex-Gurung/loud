@@ -1,7 +1,7 @@
 # E12 on one GPU: backprop on the 30M set with record #2's (PR #40's recipe reused on 30M, 3.409) exact optimizer,
 # rates, schedule, init and batch 4: the fair baseline for the 3.409 record (the README's 3.340 used a few learning
-# rates). About 15 min on one H100. Compare the plain final weights with the record's val_loss_plain; the record's end
-# merge is not applied here.
+# rates). About 15 min on one H100. With the record's own end merge, so val_loss compares with the record's and
+# val_loss_plain with its plain weights.
 experiment: e12
 variant: bp_pr40
 task: proxy
@@ -14,4 +14,5 @@ args:
   heldout: 32
   batch: 4
   means: true
+  end_merge: true
   heldout_every: 200

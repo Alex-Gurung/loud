@@ -1,6 +1,6 @@
 # E12 on one GPU: backprop on the 30M set with the current record's (PR #46, 3.338) exact optimizer, rates, schedule,
-# init and batch 4: the fair baseline the plan asks for. About 15 min on one H100. Compare the plain final weights
-# with the record's val_loss_plain; the record's end merge is not applied here.
+# init and batch 4: the fair baseline the plan asks for. About 15 min on one H100. With the record's own end merge, so
+# val_loss compares with the record's and val_loss_plain with its plain weights.
 experiment: e12
 variant: bp_pr46
 task: proxy
@@ -13,4 +13,5 @@ args:
   heldout: 32
   batch: 4
   means: true
+  end_merge: true
   heldout_every: 200
