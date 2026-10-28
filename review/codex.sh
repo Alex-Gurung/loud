@@ -22,12 +22,15 @@ work=/var/tmp/loud-review/$stamp-$lens
 report=$repo/review/reports/$stamp-$lens-codex.md
 "$repo/scripts/cpu_env.sh" >&2  # the reviewer user and the CPU Python the reviewers run tests with
 
-# Codex refreshes its login by rotating the token, so whichever copy refreshed last wins in both places.
+# Codex refreshes its login by rotating the token, so whichever copy refreshed last wins in both places. Root's login
+# is under CODEX_HOME when that is set (the default is ~/.codex).
+login=${CODEX_HOME:-/root/.codex}/auth.json
+[[ -f $login ]] || { echo "no Codex login at $login: run 'codex login' first" >&2; exit 2; }
 sync_login() {
-    python3 - "$home/.codex/auth.json" <<'EOF'
+    python3 - "$login" "$home/.codex/auth.json" <<'EOF'
 import json, os, pwd, shutil, sys
 from pathlib import Path
-mine, theirs = Path('/root/.codex/auth.json'), Path(sys.argv[1])
+mine, theirs = Path(sys.argv[1]), Path(sys.argv[2])
 stamp = lambda p: json.loads(p.read_text()).get('last_refresh', '') if p.exists() else ''
 src, dst = (theirs, mine) if stamp(theirs) > stamp(mine) else (mine, theirs)
 if stamp(src) != stamp(dst):
