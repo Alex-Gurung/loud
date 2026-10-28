@@ -1,0 +1,22 @@
+# E4: accept-or-reject steps, against the batch-8 baseline e1.bp_b8. After every update, one no-grad forward scores the
+# same batch at the new weights; if its loss rose, the weights and the whole optimizer state go back to before the
+# update, and that batch feeds no update.
+# Version two at target acceptance 0.6 with the warmdown removed (constant base rates). Success as adapt_nowd.
+experiment: e4
+variant: adapt_t60_nowd
+task: proxy
+seeds: [0]
+priority: 55
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 8
+  means: true
+  heldout_every: 50
+  checkpoints: true
+  step_control: adapt
+  accept_up: 1.05
+  accept_down: 0.9294
+  warmdown: 0

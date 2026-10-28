@@ -73,7 +73,20 @@ PROXY = dict(
     lr_mult=1.0,                # scales both Adam and ANVIL II rates, as backprop_preset.py --lr-mult
     per_sequence_grads=False,   # H2
     grad_noise_every=0,         # log the H2 across-sequence spread every N updates (needs per_sequence_grads)
+    warmdown=None,              # the recipe's warmdown fraction (None), or another; 0 holds every rate constant
+    # one-change variants (loud/variants.py), at most one per run:
+    smooth_tau=0.0,             # E2: antithetic blur at the nine probing sites, in PR #40 probe steps (0: off)
+    step_control='none',        # E4: 'reject' undoes an update that raised its batch's loss; 'adapt' also scales rates
+    accept_up=1.05,             # E4 adapt: rate multiplier after an accepted update
+    accept_down=0.8,            # E4 adapt: rate multiplier after a rejected one
+    token_shaping='none',       # E10: 'cap' or 'agree', on every nn.Linear weight gradient
+    cap_quantile=0.95,          # E10 cap: each token's credit norm is capped at this quantile over the batch
+    agree_threshold=0.7,        # E10 agree: the share of tokens whose contributions must agree in sign
 )
+STEP_CONTROLS, SHAPINGS = ('none', 'reject', 'adapt'), ('none', 'cap', 'agree')
+# Each variant option, and the setting (of another option) it acts under.
+VARIANT_OPTIONS = {'accept_up': ('step_control', 'adapt'), 'accept_down': ('step_control', 'adapt'),
+                   'cap_quantile': ('token_shaping', 'cap'), 'agree_threshold': ('token_shaping', 'agree')}
 
 IDENTITY = dict(
     TRAINING,
@@ -158,6 +171,29 @@ def proxy_options(args):
         raise ValueError('per-sequence gradients need micro_batch: 1')
     if o['grad_noise_every'] and not o['per_sequence_grads']:
         raise ValueError('grad_noise_every needs per_sequence_grads')
+    warmdown = o['warmdown']
+    if warmdown is not None and (isinstance(warmdown, bool) or not isinstance(warmdown, (int, float))
+                                 or not 0 <= warmdown <= 1):
+        raise ValueError("warmdown must be a fraction in [0, 1] (0: constant rates), or null for the recipe's")
+    if o['step_control'] not in STEP_CONTROLS or o['token_shaping'] not in SHAPINGS:
+        raise ValueError(f'step_control must be one of {STEP_CONTROLS}, token_shaping one of {SHAPINGS}')
+    variants = [key for key, on in (('smooth_tau', o['smooth_tau'] != 0), ('step_control', o['step_control'] != 'none'),
+                                    ('token_shaping', o['token_shaping'] != 'none')) if on]
+    if len(variants) > 1:
+        raise ValueError(f'one change per variant: {variants} are separate experiments')
+    for key, (mode, value) in VARIANT_OPTIONS.items():
+        if key in args and o[mode] != value:
+            raise ValueError(f'{key} acts only with {mode}: {value}')
+    if o['smooth_tau'] < 0:
+        raise ValueError('smooth_tau must be >= 0')
+    if not (o['accept_up'] >= 1 and 0 < o['accept_down'] <= 1):
+        raise ValueError('accept_up must be >= 1 and accept_down in (0, 1]')
+    if not 0 < o['cap_quantile'] <= 1:
+        raise ValueError('cap_quantile must be in (0, 1]')
+    if not 0.5 < o['agree_threshold'] <= 1:
+        raise ValueError('agree_threshold must be in (0.5, 1]: at least half the tokens always share the majority sign')
+    if o['per_sequence_grads'] and variants and variants != ['step_control']:
+        raise ValueError(f"per_sequence_grads reads each sequence's plain gradient, which {variants[0]} replaces")
     return o
 
 

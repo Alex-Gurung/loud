@@ -27,6 +27,7 @@ EIDF, the GPU cluster, sharing one volume).
 | H5 identity path, PR #26 on one GPU (`loud/identity.py`), with E6's `rows` and `row_offset_per_step` | done; CPU tests: one update equals PR #26's own |
 | H5 Cut chain, PR #40 on one GPU | not started |
 | H6 diagnostic toolkit (`loud/diagnostics.py`, task `diagnose`): all five tools | done; CPU tests on a tiny model; configs in `configs/h6/` |
+| E2, E4, E10 proxy variants (`loud/variants.py`; `configs/e2/`, `e4/`, `e10/`: 32 jobs) | done; CPU tests: brute force, exact undo |
 | H7 runner and results table (`run.py`, `collect.py`); per-experiment plot scripts | runner and table done; plots not started |
 | Port checks against their sources (`compare` task) | done |
 | GPU queue and workers (`loud/jobqueue.py`, `loud/worker.py`, `worker/`) | done; tested end to end on CPU |
@@ -216,6 +217,29 @@ takes PR #40's rates and betas, its warmdown to 30% and head std 0.02, and batch
   the held-out set (saved only by `bp_b4`). All five checkpoints store 2-D weights in one dtype (bf16 by default,
   the same forward under bf16 autocast); `final.pt` is always exact. `ckpt_100.pt` exists only for complete runs.
   Verification runs reproduce the published layout and keep only `final.pt`.
+
+**Proxy variants** (`loud/variants.py`) are one option each, off by default and at most one per run. The default
+path is unchanged: the CPU test of the float32 mean still holds bit for bit. All three cells run at batch 8 against
+`e1.bp_b8`.
+- **E2, `smooth_tau`.** The sites are the raw embedding and each block's mid stream. Each token gets a random r of
+  length tau × 0.01 × its RMS × √512. That is PR #40's chain probe, a ±1 Hadamard row times `chain_sigma` (0.01) times
+  the per-token RMS, which answers the plan's open question: the step is relative to each token's RMS. A clean no-grad
+  forward gives the RMS and `train_loss`; two forwards add +r and −r, and the mean of their gradients is the blurred
+  loss's gradient. `blurred_loss` is logged too. A CPU test checks the length, the shared r and the odd-order
+  cancellation (the error falls 4× when r halves). About 2.3× a baseline update.
+- **E4, `step_control`.** `reject`: after the step, one no-grad forward on the same micro-batches; if the loss rose,
+  the weights and all optimizer state (ANVIL II's rails and energy, Adam's moments, both step clocks) are restored
+  from a snapshot, and the batch feeds no update. `adapt` also multiplies every rate (and so ANVIL II's decay) by
+  `accept_up` after an accept and `accept_down` after a reject, on top of the schedule. `warmdown: 0` removes the hand
+  warmdown; ANVIL II's own momentum schedule stays. The plan's 1.05 and 0.8 settle at 82% acceptance, so `adapt_t60`
+  uses 0.9294 for its stated 0.6. Logged: `accepted`, `trial_loss`, `lr_multiplier`, and `lr` is the effective rate.
+  About 1.35× a baseline update.
+- **E10, `token_shaping`.** Every `nn.Linear` weight gradient (blocks, value-embedding gates, LM head; the embedding
+  tables keep theirs) is formed in hooks from each token's credit, the output gradient, and its input, with autograd's
+  own matmul (bit for bit on CPU). `cap` caps each token's credit norm at the batch's `cap_quantile`, per layer; it
+  keeps credits and inputs in bf16 until the batch is done (about 0.3 GB per sequence), roughly 1.1× a baseline update.
+  `agree` keeps entries where at least `agree_threshold` of the tokens with a nonzero contribution share the majority
+  sign; the counts are exact sign matmuls summed over micro-batches, roughly 2× a baseline update.
 
 **The identity path** imports PR #26's `train/speedrun/run.py@2604407` unchanged: its model, init, optimizer,
 settings and `FastRelay` estimator. There is one estimator per virtual GPU, seeded by its rank as on 8 GPUs. Their

@@ -1,0 +1,19 @@
+# E4: accept-or-reject steps, against the batch-8 baseline e1.bp_b8. After every update, one no-grad forward scores the
+# same batch at the new weights; if its loss rose, the weights and the whole optimizer state go back to before the
+# update, and that batch feeds no update.
+# Version one, zero knobs: reject only. Logs per update: accepted, trial_loss. Read with the adapt cells.
+experiment: e4
+variant: reject
+task: proxy
+seeds: [0, 1, 2]
+priority: 55
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 8
+  means: true
+  heldout_every: 50
+  checkpoints: true
+  step_control: reject

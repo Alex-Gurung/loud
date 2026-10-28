@@ -61,6 +61,12 @@ def test_means_follow_the_record():
     ('args: {checkpoints: 1}', 'checkpoints must be true or false'),
     ('expect: {val_loss: 3.5}', r'needs \[target, tolerance'),
     ('expect: {val_los: [3.5, 0.1]}', "no 'val_los'"),
+    ('args: {smooth_tau: 1, token_shaping: cap}', 'one change per variant'),
+    ('args: {step_control: reject, accept_down: 0.9}', 'accept_down acts only with step_control: adapt'),
+    ('args: {token_shaping: agree, agree_threshold: 0.5}', r'agree_threshold must be in \(0.5, 1\]'),
+    ('args: {per_sequence_grads: true, token_shaping: cap}', 'per_sequence_grads'),
+    ('args: {warmdown: 1.5}', 'warmdown must be a fraction'),
+    ('args: {step_control: undo}', 'step_control must be one of'),
 ])
 def test_bad_configs_fail_at_submission(tmp_path, text, error):
     path = tmp_path / 'c.yaml'

@@ -5,8 +5,9 @@ block matrices, Adam elsewhere), rates and warmdown, with the shared loop's data
 (loud/train.py). The 8-GPU script gives each GPU one sequence, averages the float32 gradients across GPUs and casts
 back to each parameter's dtype; here each micro-batch (default: one sequence) is one GPU's share, and the same float32
 average is formed before the cast. The batch-mean loss is the gradient's objective, as there. Adds H2 (per-sequence
-gradients).
+gradients) and the one-change variants of E2, E4 and E10 (loud/variants.py), each off by default.
 """
+import contextlib
 from dataclasses import asdict, is_dataclass
 
 import torch
@@ -15,6 +16,7 @@ from . import refs
 from .options import PRESETS, proxy_options
 from .pergrad import PerSequenceGrads
 from .train import current_rates, rate_labels, set_rate, train
+from .variants import Blur, StepControl, TokenShaping
 
 
 class Reference:
@@ -56,56 +58,100 @@ class Reference:
 class Backprop:
     def __init__(self, o, reference, device, seed, steps):
         self.o, self.reference, self.device, self.seed, self.steps = o, reference, device, seed, steps
+        self.warmdown = reference.warmdown if o['warmdown'] is None else o['warmdown']
         self.reset()
 
     def reset(self):
+        o = self.o
         self.model = self.reference.make_model(self.device, self.seed)
         self.optimizer = self.reference.make_optimizer(self.model, self.steps)
         self.params = list(self.model.parameters())
         self.accumulators = [torch.zeros_like(p, dtype=torch.float32) for p in self.params]
         self.labels = rate_labels(self.optimizer, self.reference.settings.lr)
-        self.pergrad = PerSequenceGrads(self.model.named_parameters()) if self.o['per_sequence_grads'] else None
+        self.pergrad = PerSequenceGrads(self.model.named_parameters()) if o['per_sequence_grads'] else None
+        self.blur = Blur(self.model, o['smooth_tau'], self.seed, self.device) if o['smooth_tau'] else None
+        self.blurred = None  # E2: the last update's mean loss at the displaced points
+        self.control = StepControl(self.model, self.optimizer, o) if o['step_control'] != 'none' else None
+        self.shaping = TokenShaping(self.model, self.accumulators, o) if o['token_shaping'] != 'none' else None
 
     def describe(self):
-        return self.reference.describe()
+        described = self.reference.describe()
+        if self.o['warmdown'] is not None:
+            described.update(warmdown=self.warmdown, recipe_warmdown=self.reference.warmdown)
+        return described
+
+    def loss_of(self, micro):
+        """A micro-batch's mean loss, from the bf16 autocast forward every update uses."""
+        with torch.autocast(self.device.type, dtype=torch.bfloat16):
+            return self.model(micro[:, :-1].contiguous(), micro[:, 1:].contiguous())
+
+    def backward(self, micro):
+        """One micro-batch's backward, its gradients added to the float32 accumulators. Returns the loss."""
+        loss = self.loss_of(micro)
+        loss.backward()
+        if self.pergrad is not None:
+            self.pergrad.capture(self.model)
+        pairs = [(a, p.grad.float()) for a, p in zip(self.accumulators, self.params) if p.grad is not None]
+        torch._foreach_add_([a for a, _ in pairs], [g for _, g in pairs])
+        for p in self.params:
+            p.grad = None
+        return loss.detach().float()
 
     def gradient(self, batch):
         """Mean of the micro-batches' float32 gradients, cast to each parameter's dtype (backprop_preset's all-reduce
-        and divide by world). Returns the mean training loss (a tensor)."""
+        and divide by world). Returns the mean training loss (a tensor). With E2's blur, each micro-batch gives two
+        gradients, at +r and -r, and the loss returned is the clean one, from a no-grad forward."""
         torch._foreach_zero_(self.accumulators)
-        losses = []
+        losses, blurred = [], []
         self.model.requires_grad_(True)
-        for micro in batch.split(self.o['micro_batch']):
-            with torch.autocast(self.device.type, dtype=torch.bfloat16):
-                loss = self.model(micro[:, :-1].contiguous(), micro[:, 1:].contiguous())
-            loss.backward()
-            if self.pergrad is not None:
-                self.pergrad.capture(self.model)
-            pairs = [(a, p.grad.float()) for a, p in zip(self.accumulators, self.params) if p.grad is not None]
-            torch._foreach_add_([a for a, _ in pairs], [g for _, g in pairs])
-            for p in self.params:
-                p.grad = None
-            losses.append(loss.detach().float())
+        with self.shaping.batch() if self.shaping is not None else contextlib.nullcontext():
+            for micro in batch.split(self.o['micro_batch']):
+                if self.blur is None:
+                    losses.append(self.backward(micro))
+                    continue
+                losses.append(self.blur.measure(lambda: self.loss_of(micro)))
+                for sign in (1, -1):
+                    with self.blur.shifted(sign):
+                        blurred.append(self.backward(micro))
+            if self.shaping is not None:
+                self.shaping.finish()
         self.model.requires_grad_(False)
-        torch._foreach_div_(self.accumulators, len(losses))
+        passes = len(blurred) or len(losses)  # backward passes: two per micro-batch with the blur
+        torch._foreach_div_(self.accumulators, passes)
         for a, p in zip(self.accumulators, self.params):
             p.grad = a.to(p.dtype)  # float32 parameters take the accumulator itself; it is zeroed only next update
+        if blurred:
+            self.blurred = torch.stack(blurred).mean()
         return torch.stack(losses).mean()
 
+    @torch.no_grad()
+    def batch_loss(self, batch):
+        """The batch's mean loss at the current weights, over the same micro-batches as gradient()."""
+        return torch.stack([self.loss_of(micro).float() for micro in batch.split(self.o['micro_batch'])]).mean()
+
     def update(self, step, batch):
-        set_rate(self.optimizer, step, self.steps, self.reference.warmdown, self.reference.final)
+        set_rate(self.optimizer, step, self.steps, self.warmdown, self.reference.final)
+        if self.control is not None:
+            self.control.scale(self.optimizer)
         fields = current_rates(self.optimizer, self.labels)
         loss = self.gradient(batch)
+        if self.control is not None:
+            self.control.save()
         self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
+        if self.control is not None:
+            fields.update(self.control.judge(loss, self.batch_loss(batch)))
         return loss, fields
 
     def diagnose(self, step):
-        if self.pergrad is None:
-            return {}
-        every = self.o['grad_noise_every']
-        record = dict(grad_noise=self.pergrad.summary()) if every and step % every == 0 else {}
-        self.pergrad.clear()
+        record = {}
+        if self.blurred is not None:
+            record['blurred_loss'] = self.blurred.item()
+        if self.pergrad is not None:
+            every = self.o['grad_noise_every']
+            if every and step % every == 0:
+                record['grad_noise'] = self.pergrad.summary()
+            self.pergrad.clear()
         return record
 
 
