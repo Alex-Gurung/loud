@@ -224,7 +224,7 @@ def score_options(args):
 
 
 def reference_options(args):
-    allowed = {'script', 'cwd', 'argv', 'result', 'settings', 'train_rows'}
+    allowed = {'script', 'cwd', 'argv', 'result', 'settings', 'train_rows', 'script_seed'}
     if set(args) - allowed or not isinstance(args.get('script'), list) or len(args['script']) != 2:
         raise ValueError(f'reference needs script: [repo, path] and accepts only {sorted(allowed)}')
     for arg in args.get('argv', []):
@@ -235,6 +235,8 @@ def reference_options(args):
     rows = args.get('train_rows', 0)
     if not isinstance(rows, int) or isinstance(rows, bool) or not 0 <= rows <= RANGES['30M']:
         raise ValueError(f'reference train_rows: a row count up to {RANGES["30M"]} (0: all of train.pt)')
+    if not isinstance(args.get('script_seed', False), bool):
+        raise ValueError('reference script_seed: true or false')
     return args
 
 

@@ -224,7 +224,7 @@ def diagnostics(scratch):
     # ridge toward the (here exact) identity-path guess fills that one in. At emb, A is the probe itself.
     with torch.no_grad():
         model.x0_lambdas[1:] = 0
-    recovery, per_token = tools.credit_recovery(ridges=(0.0, 1e-3), chunk=64)
+    recovery, per_token = tools.credit_recovery(ridges=(0.0, 1e-3), route_k=None, chunk=64)
     assert recovery['emb']['float32 ridge 0.0']['p10'] > 0.999, recovery['emb']
     for site in site_names(n_layer)[1:]:
         assert recovery[site]['float32 ridge 0.001']['p10'] > 0.99, (site, recovery[site])

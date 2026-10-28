@@ -57,14 +57,20 @@ def progress_of(run_dir):
 
 
 def gpu_info():
-    """(name of the first GPU, number of GPUs); (None, 1) without nvidia-smi (a CPU check of the plumbing)."""
+    """(name of the first usable GPU, number of usable GPUs): the GPUs nvidia-smi lists, narrowed to
+    CUDA_VISIBLE_DEVICES when that is set (indices); (None, 1) without nvidia-smi (a CPU check of the plumbing)."""
     try:
-        out = subprocess.run(['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'], capture_output=True,
+        out = subprocess.run(['nvidia-smi', '--query-gpu=index,name', '--format=csv,noheader'], capture_output=True,
                              text=True, timeout=30)
-        names = [n.strip() for n in out.stdout.splitlines() if n.strip()]
-        return (names[0], len(names)) if names else (None, 1)
     except (OSError, subprocess.SubprocessError):
         return None, 1
+    names = dict(line.split(', ', 1) for line in out.stdout.splitlines() if ', ' in line)
+    visible = [v.strip() for v in os.environ.get('CUDA_VISIBLE_DEVICES', ','.join(names)).split(',') if v.strip()]
+    if all(v.isdigit() for v in visible):
+        names = {i: names[i] for i in visible if i in names}
+    else:  # GPU UUIDs: keep their count
+        names = dict(list(names.items())[:len(visible)])
+    return (next(iter(names.values())).strip(), len(names)) if names else (None, 1)
 
 
 class Worker:

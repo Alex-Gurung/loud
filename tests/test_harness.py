@@ -129,18 +129,19 @@ def test_launch_replaces_settings_and_rows_but_not_the_script(tmp_path):
     script = tmp_path / 'record.py'
     script.write_text(
         'from dataclasses import asdict, dataclass\nimport json, sys\n'
-        '@dataclass\nclass Settings:\n    lr: float = 1.0\n    switch: float = 0.2\n'
+        'SEED = 0\n@dataclass\nclass Settings:\n    lr: float = 1.0\n    switch: float = 0.2\n'
         'def load_rows(path, rows):\n    return list(range(rows))\n'
         'def main():\n'
-        '    print(json.dumps(dict(settings=asdict(Settings()), rows=len(load_rows("x/train.pt", 10)),'
+        '    print(json.dumps(dict(seed=SEED, settings=asdict(Settings()), rows=len(load_rows("x/train.pt", 10)),'
         ' val=len(load_rows("x/val.pt", 4)), argv=sys.argv[1:])))\n'
         "if __name__ == '__main__':\n    main()\n")
     launch = paths.REPO / 'loud' / 'launch.py'
     run = lambda *a: subprocess.run([sys.executable, str(launch), str(script), *a], capture_output=True, text=True)
-    out = json.loads(run('{"lr": 0.5}', '6', '--output', 'o').stdout)
-    assert out == dict(settings=dict(lr=0.5, switch=0.2), rows=6, val=4, argv=['--output', 'o'])
-    assert json.loads(run('{}', '0').stdout)['rows'] == 10
-    bad = run('{"lrr": 0.5}', '0')
+    out = json.loads(run('{"lr": 0.5}', '6', '2', '--output', 'o').stdout)
+    assert out == dict(seed=2, settings=dict(lr=0.5, switch=0.2), rows=6, val=4, argv=['--output', 'o'])
+    assert json.loads(run('{}', '0', '-').stdout) == dict(seed=0, settings=dict(lr=1.0, switch=0.2), rows=10, val=4,
+                                                         argv=[])
+    bad = run('{"lrr": 0.5}', '0', '-')
     assert bad.returncode and 'Settings has no' in bad.stderr
 
 
@@ -175,9 +176,23 @@ def test_plots_read_only_the_run_files(tmp_path, monkeypatch):
     fake_run(tmp_path, 'h6', 'credit_dump_c20', 0, None, summary={s: site for s in plots.SITES})
     stats = {'transformer.h.0.attn.c_q.weight': [dict(h2_over_c=2.0), dict(h2_over_c=0.5)]}
     fake_run(tmp_path, 'h6', 'direction_stats_c20', 0, None, summary=stats)
-    for experiment in ('e6', 'e5', 'e7', 'e8'):
+    timed = lambda s: dict(train_seconds=s * 6.0, val_loss=5 - s / 40) if s % 25 == 0 else {}
+    fake_run(tmp_path, 'e12', 'record', 0, 3.34, timed)
+    for experiment in ('e6', 'e5', 'e7', 'e8', 'e12'):
         plots.plot(experiment)
+    assert (tmp_path / 'plots' / 'e12' / 'val_time.png').exists()
     assert {p.name for p in (tmp_path / 'plots' / 'e6').iterdir()} == {'final.png', 'curves.png', 'drift.png'}
     assert '| mid7 | 0.9 | 0.9 | 0.9 | 0.9 |' in (tmp_path / 'plots' / 'e5' / 'recovery.md').read_text()
     assert '| emb | - | - | 0.9 | - | - |' in (tmp_path / 'plots' / 'e7' / 'credit_dump.md').read_text()
     assert (tmp_path / 'plots' / 'e8' / 'h2_over_c.png').exists()
+
+
+def test_one_gpu_jobs_keep_their_config_hash(tmp_path):
+    """gpus enters a job's identity only above 1, so queued one-GPU jobs stay unchanged configs."""
+    from loud.common import digest
+    from loud.run import config_hash
+    path = tmp_path / 'c.yaml'
+    path.write_text('experiment: e\nvariant: v\ntask: proxy\n')
+    spec, _ = specs_from_config(path)[0]
+    assert config_hash(spec) == digest({k: spec[k] for k in ('experiment', 'variant', 'seed', 'task', 'args', 'expect')})
+    assert config_hash(dict(spec, task='reference', gpus=8)) != config_hash(dict(spec, task='reference'))

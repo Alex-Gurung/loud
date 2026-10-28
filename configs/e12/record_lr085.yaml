@@ -3,12 +3,13 @@
 experiment: e12
 variant: record_lr085
 task: reference
-seeds: [0]
+seeds: [0, 1, 2]
 gpus: 8
 priority: 91
-after: [e12.record.s0]
+after: [e12.record_match.s0]
 args:
   script: [noise, train/val/run.py]
   argv: [--data-dir, '{data}', --output, '{out}/ref']
   result: ref/result.json
+  script_seed: true
   settings: {lr: 0.001785, anvil_lr: 0.0221}

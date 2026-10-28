@@ -137,6 +137,41 @@ def drift_plot(plt, by_variant, palette, out):
     plt.close(fig)
 
 
+def val_time_plot(plt, by_variant, palette, out, target=3.5):
+    """E12: the untimed validation curve against training time (mean over seeds at the logged updates), with the 3.5
+    speedrun target; the ring at each curve's end is the final score, after the end merge where there is one."""
+    fig, ax = plt.subplots(figsize=(6.4, 4))
+    drawn = False
+    for v in sorted(by_variant):
+        series = [{m['step']: (m['train_seconds'], m['val_loss']) for m in metrics(r) if 'val_loss' in m}
+                  for r in by_variant[v]]
+        series = [s for s in series if s]
+        if not series:
+            continue
+        steps = sorted(set.intersection(*(set(s) for s in series)))
+        xs = [statistics.fmean(s[k][0] for s in series) / 60 for k in steps]
+        ys = [statistics.fmean(s[k][1] for s in series) for k in steps]
+        ax.plot(xs, ys, color=palette[v], marker='o', markersize=3, label=f'{v} (n={len(series)})')
+        finals = by_variant[v]
+        ax.scatter([statistics.fmean(r['train_seconds'] for r in finals) / 60],
+                   [statistics.fmean(r['val_loss'] for r in finals)], s=50, facecolor=SURFACE,
+                   edgecolor=palette[v], linewidth=1.5, zorder=4)
+        drawn = True
+    if not drawn:
+        plt.close(fig)
+        return
+    ax.axhline(target, color=MUTED, linewidth=1, linestyle='--')
+    ax.annotate(f'speedrun target {target}', (ax.get_xlim()[1], target), xytext=(-4, 4), textcoords='offset points',
+                ha='right', fontsize=7.5, color=INK_2)
+    ax.set_xlabel('training time (minutes, timed region)')
+    ax.set_ylabel('validation loss')
+    ax.set_title('validation loss over training time (ring: final score)', loc='left', fontsize=9)
+    ax.legend(fontsize=7.5)
+    fig.tight_layout()
+    fig.savefig(out / 'val_time.png')
+    plt.close(fig)
+
+
 def diagnostic(experiment, variant):
     """The summary JSON of a finished diagnose run (seed 0), or None."""
     run = RUNS / experiment / variant / 's0'
@@ -215,7 +250,7 @@ def e8_plot(plt, out):
     return True
 
 
-EXTRA = {'e6': [drift_plot]}
+EXTRA = {'e6': [drift_plot], 'e12': [val_time_plot]}
 TABLES = {'e5': e5_table, 'e7': e7_table}
 FIGURES = {'e8': e8_plot}
 

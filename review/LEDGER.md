@@ -194,3 +194,20 @@ wrong or not worth it) or **deferred** (why, and what it waits on). "Same as" po
 | 5 | minor | `e1.identity` keeps no means; identity and E6 keep no checkpoints | fixed | Already fixed after this copy was frozen (round-2 research-codex #4): checkpoints and means in every E1 and E6 cell |
 | 6 | nit | `e6.identity_k1.s0` repeats `e1.identity.s0` | rejected | Kept as a determinism check (about 6 GPU-minutes); the config says so |
 | 7 | nit | The smoke test never runs the identity path | fixed | `verify.identity_smoke`: 57 updates through E6's windows, the drift check, H3, H4 and scoring; `verify.identity` waits for it |
+
+## Round 4: E5's diagnostic, multi-GPU jobs and E12, plots (frozen copies of 2026-10-28 21:53 and 22:01 UTC)
+
+### 20261028T215315Z-code-codex.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | major | Adding `gpus` to every config hash makes unchanged queued jobs look like changed configs | fixed | `gpus` enters the hash only above 1; every queued job's hash checked unchanged; `test_one_gpu_jobs_keep_their_config_hash` |
+| 2 | major | The worker counts nvidia-smi's GPUs, ignoring `CUDA_VISIBLE_DEVICES` | fixed | `gpu_info` narrows to the visible indices (or counts UUIDs); `test_gpu_info_follows_cuda_visible_devices` |
+
+### 20261028T220115Z-research-codex.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | major | E5's diagnostic measures a different credit from PR #40's chain (every MLP unit, autograd target, no own-query) | fixed (partly) | Probes now go through the chain's routed units (`route_k` 512, its ranking), and the target is a finite-difference direct cycle at each site run the same way; autograd is reported beside it. Attention stays frozen, as the plan's diagnostic says; the docstring and configs state that the own-query response is left out |
+| 2 | major | E12's re-tunes and baseline have one seed; the record script fixes `SEED = 0` | fixed | `script_seed: true` sets the script's SEED from the job seed (`loud/launch.py`); record and every re-tune run seeds 0-2. Seed 0's reproduction is a separate compare job, `e12.record_match` (PR #46's published log pinned), which the re-tunes wait for |
+| 3 | minor | No E12 plot of validation loss over time with the 3.5 target | fixed | `val_time.png` for e12 |

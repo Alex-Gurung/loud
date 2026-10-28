@@ -322,51 +322,62 @@ class Toolkit:
             summary[site] = row
         return summary, {}
 
-    def credit_recovery(self, ridges=(0.0, 1e-3, 1e-1), sigma=0.01, chunk=16):
-        """E5: one cycle launched at the embedding, read at every site. Each token's raw embedding takes the W probes
-        v_i (rows of a signed Hadamard matrix times sigma x the token's RMS: PR #40's chain_sigma step), every
-        attention output frozen (the cut). The probes' changes are carried as PR #40's chain carries them
-        (chain_chunk_eager at the embedding, without its own-query responses and with every MLP unit): forward
-        differences against the clean pass, with the MLP and head products in float32 or, as the record's chain
-        runs them, in bf16. At site k, A[i] is the probe's change there and d[i] the token's loss change; the
-        recovered credit solves min |A c - d|^2 + lam |c - g|^2, lam = ridge x mean(diag A^T A), g the identity path's
-        guess (ridge 0: A c = d). It is compared per token with the credit a direct cycle at the site measures
-        (autograd of the token's own loss, attention and x0 = norm(emb) held) and with autograd's full credit. The
-        probe also moves x0, which every later block reads, so d carries paths that skip site k: those, the
-        conditioning of A and rounding are what this measures. At emb, A is the probe itself."""
+    def credit_recovery(self, ridges=(0.0, 1e-3, 1e-1), sigma=0.01, route_k=512, chunk=16):
+        """E5: one cycle launched at the embedding, read at every site, against a direct cycle at each site, both run
+        as PR #40's chain runs its cycles (chain_chunk_eager): forward differences against the clean pass, each
+        token's MLPs through its route_k strongest units (the record's routes: activation x |c_proj column|; None:
+        every unit), the MLP and head products in float32 or, as the record runs them, in bf16. Every attention output
+        is frozen, as the plan's diagnostic says; the chain's own-query response (a token's query moving its own
+        attention output) is left out. Probes: rows of a signed Hadamard matrix times sigma x the token's RMS at the
+        probed site (PR #40's chain_sigma step).
+        At site k, A[i] is the launched probe's change there and d[i] the token's loss change; the recovered credit
+        solves min |A c - d|^2 + lam |c - g|^2, lam = ridge x mean(diag A^T A), g the identity path's guess (ridge 0:
+        A c = d). It is compared per token with the direct cycle's credit at the site (what the unchanged chain
+        measures there), which is compared in turn with autograd (the token's own loss, attention and x0 held, every
+        unit) and with autograd's full credit. The probe also moves x0 = norm(emb), which every later block reads,
+        so d carries paths that skip site k: those, the conditioning of A and rounding are what this measures."""
         model, norm = copy.deepcopy(self.model).float(), self.m.norm
         values, frozen, x0_clean, targets = self.frozen(model)
         blocks, loss, from_site = self.paths(model)
-        names, L = site_names(self.n_layer), self.n_layer
+        names, L, layers = site_names(self.n_layer), self.n_layer, model.transformer.h
         guess = self.identity_guess()
         _, full = reference_gradients(self.model, self.x, self.y)
         with exact():
-            direct = {site: torch.func.vmap(torch.func.grad(lambda h, a, x0, y, site=site: loss(
+            autograd = {site: torch.func.vmap(torch.func.grad(lambda h, a, x0, y, site=site: loss(
                 from_site(site, h, a, x0), y)))(values[site][0], frozen, x0_clean, targets) for site in names}
-            emb, mids = values['emb'][0], [values[f'mid{i}'][0] for i in range(L)]
+            acts = [values[site][0] for site in names]  # each site's clean activation [T, W]
             final = blocks(x0_clean, frozen, x0_clean)[1]  # the clean top stream, before the final norm
-            pre = [F.linear(norm(mid), b.mlp.c_fc.weight.float()) for mid, b in zip(mids, model.transformer.h)]
+            pre = [F.linear(norm(mid), b.mlp.c_fc.weight.float()) for mid, b in zip(acts[1:], layers)]
+            hidden = pre[0].shape[-1]
+            k = min(route_k or hidden, hidden)
+            routes = [(F.relu(h).square() * b.mlp.c_proj.weight.float().norm(dim=0)).topk(k, -1).indices
+                      for h, b in zip(pre, layers)]
             head = model.lm_head.weight.float()[:model.config.vocab_size]
             base = final @ head.T
         lam_r, lam_0 = model.resid_lambdas.float(), model.x0_lambdas.float()
         cap = lambda z: 15 * torch.tanh(z / 15)
         eps = torch.finfo(torch.float32).eps
 
-        def changes(sl, v, dtype):
-            """The chain's forward differences for probes v [t, P, W] at tokens sl: each site's change and the loss
-            change [t, P]."""
-            e, x0, xL, z0 = emb[sl, None], x0_clean[sl, None], final[sl, None], base[sl, None]
-            w_fc = [b.mlp.c_fc.weight.to(dtype) for b in model.transformer.h]
-            w_out = [b.mlp.c_proj.weight.to(dtype) for b in model.transformer.h]
-            dx0 = norm(e + v) - x0
-            delta, out = None, [v]
-            for b in range(L):
-                delta = (lam_r[0] + lam_0[0]) * dx0 if b == 0 else lam_r[b] * delta + lam_0[b] * dx0
+        def changes(sl, site, v, dtype):
+            """chain_chunk_eager for moves v [t, P, W] at site (0: the embedding, 1 + b: block b's mid stream) and
+            tokens sl, without own-query responses: each site's change from there on and the loss change [t, P]."""
+            xL, z0 = final[sl, None], base[sl, None]
+            if site == 0:
+                dx0 = norm(acts[0][sl, None] + v) - x0_clean[sl, None]
+                delta, first, out = (lam_r[0] + lam_0[0]) * dx0, 0, [v]
+            else:
+                dx0, delta, first, out = None, v, site - 1, []
+            for b in range(first, L):
+                if b > first:
+                    delta = lam_r[b] * delta + (lam_0[b] * dx0 if dx0 is not None else 0)
                 out.append(delta)
-                mid, h = mids[b][sl, None], pre[b][sl, None]
-                dh = ((norm(mid + delta) - norm(mid)).to(dtype) @ w_fc[b].T).float()
+                idx, mid = routes[b][sl], acts[b + 1][sl, None]
+                fc = layers[b].mlp.c_fc.weight.to(dtype)[idx]  # [t, k, W]: each token's routed units
+                wo = layers[b].mlp.c_proj.weight.to(dtype).T[idx]
+                h = pre[b][sl].gather(-1, idx)[:, None]
+                dh = torch.bmm((norm(mid + delta) - norm(mid)).to(dtype), fc.mT).float()
                 up, down = F.relu(h + dh), F.relu(h)
-                delta = delta + (((up - down) * (up + down)).to(dtype) @ w_out[b].T).float()
+                delta = delta + torch.bmm(((up - down) * (up + down)).to(dtype), wo).float()
             y = targets[sl, None]
             w_y, z0_y = head[y], z0.gather(-1, y[..., None])[..., 0]
             inv = torch.rsqrt((xL + delta).square().mean(-1) + eps)
@@ -376,21 +387,26 @@ class Toolkit:
             clean = torch.logsumexp(cap(z0 * inv0[..., None]), -1) - cap(z0_y * inv0)
             return out, moved - clean
 
-        tokens, width = emb.shape
-        signs = torch.randint(0, 2, (width,), generator=torch.Generator().manual_seed(0)).to(emb) * 2 - 1
-        basis = hadamard(width, emb.device) * signs  # rows: the cycle's W orthogonal directions
-        eye = torch.eye(width, device=emb.device)
+        tokens, width = acts[0].shape
+        signs = torch.randint(0, 2, (width,), generator=torch.Generator().manual_seed(0)).to(acts[0]) * 2 - 1
+        basis = hadamard(width, acts[0].device) * signs  # rows: the cycle's W orthogonal directions
+        eye = torch.eye(width, device=basis.device)
         precisions = {'float32': torch.float32, 'bf16': torch.bfloat16}
         cos = {(p, s, r): [] for p in precisions for s in names for r in ridges}
         condition = {(p, s): [] for p in precisions for s in names}
+        direct = {(p, s): [] for p in precisions for s in names}
         with exact(), torch.no_grad():
             for precision, dtype in precisions.items():
                 for t0 in range(0, tokens, chunk):
                     sl = slice(t0, t0 + chunk)
-                    v = sigma * emb[sl, None].square().mean(-1, keepdim=True).sqrt() * basis  # [t, W probes, W]
-                    sites, d = changes(sl, v, dtype)
+                    step = lambda j: sigma * acts[j][sl, None].square().mean(-1, keepdim=True).sqrt()  # [t, 1, 1]
+                    launched, d = changes(sl, 0, step(0) * basis, dtype)
                     d = d.unsqueeze(-1)
-                    for site, A in zip(names, sites):
+                    for j, (site, A) in enumerate(zip(names, launched)):
+                        # the direct cycle at the site: its credit is the decoded slope, as chain_credits decodes it
+                        own = d[..., 0] if j == 0 else changes(sl, j, step(j) * basis, dtype)[1]
+                        measured = (own / step(j)[..., 0]) @ basis / width
+                        direct[precision, site].append(measured)
                         s = torch.linalg.svdvals(A)
                         condition[precision, site].append(s[:, 0] / s[:, -1].clamp_min(1e-30))
                         gram, rhs = A.mT @ A, A.mT @ d
@@ -401,11 +417,13 @@ class Toolkit:
                                                        rhs + ridge * scale * guess[site][sl, :, None].float())
                             else:
                                 c = torch.linalg.solve(A, d)
-                            cos[precision, site, ridge].append(per_token_cosine(c[..., 0], direct[site][sl]))
+                            cos[precision, site, ridge].append(per_token_cosine(c[..., 0], measured))
         summary, tensors = {}, {}
         for site in names:
-            row = dict(guess_vs_direct=quantiles(per_token_cosine(guess[site], direct[site])),
-                       direct_vs_full=quantiles(per_token_cosine(direct[site], full[site])))
+            measured = torch.cat(direct['float32', site])
+            row = dict(guess_vs_direct=quantiles(per_token_cosine(guess[site], measured)),
+                       direct_vs_autograd=quantiles(per_token_cosine(measured, autograd[site])),
+                       autograd_vs_full=quantiles(per_token_cosine(autograd[site], full[site])))
             for precision in precisions:
                 row[f'{precision} condition'] = quantiles(torch.cat(condition[precision, site]))
                 for ridge in ridges:
@@ -413,7 +431,7 @@ class Toolkit:
                     row[f'{precision} ridge {ridge}'] = quantiles(per_token)
                     tensors[f'{site} {precision} ridge {ridge}'] = per_token.cpu()
             summary[site] = row
-        summary['settings'] = dict(sigma=sigma, ridges=list(ridges), probes=width, tokens=tokens)
+        summary['settings'] = dict(sigma=sigma, ridges=list(ridges), route_k=k, probes=width, tokens=tokens)
         return summary, tensors
 
 

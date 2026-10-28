@@ -12,6 +12,7 @@ With `gpus: N` in the config the script runs under torchrun on the worker's N GP
       result: ref/result.json                                  # the script's result, relative to the run directory
       settings: {lr: 0.0018}    # optional: fields of the script's Settings replaced (loud/launch.py), file unchanged
       train_rows: 8788          # optional: the epoch is the first this many rows of train.pt (loud/launch.py)
+      script_seed: true         # optional: the job's seed replaces the script's SEED constant (loud/launch.py)
 """
 import json
 import os
@@ -36,9 +37,9 @@ def run_task(spec, run_dir):
     cwd = checkout / args.get('cwd', '.')
     argv = [a.format(data=DATA, out=run_dir, seed=spec['seed']) for a in args.get('argv', [])]
     command = [str(script), *argv]
-    if args.get('settings') or args.get('train_rows'):
+    if args.get('settings') or args.get('train_rows') or args.get('script_seed'):
         command = [str(Path(__file__).with_name('launch.py')), str(script), json.dumps(args.get('settings') or {}),
-                   str(args.get('train_rows') or 0), *argv]
+                   str(args.get('train_rows') or 0), str(spec['seed']) if args.get('script_seed') else '-', *argv]
     gpus = spec.get('gpus', 1)
     launcher = ['-m', 'torch.distributed.run', '--standalone', f'--nproc_per_node={gpus}'] if gpus > 1 else []
     command = [sys.executable, '-u', *launcher, *command]

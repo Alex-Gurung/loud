@@ -66,8 +66,10 @@ def _specs(config, path, seeds):
     seeds = seeds if seeds is not None else config.get('seeds', [config.get('seed', 0)])
     if not isinstance(seeds, list) or not seeds or not all(isinstance(s, int) for s in seeds):
         raise ValueError('seeds must be a non-empty list of integers')
-    if task == 'reference' and len(seeds) > 1 and not any('{seed}' in a for a in args.get('argv', [])):
-        raise ValueError('a reference script gets the seed only through {seed} in argv; without it, seeds are copies')
+    if task == 'reference' and len(seeds) > 1 and not (args.get('script_seed')
+                                                        or any('{seed}' in a for a in args.get('argv', []))):
+        raise ValueError('a reference script gets the seed only through {seed} in argv or script_seed; without it, '
+                         'seeds are copies')
     after, after_done = config.get('after') or [], config.get('after_done') or []
     for key, ids in (('after', after), ('after_done', after_done)):
         if not isinstance(ids, list) or not all(isinstance(a, str) for a in ids):
@@ -98,7 +100,10 @@ def _specs(config, path, seeds):
 
 
 def config_hash(spec):
-    return digest({k: spec[k] for k in ('experiment', 'variant', 'seed', 'task', 'args', 'expect', 'gpus')})
+    """What identifies a job's config. gpus enters only above 1, so one-GPU jobs keep the hashes they were queued
+    with before multi-GPU jobs existed."""
+    keys = ('experiment', 'variant', 'seed', 'task', 'args', 'expect') + (('gpus',) if spec.get('gpus', 1) > 1 else ())
+    return digest({k: spec[k] for k in keys})
 
 
 def execute(spec, run_dir):

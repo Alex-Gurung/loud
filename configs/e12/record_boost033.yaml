@@ -3,12 +3,13 @@
 experiment: e12
 variant: record_boost033
 task: reference
-seeds: [0]
+seeds: [0, 1, 2]
 gpus: 8
 priority: 91
-after: [e12.record.s0]
+after: [e12.record_match.s0]
 args:
   script: [noise, train/val/run.py]
   argv: [--data-dir, '{data}', --output, '{out}/ref']
   result: ref/result.json
+  script_seed: true
   settings: {switch: 0.0334}

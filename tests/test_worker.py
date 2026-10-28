@@ -77,3 +77,15 @@ def test_sigterm_gives_the_job_back(tmp_path):
     state, record = queue_state(tmp_path, 'test.slow.s0')
     assert state == 'queued' and record['history'][-1]['event'] == 'released'
     assert (tmp_path / 'artifacts' / 'runs' / 'test' / 'slow' / 's0.attempt1' / 'metrics.jsonl').exists()
+
+
+def test_gpu_info_follows_cuda_visible_devices(monkeypatch):
+    from loud import worker
+    listing = ''.join(f'{i}, NVIDIA H100 80GB HBM3\n' for i in range(8))
+    monkeypatch.setattr(worker.subprocess, 'run', lambda *a, **k: subprocess.CompletedProcess(a, 0, listing, ''))
+    monkeypatch.delenv('CUDA_VISIBLE_DEVICES', raising=False)
+    assert worker.gpu_info() == ('NVIDIA H100 80GB HBM3', 8)
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', '3')
+    assert worker.gpu_info() == ('NVIDIA H100 80GB HBM3', 1)
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', 'GPU-a,GPU-b')
+    assert worker.gpu_info()[1] == 2
