@@ -463,11 +463,13 @@ def e5_table(out, ridge=1e-3):
     median cosine of the credit solved from one 512-probe cycle launched at S1 to the exact credit (plain, and with
     the ridge toward the identity-path guess the implementation would use), and the median condition number. bf16
     forward differences, as the chain runs them."""
-    found = {c: diagnostic('e5', f'readout_c{c}') for c in (20, 100)}
-    if not any(found.values()):
+    found = {f'{c}%{" fp32" if fp32 else ""}': diagnostic('e5', f'readout{"_fp32" if fp32 else ""}_c{c}')
+             for fp32 in (False, True) for c in (20, 100)}
+    found = {k: v for k, v in found.items() if v}
+    if not found:
         return None
-    header = ['site'] + [f'{c}%: {what}' for c in found for what in ('cos (ridge 0)', f'cos (ridge {ridge:g})',
-                                                                     'condition')]
+    header = ['site'] + [f'{c}: {what}' for c in found for what in ('cos (ridge 0)', f'cos (ridge {ridge:g})',
+                                                                    'condition')]
     pick = lambda s, key: f'{s[key]["median"]:.3f}' if s and key in s else '-'
     rows = []
     for site in SITES[2:]:

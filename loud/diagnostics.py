@@ -174,7 +174,7 @@ class Toolkit:
             tensors[name] = dict(exact=g.bfloat16().cpu(), guess=p.bfloat16().cpu())
         return summary, tensors
 
-    def deep_readout_check(self, sigma=CHAIN_SIGMA, ridge=1e-3, chunk=4):
+    def deep_readout_check(self, sigma=CHAIN_SIGMA, ridge=1e-3, chunk=4, precision='bf16'):
         """E5's diagnostic (module docstring). S0 keeps its own cycle in E5 (its probes also move x0, which enters
         every block), so the launch is at S1, whose own row is the probe itself."""
         model, sites, credits, g_top = self.exact_credits()
@@ -185,15 +185,19 @@ class Toolkit:
         names = site_names(self.n_layer)[2:]
         cos = {n: {r: [] for r in (0.0, ridge)} for n in names}
         condition = {n: [] for n in names}
-        bf16 = torch.autocast('cuda', dtype=torch.bfloat16) if sites[1].is_cuda else nullcontext()
-        with bf16:
+        # bf16 as the chain runs its products; float32 to separate the method from the replay's rounding: the replay
+        # differences whole bf16 losses, which a 1% probe's change sinks under (linearity_check), where the chain's
+        # kernels difference the changes themselves
+        bf16 = lambda: (torch.autocast('cuda', dtype=torch.bfloat16) if sites[1].is_cuda and precision == 'bf16' else
+                        exact() if precision == 'float32' else nullcontext())
+        with bf16():
             replay = h8.Replay(model, self.x, self.y, chunk=chunk)
             base = replay(1, torch.zeros_like(sites[1]).unsqueeze(2))[..., 0]
         eye = torch.eye(width, device=basis.device)
         for t0 in range(0, tokens, chunk):
             sl = slice(t0, t0 + chunk)
             step = sigma * sites[1][:, sl].square().mean(-1, keepdim=True).sqrt()  # [1, c, 1]
-            with bf16:
+            with bf16():
                 moved, at = replay(1, step.unsqueeze(-1) * basis, sites=True, start=t0)  # the cycle: [1, c, W, W]
             d = (moved - base[:, sl, None]).float()[0].unsqueeze(-1)  # [c, W probes, 1]
             with exact():
@@ -210,7 +214,8 @@ class Toolkit:
         summary = {n: dict(condition=quantiles(torch.cat(condition[n])),
                            **{f'cosine ridge {r}': quantiles(torch.cat(v)) for r, v in cos[n].items()})
                    for n in names}
-        summary['settings'] = dict(sigma=sigma, ridge=ridge, launch='S1', probes=width, tokens=tokens)
+        summary['settings'] = dict(sigma=sigma, ridge=ridge, launch='S1', probes=width, tokens=tokens,
+                                   precision=precision)
         return summary, {}
 
     def linearity_check(self, sigmas=(1e-3, 3e-3, 1e-2, 3e-2, 1e-1), draws=2):
@@ -405,7 +410,7 @@ def run_task(spec, run_dir):
         summary, tensors = snr_tool(model, split, checkpoint, o)
     else:
         kwargs = (dict(estimator=o['estimator']) if o['tool'] == 'cos_to_autograd' else
-                  dict(precision=o['precision']) if o['tool'] == 'h8_validation' else {})
+                  dict(precision=o['precision']) if o['tool'] in ('h8_validation', 'deep_readout_check') else {})
         summary, tensors = getattr(Toolkit(m, model, x, y), o['tool'])(**kwargs)
     (run_dir / f'{o["tool"]}.json').write_text(json.dumps(summary, indent=1) + '\n')
     if tensors:

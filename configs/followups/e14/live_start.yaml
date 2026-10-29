@@ -14,6 +14,6 @@ args:
   batch: 4
   mode: cut
   heldout_every: 100
-  nextlat: 1.0  # the sweep's best lambda
+  nextlat: 0.3  # the sweep's best lambda (e14: 0.3 at 3.7985, 1 at 3.8072, 3 at 3.8472)
   nextlat_target: live
   nextlat_onset: start

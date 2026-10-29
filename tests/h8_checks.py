@@ -157,6 +157,7 @@ def h6_tools(scratch):
     assert tensors['S1']['exact'].shape == (x.shape[1], s.model.n_embd)
     tools = Toolkit(m, model, x, y)
     deep, _ = tools.deep_readout_check(sigma=1e-3, chunk=8)
+    assert tools.deep_readout_check(sigma=1e-3, chunk=8, precision='float32')[0]['settings']['precision'] == 'float32'
     for name in names[2:]:
         assert deep[name]['cosine ridge 0.0']['median'] > 0.95, (name, deep[name])
         assert deep[name]['condition']['median'] >= 1
