@@ -5,7 +5,8 @@ Each attempt runs as a child process from the code snapshot recorded at submissi
 in its own directory (s<seed>.attempt<k>/, stdout to stdout.log there). While it runs, the worker renews the lease and
 reports the last metrics line; when it succeeds, the queue renames the attempt directory to the run directory.
 On SIGTERM (pod deletion or preemption) the child is stopped and the job is given back to the queue. With nothing to
-run for --idle-exit seconds the worker exits cleanly: EIDF reclaims GPUs that sit idle for about 30 minutes anyway.
+run and nothing running anywhere for --idle-exit seconds the worker exits cleanly (EIDF reclaims GPUs that sit idle
+for about 30 minutes anyway); while any job runs, an idle worker stays for the jobs it will unblock.
 """
 import argparse
 import json
@@ -125,6 +126,8 @@ class Worker:
                                                          self.capacity_gb and 0.95 * self.capacity_gb)
             if job is None:
                 why = f'shared disk nearly full ({free:.1f} GB free)' if disk_full else 'no ready job'
+                if not disk_full and self.queue.jobs('running'):
+                    idle_since = time.time()  # work in flight will unblock jobs (or free memory): stay for them
                 idle = round(time.time() - idle_since)
                 if idle > self.idle_exit:
                     self.report(f'exited: idle ({why})', idle_seconds=idle)

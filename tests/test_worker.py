@@ -100,3 +100,19 @@ def test_a_drained_queue_sends_idle_workers_home(tmp_path):
     (tmp_path / 'queue' / FILE).write_text('on\n')
     worker = Worker(queue, 'w', idle_exit=600, poll=0.01, min_free_gb=0, python=sys.executable)
     assert worker.loop() == 0  # exits at once instead of waiting out the idle time
+
+
+def test_an_idle_worker_stays_while_other_work_is_in_flight(tmp_path):
+    from loud.jobqueue import JobQueue
+    from loud.worker import Worker
+    queue = JobQueue(tmp_path / 'queue')
+    queue.submit(dict(id='e.gate.s0', spec={}, priority=1, after=[], config_hash='h', code_dir='c',
+                      run_dir=str(tmp_path / 'runs' / 'gate')))
+    queue.submit(dict(id='e.cell.s0', spec={}, priority=2, after=['e.gate.s0'], config_hash='h', code_dir='c',
+                      run_dir=str(tmp_path / 'runs' / 'cell')))
+    assert queue.claim('other')['id'] == 'e.gate.s0'  # another worker runs the gate; the cell waits on it
+    worker = Worker(queue, 'w', idle_exit=0.05, poll=0.01, min_free_gb=0, python=sys.executable)
+    seen = []
+    worker.report = lambda state, **fields: seen.append(state) or (len(seen) > 20 and setattr(worker, 'stopping', 'x'))
+    worker.loop()
+    assert 'idle' in seen and not any(s.startswith('exited: idle') for s in seen), seen  # it waited for the gate

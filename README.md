@@ -100,8 +100,8 @@ log; runs are minutes long, so nothing larger is lost. To send compute to one ex
 with a lower priority (`python3 -m loud.submit configs/e6 --priority 20`): queued jobs take the new priority.
 
 Nothing restarts a worker, so relaunch it with the same command whenever it stops:
-- A worker exits after 20 idle minutes, with no ready job or with the disk below its floor (EIDF reclaims idle GPUs
-  after about 30). `loud.status` shows it as `exited: idle (…)`.
+- A worker exits after 20 idle minutes with nothing running anywhere and no ready job (it stays while other jobs run,
+  for the work they unblock), or with the disk below its floor (EIDF reclaims idle GPUs after about 30). `loud.status` shows it as `exited: idle (…)`.
 - A pod that dies (preempted, crashed or deleted) is not restarted (`backoffLimit: 0`, `restartPolicy: Never`).
   `loud.status` shows its worker as `LOST`.
 - A dead worker's job stays `running` until its 5-minute lease expires, and it is queued again only when a worker
