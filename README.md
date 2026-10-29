@@ -80,14 +80,15 @@ come and go at any time, each claims whatever is next, and more pods simply fini
 small (a 38M-parameter model at 4 to 8 sequences per update leaves an H100 mostly idle), so each pod runs
 `LOUD_JOBS_PER_GPU` of them side by side (4 in the YAMLs); a job reserves 16 GB of the GPU unless its config says
 (`gpu_memory_gb`, 48 for the track-3 model), and a worker claims only what fits beside its GPU's other jobs. Set
-`LOUD_JOBS_PER_GPU` to 1 for runs whose wall-clock is the result.
+`LOUD_JOBS_PER_GPU` to 1 for runs whose wall-clock is the result. Workers take an H100 or an H200: every experiment
+here compares losses, and `collect.py` flags a variant whose seeds ran on mixed GPUs; a timing comparison pins its
+configs with `gpu: H100`.
 
 **Start, add, stop** (from the root node):
 
 ```bash
-kubectl -n eidf107ns create -f worker/gpu_worker.yaml       # start: one H100, 4 jobs at a time; again to add GPUs
-kubectl -n eidf107ns create -f worker/gpu_worker_2.yaml     # or a two-H100 pod (8 jobs at a time)
-kubectl -n eidf107ns create -f worker/gpu_worker_any.yaml   # or one H100 or H200, for jobs without a gpu: pin
+kubectl -n eidf107ns create -f worker/gpu_worker.yaml       # start: one H100 or H200, 4 jobs at a time; again to add
+kubectl -n eidf107ns create -f worker/gpu_worker_2.yaml     # or a two-GPU pod (8 jobs at a time)
 kubectl -n eidf107ns get jobs -l loud/role=worker           # what is running
 kubectl -n eidf107ns delete job -l loud/role=worker         # stop now: each running job goes back to the queue
 ```

@@ -1,5 +1,5 @@
-# Noise harness GPU worker for a two-GPU pod: two workers, each pinned to one of the pod's H100s
-# (CUDA_VISIBLE_DEVICES) and running one-GPU jobs from /mnt/disk/loud/artifacts/queue one at a time, as two
+# Noise harness GPU worker for a two-GPU pod (H100s or H200s): LOUD_JOBS_PER_GPU workers pinned to each GPU
+# (CUDA_VISIBLE_DEVICES), running one-GPU jobs from /mnt/disk/loud/artifacts/queue, as two
 # gpu_worker.yaml pods would. Otherwise the same as gpu_worker.yaml (see there).
 #
 #   kubectl -n eidf107ns create -f worker/gpu_worker_2.yaml
@@ -32,7 +32,7 @@ spec:
               - matchExpressions:
                   - key: nvidia.com/gpu.product
                     operator: In
-                    values: [NVIDIA-H100-80GB-HBM3]
+                    values: [NVIDIA-H100-80GB-HBM3, NVIDIA-H200]  # either: no job is judged on wall-clock
       containers:
         - name: loud-worker
           image: vllm/vllm-openai:v0.32.0@sha256:befccf0e7e4089aa23926bb6f887a85c0d46c2a99e6de5c5ffdf5cb7957c5b34
