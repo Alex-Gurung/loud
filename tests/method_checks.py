@@ -493,7 +493,7 @@ def variants_blur(scratch):
     by about 4x when r halves. Then the trainer: the clean loss, and the mean of all 2 x micro-batches gradients."""
     from loud.options import proxy_options
     from loud.proxy import Backprop, Reference
-    from loud.variants import CHAIN_SIGMA, Blur
+    from loud.variants import Blur
     reference = Reference('boostcut', 1.0, '2m')
     patch_attention()
     cpu = torch.device('cpu')
@@ -519,13 +519,13 @@ def variants_blur(scratch):
         h.remove()
     clean_grad = gradient()
 
-    tau = 10.0
-    blur = Blur(model, tau, 0, cpu)
+    s = 0.1
+    blur = Blur(model, s, 0, cpu)
     assert torch.equal(blur.measure(lambda: model(x, y)), clean)
     assert len(blur.shifts) == len(sites) == 1 + model.config.n_layer
-    for a, r in zip(sites, blur.shifts):
-        expected = tau * CHAIN_SIGMA * a.square().mean(-1).sqrt() * width ** 0.5
-        assert torch.allclose(r.norm(dim=-1), expected, rtol=1e-5), 'r does not have the documented length'
+    for a, r in zip(sites, blur.shifts):  # per-coordinate RMS of r = s x the token's RMS
+        assert torch.allclose(r.square().mean(-1).sqrt(), s * a.square().mean(-1).sqrt(), rtol=1e-5)
+        assert torch.allclose(r.norm(dim=-1), s * a.square().mean(-1).sqrt() * width ** 0.5, rtol=1e-5)
     for sign in (1, -1):  # each site's writer output moves by exactly sign * r
         raw, moved = [], []
         hooks = [model.transformer.wte.register_forward_hook(lambda m, a, out: raw.append(out), prepend=True)]
@@ -551,11 +551,11 @@ def variants_blur(scratch):
     half = ((displaced(1) + displaced(-1)) / 2 - clean_grad).norm()
     assert half < 0.4 * antithetic, (half, antithetic)  # second order: a quarter, up to higher orders
 
-    o = proxy_options(dict(preset='2m', batch=2, smooth_tau=3.0))
+    o = proxy_options(dict(preset='2m', batch=2, blur=0.03))
     trainer = Backprop(o, reference, cpu, 0, 10)
     loss = trainer.gradient(rows)
     got = [p.grad.clone() for p in trainer.model.parameters()]
-    replay = Blur(trainer.model, 3.0, 0, cpu)  # the same generator stream, replayed by hand
+    replay = Blur(trainer.model, 0.03, 0, cpu)  # the same generator stream, replayed by hand
     sums, clean_losses, blurred = [torch.zeros_like(p, dtype=torch.float32) for p in got], [], []
     for i in range(2):
         micro = rows[i:i + 1]
@@ -564,14 +564,14 @@ def variants_blur(scratch):
             trainer.model.requires_grad_(True)
             with replay.shifted(sign):
                 step_loss = trainer.loss_of(micro)
-                for s, g in zip(sums, torch.autograd.grad(step_loss, list(trainer.model.parameters()))):
-                    s += g.float()
+                for total, g in zip(sums, torch.autograd.grad(step_loss, list(trainer.model.parameters()))):
+                    total += g.float()
             trainer.model.requires_grad_(False)
             blurred.append(step_loss.detach())
     assert torch.equal(loss, torch.stack(clean_losses).mean()), 'the logged loss is not the clean loss'
     assert torch.allclose(trainer.blurred, torch.stack(blurred).mean())
-    for g, s, p in zip(got, sums, trainer.model.parameters()):
-        assert torch.equal(g, (s / 4).to(p.dtype)), 'not the mean over sequences and both signs'
+    for g, total, p in zip(got, sums, trainer.model.parameters()):
+        assert torch.equal(g, (total / 4).to(p.dtype)), 'not the mean over sequences and both signs'
     assert not trainer.model.transformer.wte._forward_hooks, 'the blur left a hook behind'
 
 
@@ -589,49 +589,56 @@ def same_tensors(a, b):
 
 
 def variants_control(scratch, recipe='boostcut'):
-    """E4: a rejected update leaves the weights and every optimizer tensor exactly as before (after the first update:
-    as a fresh optimizer), while ANVIL II's schedule clock advances with the loop, so the next update equals a fresh
+    """E4: each update is judged on 4 held-out rows, rotating, by their loss under the old and the new weights; a
+    rejected update leaves the weights and every optimizer tensor exactly as before (after the first update: as a
+    fresh optimizer), while ANVIL II's schedule clock advances with the loop, so the next update equals a fresh
     trainer's at that clock; adapt's multiplier follows the outcomes; warmdown 0 holds the rates constant."""
+    from loud.heldout import mean_loss
     from loud.options import proxy_options
     from loud.proxy import Backprop, Reference
     reference = Reference(recipe, 1.0, '2m')
     patch_attention()
-    cpu, rows = torch.device('cpu'), tokens(2)
-    reject, accept = (lambda batch: torch.tensor(float('inf'))), (lambda batch: torch.tensor(-float('inf')))
-    o = proxy_options(dict(recipe=recipe, preset='2m', batch=2, step_control='reject'))
-    trainer = Backprop(o, reference, cpu, 0, 10)
+    cpu, rows, held = torch.device('cpu'), tokens(2), tokens(8, seed=4)
+    make = lambda **args: Backprop(proxy_options(dict(recipe=recipe, preset='2m', batch=2, heldout=8, **args)),
+                                   reference, cpu, 0, 10, held)
+    reject = iter([0.0, 1.0] * 100)  # the held-out loss before and after: rose
+    trainer = make(step_control='reject')
+    assert [trainer.control.rows(s) for s in (1, 2, 3)] == [[0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 2, 3]]
     before = optimizer_state(trainer)
-    trainer.batch_loss = reject
+    trainer.control.loss = lambda step: next(reject)
     _, fields = trainer.update(1, rows)
-    assert fields['accepted'] is False and fields['trial_loss'] == float('inf')
+    assert fields['accepted'] is False and fields['judge_rows'] == [0, 1, 2, 3]
     after = optimizer_state(trainer)
     weights = len(list(trainer.model.parameters()))
     assert all(torch.equal(u, v) for u, v in zip(before[0], after[0][:weights]))
     assert all(not t.any() for t in after[0][weights:]), 'not a fresh optimizer'
     assert after[1][0] == before[1][0] + 1, "ANVIL II's clock must follow the loop's updates"
-    del trainer.batch_loss  # the real trial forward again
+    del trainer.control.loss  # the real paired judgment again
+    old = mean_loss(trainer.model, held[4:8], cpu, 4)
     _, fields = trainer.update(2, rows)
-    fresh = Backprop(proxy_options(dict(recipe=recipe, preset='2m', batch=2)), reference, cpu, 0, 10)
+    assert fields['heldout_before'] == old and fields['accepted'] == (fields['heldout_after'] <= old), fields
+    assert fields['heldout_after'] == mean_loss(trainer.model, held[4:8], cpu, 4) or not fields['accepted']
+    fresh = make()
     fresh.optimizer.optimizers[0].t = 1
     fresh.update(2, rows)
-    assert fields['accepted'] and fields['trial_loss'] < 10, fields
-    assert all(torch.equal(a, b) for a, b in zip(trainer.model.parameters(), fresh.model.parameters()))
+    if fields['accepted']:
+        assert all(torch.equal(a, b) for a, b in zip(trainer.model.parameters(), fresh.model.parameters()))
 
     trainer.update(3, tokens(2, seed=2))
-    held = optimizer_state(trainer)
-    trainer.batch_loss = reject
+    held_state = optimizer_state(trainer)
+    trainer.control.loss = lambda step: next(reject)
     trainer.update(4, tokens(2, seed=3))
     later = optimizer_state(trainer)
-    assert same_tensors(held, later), 'a mid-run rejection is not undone exactly'
-    assert later[1][0] == held[1][0] + 1
+    assert same_tensors(held_state, later), 'a mid-run rejection is not undone exactly'
+    assert later[1][0] == held_state[1][0] + 1
     if recipe != 'boostcut':
         return
 
-    o = proxy_options(dict(preset='2m', batch=2, step_control='adapt', accept_up=1.25, accept_down=0.5, warmdown=0))
-    trainer = Backprop(o, reference, cpu, 0, 10)
+    trainer = make(step_control='adapt', accept_up=1.25, accept_down=0.5, warmdown=0)
+    outcomes = iter([0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0] * 3)  # accept, accept, reject, accept, ...
+    trainer.control.loss = lambda step: next(outcomes)
     multipliers = []
-    for step, judge in zip(range(1, 11), (accept, accept, reject, accept) * 3):
-        trainer.batch_loss = judge
+    for step in range(1, 11):
         _, fields = trainer.update(step, rows)
         multipliers.append(fields['lr_multiplier'])
         assert fields['lr']['anvil'] == reference.settings.anvil_lr * fields['lr_multiplier']  # constant schedule
@@ -643,83 +650,6 @@ def variants_control_pr40(scratch):
     variants_control(scratch, 'pr40')
 
 
-def variants_shaping(scratch):
-    """E10 against a brute-force per-token computation: credits read with retain_grad on each nn.Linear output, every
-    token's contribution formed and counted explicitly; and agree at threshold 0.5 keeps the plain gradient exactly."""
-    from torch import nn
-    from loud.options import proxy_options
-    from loud.proxy import Backprop, Reference
-    from loud.variants import TokenShaping
-    reference = Reference('boostcut', 1.0, '2m')
-    patch_attention()
-    cpu, rows = torch.device('cpu'), tokens(2)
-    plain = Backprop(proxy_options(dict(preset='2m', batch=2)), reference, cpu, 0, 10)
-    plain.gradient(rows)
-    plain_grads = {n: p.grad.clone() for n, p in plain.model.named_parameters()}
-    model = plain.model
-    linears = {n + '.weight': m for n, m in model.named_modules() if isinstance(m, nn.Linear)}
-
-    credits, inputs = {n: [] for n in linears}, {n: [] for n in linears}
-    for i in range(2):  # brute force: each sequence's credits at every linear output
-        outputs, hooks = {}, []
-        for n, m in linears.items():
-            def hook(module, args, out, n=n):
-                out.retain_grad()
-                outputs[n] = out
-                inputs[n].append(args[0].to(out.dtype).reshape(-1, args[0].shape[-1]).float())
-            hooks.append(m.register_forward_hook(hook))
-        model.requires_grad_(True)
-        plain.loss_of(rows[i:i + 1]).backward()
-        model.requires_grad_(False)
-        model.zero_grad(set_to_none=True)
-        for h in hooks:
-            h.remove()
-        for n, out in outputs.items():
-            credits[n].append(out.grad.reshape(-1, out.shape[-1]).float())
-    credits = {n: torch.cat(c) for n, c in credits.items()}
-    inputs = {n: torch.cat(c) for n, c in inputs.items()}
-
-    def shaped(**options):
-        trainer = Backprop(proxy_options(dict(preset='2m', batch=2, **options)), reference, cpu, 0, 10)
-        trainer.gradient(rows)
-        return {n: p.grad for n, p in trainer.model.named_parameters()}
-
-    def close(a, b):
-        return (a - b).norm() <= 1e-2 * b.norm() + 1e-12
-
-    got = shaped(token_shaping='cap', cap_quantile=0.9)
-    for n in linears:
-        norms = credits[n].norm(dim=-1)
-        scale = (torch.quantile(norms, 0.9) / norms.clamp_min(1e-30)).clamp(max=1)
-        assert (scale < 1).any() and (scale == 1).any()
-        expected = torch.einsum('ti,tj->ij', credits[n] * scale[:, None], inputs[n]) / 2  # mean over 2 sequences
-        assert close(got[n], expected), f'cap differs at {n}'
-    for n in plain_grads:
-        if n not in linears:
-            assert torch.equal(got[n], plain_grads[n]), f'cap changed {n}, which is not a linear weight'
-
-    for threshold, over in ((0.6, 'active'), (0.8, 'active'), (0.6, 'all')):
-        got = shaped(token_shaping='agree', agree_threshold=threshold, agree_over=over)
-        dropped = kept = 0
-        for n in linears:
-            positive = negative = torch.zeros(credits[n].shape[1], inputs[n].shape[1])
-            for g, x in zip(credits[n], inputs[n]):  # one token at a time
-                product = torch.outer(g, x)
-                positive, negative = positive + (product > 0), negative + (product < 0)
-            voters = positive + negative if over == 'active' else len(credits[n])  # 'all': every token votes
-            mask = torch.maximum(positive, negative) >= threshold * voters
-            assert torch.equal(got[n], plain_grads[n] * mask) or close(got[n], plain_grads[n] * mask), (n, over)
-            dropped, kept = dropped + int((~mask).sum()), kept + int(mask.sum())
-        assert dropped and kept, (threshold, over, dropped, kept)
-
-    o = dict(proxy_options(dict(preset='2m', batch=2, token_shaping='agree')), agree_threshold=0.5)
-    trainer = Backprop(o, reference, cpu, 0, 10)
-    assert isinstance(trainer.shaping, TokenShaping)
-    trainer.gradient(rows)
-    for n, p in trainer.model.named_parameters():  # the hook's matmul is autograd's own, bit for bit
-        assert torch.equal(p.grad, plain_grads[n]), f'threshold 0.5 changed {n}'
-
-
 def variants_run(scratch):
     """The whole loop with each variant: the experiment series land in metrics.jsonl; the default trainer builds none
     of them."""
@@ -729,11 +659,12 @@ def variants_run(scratch):
     patch_attention()
     patch_sequences()
     default = Backprop(proxy_options(dict(preset='2m', batch=2)), reference, torch.device('cpu'), 0, 10)
-    assert default.blur is None and default.control is None and default.shaping is None
-    for variant, args, fields in (('adapt', dict(step_control='adapt', warmdown=0), {'accepted', 'lr_multiplier'}),
-                                  ('blur', dict(smooth_tau=3.0), {'blurred_loss'}),
-                                  ('cap', dict(token_shaping='cap'), set()),
-                                  ('agree', dict(token_shaping='agree'), set())):
+    assert default.blur is None and default.control is None and default.shaper is None
+    for variant, args, fields in (
+            ('adapt', dict(step_control='adapt', warmdown=0), {'accepted', 'lr_multiplier', 'heldout_before'}),
+            ('blur', dict(blur=0.1), {'blurred_loss'}),
+            ('snr', dict(per_sequence_grads=True, snr_scaling='snr'), {'snr_ratios'}),
+            ('fisher', dict(fisher=True), set())):
         spec = dict(experiment='cpu', variant=variant, seed=0, task='proxy', args=dict(
             preset='2m', sequences=24, heldout=4, batch=4, official_eval=False, **args))
         out = Path(scratch) / variant
@@ -762,7 +693,7 @@ def anvil_hook(scratch):
     trainer, m = proxy_trainer()
     original = m.Anvil
     twin = copy.deepcopy(trainer.model)
-    polar = type('Polar', (), dict(direction=lambda self, p, pending: m.polar(pending)))()
+    polar = type('Polar', (), dict(lane_gain=True, direction=lambda self, p, pending: m.polar(pending)))()
     shaped = shaped_optimizer(m, twin, trainer.reference.settings, 10, polar)
     assert m.Anvil is original and type(trainer.optimizer.optimizers[0]) is original
     for rows in batches(3, trainer.model.config.vocab_size):
@@ -776,80 +707,88 @@ def anvil_hook(scratch):
         assert torch.equal(a, b), f'{name}: ShapedAnvil does not reproduce Anvil'
 
 
-def curvature_damping(scratch):
-    """E8: the tracked directions are the pending update's top singular directions; h matches an exact Hessian-vector
-    product; c is the across-sequence variance of the projections; the factors follow the formula; 'step' damps after
-    polar() and 'pending' before it, where polar() undoes most of it."""
-    from loud.curvature import CURVATURE_ROWS, damp
-    trainer, m = proxy_trainer(per_sequence_grads=True, curvature_damping=3.0, damp_directions=2, damp_every=2)
-    shaper, model = trainer.shaper, trainer.model
-    rows = batches(3, model.config.vocab_size)
-    trainer.update(1, rows[0])  # a refresh: at update 1, fast and slow are multiples of g, so pending is too
-    params = dict(model.named_parameters())
-    for i, name in enumerate(shaper.names):
-        a, b = shaper.left[i], shaper.right[i]
-        assert torch.allclose(a.T @ a, torch.eye(2), atol=1e-5) and torch.allclose(b.T @ b, torch.eye(2), atol=1e-5)
-        u, _, vh = torch.linalg.svd(trainer.accumulators[list(params).index(name)], full_matrices=False)
-        assert (u[:, :2] * a).sum(0).abs().min() > 0.999 and (vh[:2].T * b).sum(0).abs().min() > 0.999, name
-        g = trainer.pergrad.stack(name).float()
-        projections = torch.einsum('brc,rk,ck->bk', g, a, b)
-        assert torch.allclose(shaper.noise[i], projections.var(0), rtol=1e-4)
+def snr_scaling(scratch):
+    """E8's intervention: r from the update's per-sequence projections (computed here one direction at a time), the
+    control arm's polar factor from the SVD, the rate arm's uniform Frobenius ratio, and ANVIL II's step without its
+    per-lane gain or renormalization."""
+    trainer, m = proxy_trainer(per_sequence_grads=True, snr_scaling='snr')
+    rows = batches(1, trainer.model.config.vocab_size)[0]
+    trainer.gradient(rows)
+    shaper = trainer.shaper
+    shaper.before_step(1, trainer.pergrad)
+    name = 'transformer.h.1.mlp.c_fc.weight'
+    p = dict(trainer.model.named_parameters())[name]
+    pending = torch.randn(p.shape, generator=torch.Generator().manual_seed(12))
+    u, _, vh = torch.linalg.svd(pending, full_matrices=False)
+    grads = trainer.pergrad.stack(name).float()
+    r = []
+    for i in range(len(vh)):
+        projections = torch.stack([u[:, i] @ g @ vh[i] for g in grads])  # p_s = u_i^T G_s v_i, sequence by sequence
+        m2, s2 = projections.mean().square(), projections.var()
+        r.append(max(0.0, (m2 - s2 / len(grads)).item()) / m2.item())
+    r = torch.tensor(r)
+    assert (r < 1).all() and (r > 0).any() and (r == 0).any(), r
+    assert torch.allclose(shaper.direction(p, pending), (u * r) @ vh, atol=1e-5)
+    shaper.arm = 'rate'
+    assert torch.allclose(shaper.direction(p, pending), r.square().mean().sqrt() * (u @ vh), atol=1e-5)
+    shaper.arm = 'control'
+    control = shaper.direction(p, pending)
+    assert torch.allclose(torch.linalg.svdvals(control), torch.ones(min(p.shape)), atol=1e-4)
+    assert (control - m.polar(pending)).norm() < 0.1 * control.norm()  # ANVIL's Newton-Schulz polar, roughly
 
-    i = shaper.names.index('transformer.h.1.mlp.c_fc.weight')
-    d = torch.outer(shaper.left[i][:, 0], shaper.right[i][:, 0])
-    exact_model = copy.deepcopy(model).float().requires_grad_(True)
-    weight = dict(exact_model.named_parameters())[shaper.names[i]]
-    curvature_rows = rows[0][:CURVATURE_ROWS]
-    with torch.enable_grad():
-        loss = exact_model(curvature_rows[:, :-1].contiguous(), curvature_rows[:, 1:].contiguous())
-        g = torch.autograd.grad(loss, weight, create_graph=True)[0]
-        hvp = torch.autograd.grad((g * d).sum(), weight)[0]
-    exact_h = (hvp * d).sum().item()
-    assert abs(shaper.h[i][0].item() - exact_h) < 2e-2 * abs(exact_h) + 1e-6, (shaper.h[i][0].item(), exact_h)
+    # ANVIL II's step with lane_gain off: the shaped direction, the decay, the rate and nothing else
+    anvil = trainer.optimizer.optimizers[0]
+    seen = {}
+    direction = shaper.direction
+    shaper.direction = lambda q, pend: seen.setdefault(id(q), direction(q, pend))
+    w = p.detach().clone()
+    trainer.optimizer.step()
+    lr, wd = anvil.param_groups[0]['lr'], anvil.param_groups[0]['weight_decay']
+    slow = anvil.state[p]['slow']
+    expected = w - lr * max(1, w.size(0) / w.size(1)) ** 0.5 * (seen[id(p)] + (slow * w >= 0) * w * (wd * lr))
+    assert torch.allclose(p, expected, atol=1e-6), 'the lane gain or its renormalization was applied'
 
-    trainer.diagnose(1)
-    trainer.update(2, rows[1])  # not a refresh: one more noise sample, factors from the formula
-    lr = trainer.reference.settings.anvil_lr
-    for i, name in enumerate(shaper.names):
-        p = params[name]
-        scale = 3.0 * lr ** 2 * max(1, p.size(0) / p.size(1))
-        expected = 1 / (1 + (shaper.noise[i] / 2) / (4 * shaper.h[i].square() * scale))
-        assert shaper.samples == 2 and torch.allclose(shaper.factors[i], expected, rtol=1e-5)
-    trainer.diagnose(2)
-    trainer.update(3, rows[2])  # a refresh again: new directions, and a summary with their overlap
-    report = trainer.diagnose(3)['damping']
-    assert {'h', 'c', 'h2_over_c', 'factor', 'overlap'} <= set(report['mlp.c_fc'])
 
-    p = params[shaper.names[i]]
-    pending = torch.randn(p.shape, generator=torch.Generator().manual_seed(7))
-    a, b, f = shaper.left[i], shaper.right[i], shaper.factors[i]
-    shaper.refreshing = False
-    assert torch.equal(shaper.direction(p, pending), damp(m.polar(pending), a, b, f))
-    shaper.where = 'pending'
-    assert torch.equal(shaper.direction(p, pending), m.polar(damp(pending, a, b, f)))
-    x = torch.randn(p.shape, generator=torch.Generator().manual_seed(8))
-    coefficient = lambda y: (a.T @ y * b.T).sum(1)
-    assert torch.allclose(coefficient(damp(x, a, b, f)), f * coefficient(x), atol=1e-5)
-    rest = lambda y: y - a @ torch.diag(coefficient(y)) @ b.T
-    assert torch.allclose(rest(damp(x, a, b, f)), rest(x), atol=1e-5)  # other directions are left alone
+def snr_diagnostic(scratch):
+    """snr_spectrum, along the checkpoint momentum's singular directions: when the per-sequence gradients share the
+    momentum's strong rank-1 direction, it has a high SNR and holds nearly all the energy (little below SNR 1); with
+    pure noise along independent random rails, most energy is below SNR 1."""
+    from loud.anvil import is_anvil_matrix
+    from loud.snr import snr_spectrum
+    trainer, _ = proxy_trainer()
+    model = trainer.model
+    names = [n for n, p in model.named_parameters() if is_anvil_matrix(n, p)]
+    shapes = {n: p.shape for n, p in model.named_parameters()}
+    generator = torch.Generator().manual_seed(13)
+    signal = {n: torch.outer(torch.randn(shapes[n][0], generator=generator),
+                             torch.randn(shapes[n][1], generator=generator)) for n in names}
+    rails = lambda make: dict(state={n: dict(fast=make(n), slow=make(n)) for n in names}, fast_weight=0.5)
 
-    # why 'step' is the default: halving a gradient-like matrix's top singular directions before polar() leaves them
-    # at about 1 after it; halving them after polar() halves them
-    U, _ = torch.linalg.qr(torch.randn(128, 128, generator=torch.Generator().manual_seed(9)))
-    V, _ = torch.linalg.qr(torch.randn(128, 128, generator=torch.Generator().manual_seed(10)))
-    G = U @ torch.diag(torch.logspace(0, -3, 128)) @ V.T
-    a, b, half = U[:, :4], V[:, :4], torch.full((4,), 0.5)
-    top = lambda y: (a.T @ y * b.T).sum(1)
-    assert top(m.polar(damp(G, a, b, half))).min() > 0.9
-    assert top(damp(m.polar(G), a, b, half)).max() < 0.6
+    def synthetic(strength):
+        return lambda model, rows: {n: strength * signal[n] + 0.01 * torch.randn(
+            (len(rows),) + tuple(shapes[n]), generator=generator) for n in names}
+
+    rows = torch.zeros(16, SEQ, dtype=torch.long)
+    strong, _ = snr_spectrum(model, rows, rails(lambda n: signal[n] + 0.01 * torch.randn(
+        shapes[n], generator=generator)), batch=8, gradients=synthetic(1.0))
+    noise_rails = rails(lambda n: torch.randn(shapes[n], generator=generator))
+    weak, tensors = snr_spectrum(model, rows, noise_rails, batch=8, gradients=synthetic(0.0))
+    for n in names:
+        assert strong[n]['energy_below_1'] < 0.05 and strong[n]['snr_top16'][0] > 100, (n, strong[n])
+        assert weak[n]['energy_below_1'] > 0.5, (n, weak[n])
+        assert tensors[n]['snr'].shape == tensors[n]['singular'].shape
+    assert set(strong['energy_below_1']) == {'attn.c_q', 'attn.c_k', 'attn.c_v', 'attn.c_proj', 'mlp.c_fc',
+                                             'mlp.c_proj'}
+    exact, _ = snr_spectrum(model, tokens(4), noise_rails, batch=8)  # exact backprop gradients run end to end
+    assert all(0 <= v <= 1 for v in exact['energy_below_1'].values())
 
 
 def fisher_factor(scratch):
     """E9: the sums of d d^T come from the sampled-label gradient at each block matrix's output (checked against an
-    independent forward, token by token), leave the training gradient untouched, and the update is the damped inverse
-    root of S times the pending update at the polar factor's norm."""
-    from loud.fisher import SAMPLE_SEED, inverse_root
-    trainer, m = proxy_trainer(fisher_damping=0.1)
+    independent forward, token by token), leave the training gradient untouched, and ANVIL II orthogonalizes the
+    damped inverse root of F times the pending update."""
+    from loud.fisher import DAMPING, SAMPLE_SEED, inverse_root
+    trainer, m = proxy_trainer(fisher=True)
     plain, _ = proxy_trainer()
     shaper, model = trainer.shaper, trainer.model
     rows = batches(1, model.config.vocab_size)[0]
@@ -880,106 +819,105 @@ def fisher_factor(scratch):
             expected[j] = expected[j] + sum(torch.outer(d[t], d[t]) for t in range(d.shape[0]))  # token by token
     for j, name in enumerate(names):
         assert torch.allclose(shaper.batch_sum[j], expected[j], rtol=1e-3, atol=1e-6), name
-    tokens = 4 * (SEQ - 1)
-    assert shaper.tokens == tokens
+    tokens_seen = 4 * (SEQ - 1)
+    assert shaper.tokens == tokens_seen
 
     shaper.before_step(1)
-    S, R = shaper.S[0], shaper.R[0]
-    assert torch.allclose(S, expected[0] / tokens, rtol=1e-3, atol=1e-9)
-    damped = S + 0.1 * torch.linalg.eigvalsh(S).clamp_min(0).mean() * torch.eye(len(S))
-    assert torch.allclose(R @ damped @ R, torch.eye(len(S)), atol=1e-3)
-    assert torch.allclose(inverse_root(S, 0.1), R)
+    F, R = shaper.F[0], shaper.R[0]
+    assert torch.allclose(F, expected[0] / tokens_seen, rtol=1e-3, atol=1e-9)
+    damped = F + DAMPING * torch.linalg.eigvalsh(F).clamp_min(0).mean() * torch.eye(len(F))
+    assert torch.allclose(R @ damped @ R, torch.eye(len(F)), atol=1e-3)
+    assert torch.allclose(inverse_root(F), R)
     p = dict(model.named_parameters())[names[0]]
     pending = torch.randn(p.shape, generator=torch.Generator().manual_seed(11))
-    update = shaper.direction(p, pending)
-    assert abs(update.norm().item() - m.polar(pending).norm().item()) < 1e-3  # the step's size stays ANVIL II's
-    assert torch.allclose(update / update.norm(), R @ pending / (R @ pending).norm(), atol=1e-6)
+    assert torch.equal(shaper.direction(p, pending), m.polar(R @ pending))  # preconditioned, then ANVIL's own polar
 
 
 def population_run(scratch):
-    """E3 end to end on a tiny model, once per rule: every remaining sequence feeds one copy's update at most once,
-    the copies' rates and ANVIL II's clock follow the single run's update numbers, and the rule acts as described."""
+    """E3 end to end on a tiny model, once per rule: the trunk to the branch, then every copy makes every update at
+    local batch 2 with the single run's rates and ANVIL II's clock; the rule acts as described; the midpoints are
+    logged; H4 saves the trunk, then each copy."""
     from loud import population
     m = refs.trainer_module('boostcut')
     patch_attention()
     patch_sequences(population)
     for rule in ('average', 'select', 'ensemble'):
         spec = dict(experiment='cpu', variant=rule, seed=0, task='population', args=dict(
-            preset='2m', sequences=72, heldout=4, rule=rule, every=2, official_eval=False,
+            preset='2m', sequences=72, heldout=4, rule=rule, every=2, midpoints_every=2, official_eval=False,
             checkpoints=rule == 'average'))
         out = Path(scratch) / rule
         result = population.run(spec, out)
         config = json.loads((out / 'config.json').read_text())
         metrics = [json.loads(line) for line in (out / 'metrics.jsonl').read_text().splitlines()]
         events = [json.loads(line) for line in (out / 'population.jsonl').read_text().splitlines()]
-        # 68 update sequences: 17 updates of 4; 3 before the branch, then 56 left, 14 per copy: 3 rounds of 4 each
-        assert config['branch_step'] == 3 and config['rounds'] == 3 and config['unused_sequences'] == 8
-        assert [r['step'] for r in metrics] == list(range(1, 16)) and result['updates'] == 15
-        turns = [(r['round'], r['copy']) for r in metrics if r['phase'] == 'population']
-        assert turns == [(r, c) for r in (1, 2, 3) for c in range(4)]
-        anvil = m.Anvil([torch.zeros(2, 2)], 1.0, 0.0, 17)
+        # 68 update sequences: 8 updates of 8; the branch after round(0.2 * 8) = 2, then 4 copies of 2 sequences
+        assert config['branch_step'] == 2 and config['local_batch'] == 2 and result['updates'] == 8
+        assert [r['step'] for r in metrics] == list(range(1, 9))
+        assert [r['phase'] for r in metrics] == ['trunk'] * 2 + ['copies'] * 6
+        assert all(len(r['copy_losses']) == 4 for r in metrics[2:])
+        anvil = m.Anvil([torch.zeros(2, 2)], 1.0, 0.0, 8)
         for r in metrics:
             anvil.t = r['step'] - 1
             assert r['anvil_beta'] == anvil.rail_beta(), 'ANVIL II does not follow the single run'
         base = metrics[0]['lr']['anvil']
-        assert all(abs(r['lr']['anvil'] - base * min(1.0, (17 - r['step'] + 1) / 17 / 0.3)) < 1e-12 for r in metrics)
-        assert [e['round'] for e in events] == [2, 3] and all(len(e['midpoints']) == 6 for e in events)
+        assert all(abs(r['lr']['anvil'] - base * min(1.0, (8 - r['step'] + 1) / 8 / 0.3)) < 1e-12 for r in metrics)
+        assert [e['step'] for e in events] == [4, 6, 8] and all(len(e['midpoints']) == 6 for e in events)
         assert all(abs(e['barriers'][p] - (e['midpoints'][p] - max(e['copies'][int(p[0])], e['copies'][int(p[2])])))
                    < 1e-12 for e in events for p in e['midpoints'])
         if rule == 'average':
             assert all(e['action'] == 'average' for e in events) and result['final'] == 'mean'
-            # H4: the trunk's fractions up to the branch, then every copy's 50% and its end (100%)
+            # scored before the average at the same update, so the copies are still apart
+            assert all(len(set(e['copies'])) > 1 for e in events), 'the midpoints were scored after the average'
             saved = {p.name for p in out.glob('ckpt_*.pt')}
             assert saved == {'ckpt_00.pt', 'ckpt_10.pt', 'ckpt_20.pt'} | {
                 f'ckpt_{f}.c{c}.pt' for f in (50, 100) for c in range(4)}, saved
         if rule == 'select':
-            assert all(set(e['action']) == {'select', 'replace'} for e in events)
-            last = events[-1]
-            assert result['final'] == f'copy {last["action"]["select"]}'
+            assert all(set(e['action']) == {'select', 'replace', 'scores'} for e in events)
+            assert result['final'] == f'copy {result["final_copy_scores"].index(min(result["final_copy_scores"]))}'
             assert result['heldout_loss'] == min(result['final_copy_scores'])
         if rule == 'ensemble':
+            assert all('action' not in e for e in events)
             mean, best = result['final_mean_score'], min(result['final_copy_scores'])
             assert result['final'] == ('mean' if mean < best else f'copy {result["final_copy_scores"].index(best)}')
             assert result['heldout_loss'] == min(mean, best)
 
 
 def population_rules(scratch):
-    """The rules on live copies: averaging leaves every copy at the mean with its own optimizer state; selection gives
-    the worst copy the best's weights and an unaliased copy of its optimizer state."""
+    """The rules on live copies: each copy trains on its share of the batch; averaging leaves every copy at the mean
+    of the weights and of every optimizer state tensor; selection gives the worst copy the best's weights and an
+    unaliased copy of its optimizer state."""
     from loud.heldout import HeldoutScorer
-    from loud.common import JsonlLog
-    from loud.population import Clock, Population
-    trainer, m = proxy_trainer()
-    rows = batches(3, trainer.model.config.vocab_size)
+    from loud.population import Clock, Population, state_tensors
+    trainer, m = proxy_trainer(batch=8)
+    vocab = trainer.model.config.vocab_size
+    rows = torch.randint(0, vocab, (3, 8, SEQ), generator=torch.Generator().manual_seed(6))
     for step in (1, 2):
         trainer.update(step, rows[step - 1])
-    heldout = HeldoutScorer(rows[2], Path(scratch) / 'heldout.jsonl', torch.device('cpu'))
-    events = JsonlLog(Path(scratch) / 'population.jsonl')
-    o = dict(trainer.o, copies=3, rule='average')
-    population = Population(o, trainer, trainer.reference, torch.device('cpu'), 0, heldout, events,
-                            Clock(torch.device('cpu')))
-    for c, member in enumerate(population.copies):  # make them differ
-        member.optimizer.optimizers[0].t = 2 + c
-        member.update(3 + c, rows[c])
-    states = [copy.deepcopy(member.optimizer.optimizers[0].state_dict()) for member in population.copies]
-    population.checkpoint(1, 5)
-    weights = [list(member.model.parameters()) for member in population.copies]
-    for ps in zip(*weights):
-        assert all(torch.equal(ps[0], q) for q in ps[1:]), 'averaging left the copies apart'
-    for member, state in zip(population.copies, states):
-        assert all(torch.equal(member.optimizer.optimizers[0].state[p]['slow'], state['state'][i]['slow'])
-                   for i, p in enumerate(member.optimizer.optimizers[0].param_groups[0]['params']))
+    heldout = HeldoutScorer(rows[2][:4], Path(scratch) / 'heldout.jsonl', torch.device('cpu'))
+    o = dict(trainer.o, copies=4, rule='average')
+    population = Population(o, trainer, trainer.reference, torch.device('cpu'), 0, heldout, Clock(torch.device('cpu')))
+    seen = []
+    for member in population.copies:
+        update = member.update
+        member.update = lambda step, batch, update=update: seen.append(batch.clone()) or update(step, batch)
+    losses, _ = population.update(3, rows[0])
+    assert len(losses) == 4 and all(torch.equal(b, rows[0][2 * k:2 * k + 2]) for k, b in enumerate(seen))
+    tensors = [state_tensors(member) for member in population.copies]
+    assert any(not torch.equal(a, b) for a, b in zip(tensors[0], tensors[1])), 'the copies did not diverge'
+    expected = [torch.stack([t[i].float() for t in tensors]).mean(0) for i in range(len(tensors[0]))]
+    population.average()
+    for member in population.copies:
+        for t, e in zip(state_tensors(member), expected):
+            assert torch.allclose(t.float(), e, atol=1e-6), 'averaging left a weight or a state tensor apart'
 
-    population.o = dict(o, rule='select')
-    for c, member in enumerate(population.copies):
-        member.update(6 + c, rows[(c + 1) % 3])
-    scores = population.checkpoint(2, 8)
-    best, worst = scores.index(min(scores)), scores.index(max(scores))
+    population.update(4, rows[1])
+    action = population.select(4)
+    best, worst = action['select'], action['replace']
     for p, q in zip(population.copies[worst].model.parameters(), population.copies[best].model.parameters()):
         assert torch.equal(p, q)
     best_anvil = population.copies[best].optimizer.optimizers[0]
     kept = {id(p): best_anvil.state[p]['slow'].clone() for p in best_anvil.param_groups[0]['params']}
-    population.copies[worst].update(9, rows[0])  # its state moves; the best copy's must not
+    population.copies[worst].update(5, rows[0][:2])  # its state moves; the best copy's must not
     assert all(torch.equal(best_anvil.state[p]['slow'], kept[id(p)]) for p in best_anvil.param_groups[0]['params'])
 
 

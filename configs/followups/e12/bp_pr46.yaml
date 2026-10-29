@@ -5,7 +5,7 @@ experiment: e12
 variant: bp_pr46
 task: proxy
 seeds: [0, 1, 2]
-priority: 55
+priority: 80
 after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0]
 args:
   recipe: pr46

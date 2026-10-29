@@ -4,7 +4,7 @@ experiment: e15
 variant: plus_lambda_3
 task: h8
 seeds: [0, 1, 2]
-priority: 65
+priority: 60
 after: [verify.score_record.s0, verify.latent_boost_smoke.s0, h6.h8_validation.s0]
 args:
   sequences: 10M

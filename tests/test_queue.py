@@ -24,11 +24,14 @@ def done(q, jid, worker='w', **result):
     q.finish(jid, worker, claimed['attempt_dir'], 'done', result=result)
 
 
-def test_priority_then_submission_order(q, tmp_path):
-    q.submit(job('b', tmp_path, priority=50))
-    q.submit(job('a', tmp_path, priority=50))
-    q.submit(job('first', tmp_path, priority=1))
-    assert [q.claim('w')['id'] for _ in range(3)] == ['first', 'b', 'a']
+def test_priority_then_seed_then_submission_order(q, tmp_path):
+    seeded = lambda jid, seed, priority: dict(job(jid, tmp_path, priority=priority), spec=dict(seed=seed))
+    q.submit(seeded('b.s0', 0, 50))
+    q.submit(seeded('b.s1', 1, 50))
+    q.submit(seeded('a.s0', 0, 50))
+    q.submit(seeded('a.s1', 1, 50))
+    q.submit(seeded('first', 2, 1))
+    assert [q.claim('w')['id'] for _ in range(5)] == ['first', 'b.s0', 'a.s0', 'b.s1', 'a.s1']
     assert q.claim('w') is None
 
 

@@ -1,33 +1,32 @@
-"""Proxy variants: each changes one thing about how the backprop proxy forms or takes an update (the plan's E2, E4
-and E10). Each is off unless its option is set (loud/options.py, PROXY); the plain proxy never enters this module.
+"""Proxy variants: each changes one thing about how the backprop proxy forms or takes an update (v2's E2 and E4).
+Each is off unless its option is set (loud/options.py, PROXY); the plain proxy never enters this module.
 
-    Blur          E2: the gradient of the loss blurred at width tau, from an exact antithetic pair of displaced passes.
-    StepControl   E4: undo an update that raised its batch's loss; optionally scale every rate by the outcomes.
-    TokenShaping  E10: per-token credits capped, or weight-gradient entries kept only where the tokens agree in sign.
+    Blur          E2: the gradient of the loss blurred by activation noise, from an exact antithetic pair of passes.
+    StepControl   E4: undo an update that raised the loss on held-out rows; optionally scale every rate by the outcomes.
 """
 import contextlib
 
 import torch
-from torch import nn
 
-CHAIN_SIGMA = 0.01  # PR #40's Settings.chain_sigma: the Cut chain's probe step, relative to each token's RMS
+from .heldout import mean_loss
+from .options import JUDGE_ROWS
+
 BLUR_SEED = 7907    # the blur draws from its own generator, seeded with the job seed + BLUR_SEED
 
 
 class Blur:
-    """E2. The probing sites are the raw embedding (wte's output) and each block's mid stream (after attention, before
-    the MLP), nine for the benchmark model. At each site, token t gets r[t]: a uniformly random direction of length
-    tau * CHAIN_SIGMA * RMS(a[t]) * sqrt(width), with a[t] its clean activation there. That is the Cut chain's probe
-    with a random direction: a Hadamard row of +-1 entries (norm sqrt(width)) times the step chain_sigma * RMS(a[t]),
-    where PR #40's chain_credits takes the RMS per token. This answers the plan's open question: tau counts per-token
-    steps. Two forwards add +r and -r (the same r) at every site at once. The mean of their gradients has no odd-order
-    terms in r, and over the draws of r it averages to the gradient of the loss blurred at width tau. The displacement
-    is added in the activation's dtype (bf16 on the GPU), as the chain's bf16 probes are. A mid-stream displacement is
-    added to the attention output, which is what a block adds to its input there."""
+    """E2. The sites are the raw embedding (wte's output) and each block's mid stream (after attention, before the
+    MLP), nine for the benchmark model. At each site, token t gets r[t] = s * RMS(a[t]) * sqrt(width) * u, u uniform
+    on the unit sphere and a[t] its clean activation there: each coordinate's RMS displacement is s times the token's
+    activation RMS, the units of PR #40's chain_sigma (its probe step is 0.01). Two forwards add +r and -r (the same
+    r) at every site at once. The mean of their gradients has no odd-order terms in r, so over the draws it is the
+    gradient of the loss averaged over the activation noise, to second order. The displacement is added in the
+    activation's dtype (bf16 on the GPU); a mid-stream displacement is added to the attention output, which is what a
+    block adds to its input there."""
 
-    def __init__(self, model, tau, seed, device):
+    def __init__(self, model, s, seed, device):
         self.model, self.width = model, model.config.n_embd
-        self.scale = tau * CHAIN_SIGMA * self.width ** 0.5
+        self.scale = s * self.width ** 0.5
         self.generator = torch.Generator(device).manual_seed(seed + BLUR_SEED)
         self.shifts = None
 
@@ -86,8 +85,8 @@ class Blur:
 
 
 class Snapshot:
-    """The weights and the optimizer state (every state tensor; ANVIL II's schedule clock is left to the loop), copied into buffers that
-    are allocated once per tensor and reused, so a rejected update can be undone exactly."""
+    """The weights and the optimizer state (every state tensor; ANVIL II's schedule clock is left to the loop),
+    copied into buffers that are allocated once per tensor and reused, so a rejected update can be undone exactly."""
 
     def __init__(self, model, optimizer):
         self.params, self.optimizers = list(model.parameters()), optimizer.optimizers
@@ -119,21 +118,28 @@ class Snapshot:
 
 
 class StepControl:
-    """E4. After each update, the batch's loss at the new weights, from one no-grad forward over the same
-    micro-batches as the gradient, so the two losses compare like for like. If it rose, the weights and the whole
-    optimizer state go back to before the update, and the batch feeds no update. Version one ('reject') stops there.
-    'adapt' (version two) also keeps a global multiplier on every group's rate, on top of the hand schedule: times
-    accept_up after an accept, times accept_down after a reject. It settles where the acceptance rate a satisfies
-    a * ln(up) + (1 - a) * ln(down) = 0; for the plan's 1.05 and 0.8 that is a = 0.82, not the 0.6 it targets."""
+    """E4. Each update is judged on JUDGE_ROWS of the held-out sequences, rotating (update s takes rows 4(s - 1) ..
+    4s - 1 mod 32): their loss under the old weights and under the new ones, a paired comparison costing two forwards
+    of 4 sequences. Never on the batch that produced the step, which almost always improves, nor on the next training
+    batch, which would then feed two updates. If the held-out loss rose, the weights and the optimizer state go back
+    to before the update and the batch feeds no update ('reject', v1). 'adapt' (v2) also keeps a global multiplier on
+    every group's rate, on top of the hand schedule: times accept_up after an accept, times accept_down after a
+    reject. It settles where the acceptance rate a satisfies a * ln(up) + (1 - a) * ln(down) = 0: 0.59 for v2's 1.1
+    and 0.87. With the warmdown removed (warmdown: 0, v2b), a falling acceptance late in training decays the
+    multiplier geometrically: the measured warmdown. Both losses of every update are in metrics.jsonl."""
 
-    def __init__(self, model, optimizer, o):
+    def __init__(self, model, optimizer, o, heldout, device):
         self.adapt, self.up, self.down = o['step_control'] == 'adapt', o['accept_up'], o['accept_down']
+        self.model, self.heldout, self.device = model, heldout, device
         self.multiplier = 1.0
         self.snapshot = Snapshot(model, optimizer)
 
-    def save(self):
-        """Before the step: keep what it will change."""
-        self.snapshot.save()
+    def rows(self, step):
+        start = (step - 1) * JUDGE_ROWS % len(self.heldout)
+        return [(start + i) % len(self.heldout) for i in range(JUDGE_ROWS)]
+
+    def loss(self, step):
+        return mean_loss(self.model, self.heldout[self.rows(step)], self.device, JUDGE_ROWS)
 
     def scale(self, optimizer):
         """Apply the multiplier to the rates set_rate just set (they are recomputed from initial_lr every update)."""
@@ -141,98 +147,19 @@ class StepControl:
             for group in optimizer.param_groups:
                 group['lr'] *= self.multiplier
 
-    def judge(self, loss, trial):
-        """After the step: undo it if the batch's loss rose from `loss` to `trial`. Returns the metrics fields."""
-        accepted = bool(trial <= loss)  # one sync per update (the loop waits for the loss anyway)
+    def save(self, step):
+        """Before the step: the held-out loss at the old weights, and what the step will change."""
+        self.before = self.loss(step)
+        self.snapshot.save()
+
+    def judge(self, step):
+        """After the step: undo it if the held-out loss rose. Returns the metrics fields."""
+        after = self.loss(step)
+        accepted = after <= self.before
         if not accepted:
             self.snapshot.restore()
-        record = dict(accepted=accepted, trial_loss=trial.item())
+        record = dict(accepted=accepted, heldout_before=self.before, heldout_after=after, judge_rows=self.rows(step))
         if self.adapt:
             record['lr_multiplier'] = self.multiplier  # the multiplier this update used
             self.multiplier *= self.up if accepted else self.down
         return record
-
-
-class TokenShaping:
-    """E10, on the weight gradient of every nn.Linear in the model: the block matrices, the value-embedding gates and
-    the LM head. Each of these gradients is a sum over the update's tokens of credit (the loss gradient at the layer's
-    output) times input, which is the sum the plan reshapes. Embedding tables (one-hot inputs) and the mixing scalars
-    keep their ordinary gradients.
-
-    cap: before the outer products, each token's credit is scaled down to a norm of at most the cap_quantile of the
-    per-token credit norms over the whole update batch, per layer. The quantile needs every micro-batch's credits, so
-    each layer's credits and inputs are kept (bf16, about 0.3 GB per sequence for the benchmark model) until the batch
-    is done; a second backward for the norms would cost a full pass more.
-    agree: each entry of the ordinary gradient is kept only where at least agree_threshold of the tokens share one sign
-    of their contribution credit[i] * input[j]: of the tokens with a nonzero contribution (agree_over 'active', the
-    default), or of all the update's tokens (agree_over 'all', the plan's literal reading, under which an entry whose
-    input or credit is zero for more than 1 - threshold of the tokens, common after the ReLU^2, is always dropped).
-    The counts are sign matmuls accumulated over the micro-batches, exact for +-1 and 0 entries in float32 (TF32 on the
-    GPU) with float32 sums, so nothing per token is kept.
-
-    While shaping, these weights skip autograd's own weight gradient (requires_grad off); a hook on each layer's output
-    forms it from the captured input, with the same matmul as autograd."""
-
-    def __init__(self, model, accumulators, o):
-        slot = {id(p): a for p, a in zip(model.parameters(), accumulators)}
-        self.modules = [m for m in model.modules() if isinstance(m, nn.Linear)]
-        self.sums = [slot[id(m.weight)] for m in self.modules]  # the proxy's float32 gradient accumulators
-        self.mode, self.quantile, self.threshold = o['token_shaping'], o['cap_quantile'], o['agree_threshold']
-        self.over_all, self.tokens = o['agree_over'] == 'all', 0  # tokens: this update's, per layer (shapes, no sync)
-        self.kept = [[] for _ in self.modules]  # cap: (credit, input) of each micro-batch, per layer
-        self.counts = ([(torch.zeros_like(s), torch.zeros_like(s)) for s in self.sums] if self.mode == 'agree'
-                       else None)  # agree: (sum of sign products, count of nonzero products), per layer
-
-    @contextlib.contextmanager
-    def batch(self):
-        """Hooks for one update's backward passes; finish() then writes the shaped sums."""
-        if self.counts is not None:
-            torch._foreach_zero_([c for pair in self.counts for c in pair])
-            self.tokens = 0
-        handles = []
-
-        def forward_hook(k):
-            def hook(module, args, output):
-                if output.requires_grad:
-                    x = args[0].to(output.dtype)  # the cast autocast feeds the matmul
-                    output.register_hook(lambda g: self._credit(k, x, g))
-            return hook
-
-        try:
-            for k, module in enumerate(self.modules):
-                module.weight.requires_grad_(False)
-                handles.append(module.register_forward_hook(forward_hook(k)))
-            yield
-        finally:
-            for handle in handles:
-                handle.remove()
-            for kept in self.kept:
-                kept.clear()
-
-    def _credit(self, k, x, g):
-        g, x = g.reshape(-1, g.shape[-1]), x.reshape(-1, x.shape[-1])
-        if self.mode == 'cap':
-            self.kept[k].append((g, x))
-            return
-        if k == 0:
-            self.tokens += g.shape[0]  # every layer sees each micro-batch's tokens
-        self.sums[k].add_(torch.mm(x.t(), g).t())  # autograd's weight gradient of the linear map
-        same, nonzero = self.counts[k]
-        sg, sx = g.sign().float(), x.sign().float()
-        same.addmm_(sg.t(), sx)
-        nonzero.addmm_(sg.abs_().t(), sx.abs_())
-
-    def finish(self):
-        """Write each layer's shaped gradient sum into its accumulator (before the proxy divides by the passes)."""
-        if self.mode == 'agree':
-            for total, (same, nonzero) in zip(self.sums, self.counts):
-                majority = same.abs_().add_(nonzero)  # twice the number of products with the majority sign
-                total.mul_(majority >= (2 * self.threshold * self.tokens if self.over_all
-                                        else nonzero.mul_(2 * self.threshold)))
-            return
-        for total, kept in zip(self.sums, self.kept):
-            norms = [g.float().norm(dim=-1) for g, _ in kept]
-            cap = torch.quantile(torch.cat(norms), self.quantile)
-            for (g, x), norm in zip(kept, norms):
-                scale = (cap / norm.clamp_min(1e-30)).clamp_max_(1)
-                total.add_(torch.mm(x.t(), (g.float() * scale[:, None]).to(g.dtype)).t())

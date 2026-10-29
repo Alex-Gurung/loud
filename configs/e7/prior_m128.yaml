@@ -5,7 +5,7 @@ experiment: e7
 variant: prior_m128
 task: h8
 seeds: [0, 1, 2]
-priority: 60
+priority: 55
 after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0, e7.precondition.s0]
 args:
   sequences: 10M

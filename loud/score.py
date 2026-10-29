@@ -31,31 +31,36 @@ def official_eval_module():
     return module
 
 
-def score(checkpoint, splits=('val',)):
+def score(checkpoint, splits=('val',), model_file=None):
+    """model_file: a track-3 entry's model (E16: the pinned train/arch/model.py), which evaluate() builds with its
+    GPTConfig() defaults, as Noise scores track 3; None, the fixed model."""
     ev = official_eval_module()
     torch.cuda.set_device(0)
     state_dict = torch.load(checkpoint, map_location='cpu', weights_only=True)
     out = dict(checkpoint=Path(checkpoint).name, checkpoint_sha256=file_digest(checkpoint), torch=torch.__version__)
+    if model_file is not None:
+        out.update(model_file=str(model_file), model_file_sha256=file_digest(model_file))
     for split in splits:
         if split == 'val':
-            out['val_loss'] = ev.evaluate(state_dict, DATA)  # the benchmark's own function, unchanged
+            out['val_loss'] = ev.evaluate(state_dict, DATA, model_file=model_file)  # the benchmark's own function
         elif split == 'test':  # evaluate()'s computation, model loading and batch size, on test.pt
             from .data import load_split
             from .heldout import mean_loss
             device = torch.device('cuda', 0)
-            out['test_loss'] = mean_loss(ev.load_model(state_dict, device), load_split('test.pt'), device, 16)
+            out['test_loss'] = mean_loss(ev.load_model(state_dict, device, model_file), load_split('test.pt'),
+                                         device, 16)
         else:
             raise ValueError(f'unknown split {split!r}')
     return out
 
 
-def score_in_subprocess(checkpoint, splits, out_path):
+def score_in_subprocess(checkpoint, splits, out_path, model_file=None):
     """Score in a child process (the trainer has another checkout's utils/ imported) and return its numbers."""
     env = dict(os.environ)
     code = env.get('LOUD_CODE_DIR') or str(Path(__file__).resolve().parents[1])
     env['PYTHONPATH'] = code
     cmd = [sys.executable, '-u', '-m', 'loud.score', str(checkpoint), '--splits', ','.join(splits), '--out',
-           str(out_path)]
+           str(out_path)] + ([] if model_file is None else ['--model-file', str(model_file)])
     proc = subprocess.run(cmd, cwd=code, env=env, capture_output=True, text=True)
     if proc.returncode:
         raise RuntimeError(f'scoring failed ({proc.returncode}):\n{proc.stdout[-4000:]}\n{proc.stderr[-4000:]}')
@@ -81,8 +86,9 @@ def main():
     parser.add_argument('checkpoint', type=Path)
     parser.add_argument('--splits', default='val')
     parser.add_argument('--out', type=Path)
+    parser.add_argument('--model-file', type=Path, help="a track-3 entry's model.py (default: the fixed model)")
     args = parser.parse_args()
-    result = score(args.checkpoint, tuple(args.splits.split(',')))
+    result = score(args.checkpoint, tuple(args.splits.split(',')), args.model_file)
     if args.out:
         write_json(args.out, result)
     print(json.dumps(result), flush=True)

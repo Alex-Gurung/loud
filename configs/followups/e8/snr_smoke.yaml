@@ -1,0 +1,16 @@
+# Before E8's proxy arms (submitted with them): a complete short run on the 1M range through the SNR scaling (per-
+# sequence gradients, one SVD per block matrix per update, no lane gain).
+experiment: verify
+variant: snr_smoke
+task: proxy
+seeds: [0]
+priority: 3
+after: [verify.smoke.s0]
+args:
+  recipe: boostcut
+  sequences: 1M
+  heldout: 32
+  batch: 8
+  per_sequence_grads: true
+  snr_scaling: snr
+notes: Pipeline check only; its numbers are not a result.

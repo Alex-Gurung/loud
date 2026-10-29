@@ -163,12 +163,13 @@ def train(spec, run_dir, o, build, method):
         result['peak_cuda_gb'] = round(torch.cuda.max_memory_allocated() / 1e9, 3)
     run.update_config(checkpoints=checkpoints.saved)
     if o['official_eval'] and complete:
+        model_file = getattr(trainer, 'model_file', None)  # E16's track-3 model; None: the fixed one
         del trainer
         if dev.type == 'cuda':
             torch.cuda.empty_cache()
         splits = ['val', 'test'] if o['test'] else ['val']
-        result.update(score_in_subprocess(final, splits, run_dir / 'score.json'))
+        result.update(score_in_subprocess(final, splits, run_dir / 'score.json', model_file))
         if plain is not None:
-            scores = score_in_subprocess(plain, splits, run_dir / 'score_plain.json')
+            scores = score_in_subprocess(plain, splits, run_dir / 'score_plain.json', model_file)
             result.update({f'{k}_plain': v for k, v in scores.items()})
     return run.finish(result, spec.get('expect'))

@@ -1,0 +1,19 @@
+# E8, the proxy setting with exact gradients (v2). Each update, the polar factor of each block matrix's pending update
+# becomes U diag(r) V^T, with ANVIL II's per-lane gain and Frobenius renormalization off in every arm (they would undo
+# the scaling). This arm: control: r = 1 (the SVD polar factor U V^T). Prediction: little difference with exact
+# gradients (the H8 partial-row setting is the parent's). Build condition (v2): H6's snr_spectrum shows partial rows
+# pushing a large share of the orthogonalization input's energy below SNR 1; submit this directory then.
+experiment: e8
+variant: snr_control
+task: proxy
+seeds: [0, 1, 2]
+priority: 65
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0, verify.snr_smoke.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 8
+  heldout_every: 50
+  per_sequence_grads: true
+  snr_scaling: control

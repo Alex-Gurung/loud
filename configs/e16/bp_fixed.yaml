@@ -1,0 +1,13 @@
+# E16: the fixed model under backprop with PR #40's recipe at 4 sequences per update, the same recipe and batch as
+# H8's arms (e1.bp_b4 uses boost-cut's): the backprop side of the architecture ranking, with e16.bp_track3.
+experiment: e16
+variant: bp_fixed
+task: proxy
+seeds: [0, 1]
+priority: 75
+after: [verify.score_record.s0, verify.bp_b8_match.s0]
+args:
+  recipe: pr40
+  sequences: 10M
+  heldout: 32
+  batch: 4

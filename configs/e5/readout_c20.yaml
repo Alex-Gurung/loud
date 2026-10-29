@@ -8,7 +8,7 @@ experiment: e5
 variant: readout_c20
 task: diagnose
 seeds: [0]
-priority: 70
+priority: 68
 after: [e1.h8_synth.s0]
 args:
   tool: deep_readout_check

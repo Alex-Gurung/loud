@@ -6,7 +6,7 @@ experiment: e13
 variant: tiers_c100
 task: diagnose
 seeds: [0]
-priority: 70
+priority: 68
 after: [e1.h8_synth.s0]
 args:
   tool: ngram_tiers

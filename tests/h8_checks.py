@@ -506,6 +506,60 @@ def h8_arch(scratch):
         preset='2m', arch='ngram', ngram_rows=512, mode='cut', sequences=72, heldout=32, batch=4, official_eval=False))
     result = h8.run(spec, Path(scratch) / 'arch')
     assert result['complete'] and result['updates'] == 10
+    import loud.proxy  # E16's backprop arm: the same model under PR #40's recipe at batch 4
+    args = dict(spec['args'], recipe='pr40')
+    del args['mode']
+    result = loud.proxy.run(dict(spec, variant='arch_bp', task='proxy', args=args), Path(scratch) / 'arch_bp')
+    assert result['complete'] and result['updates'] == 10
+    # the official scorer builds the record's GPTConfig(): only that shape can be scored
+    from loud.options import PRESETS, TRACK3_ROWS, h8_options, proxy_options
+    default = arch.module().GPTConfig()
+    assert (default.n_layer, default.n_embd, default.ngram_rows) == PRESETS['track3'] + (TRACK3_ROWS,)
+    for check, extra in ((h8_options, dict(mode='cut')), (proxy_options, dict(recipe='pr40'))):
+        check(dict(preset='track3', arch='ngram', **extra))
+        for bad in (dict(preset='2m'), dict(preset='track3', ngram_rows=512)):
+            try:
+                check(dict(dict(preset='track3', arch='ngram', **extra), **bad))
+            except ValueError as e:
+                assert 'official scorer' in str(e), e
+            else:
+                raise AssertionError(f'{check.__name__} accepted {bad} with the official score on')
+
+
+def h6_snr(scratch):
+    """E8's snr_spectrum tool: H8's per-sequence synthesized gradients at K = 4 average, over draws, to the exact
+    credits' (the scheme is unbiased), one draw being far noisier; the tool measures the training sequences after the
+    checkpoint's update (wrapping past the epoch's end) for every estimator, from the checkpoint's saved momentum."""
+    from types import SimpleNamespace
+    from loud.anvil import is_anvil_matrix
+    from loud.diagnostics import snr_tool, synthesized_gradients
+    from loud.options import diagnose_options
+    m, s, model, x, y = record_setup()
+    row = torch.cat([x[:1], y[:1, -1:]], 1)
+    exact = synthesized_gradients(model, row, 1, 'time', 1)
+    draws = synthesized_gradients(model, row.expand(16, -1), 4, 'token', 1)  # 16 updates, fresh signs each
+    flat = lambda g: torch.cat([v.flatten() for v in g.values()])
+    cos = lambda a, b: float(a @ b / (a.norm() * b.norm()))
+    target = flat({n: g[0] for n, g in exact.items()})
+    single = cos(flat({n: g[0] for n, g in draws.items()}), target)
+    mean = cos(flat({n: g.mean(0) for n, g in draws.items()}), target)
+    assert mean > 0.9 and mean > single + 0.1, (single, mean)
+    rows = torch.cat([x, y[:, -1:]], 1).repeat(3, 1)[:5]
+    names = [n for n, p in model.named_parameters() if is_anvil_matrix(n, p)]
+    shapes = dict((n, p.shape) for n, p in model.named_parameters())
+    generator = torch.Generator().manual_seed(3)
+    saved = dict(step=1, fast_weight=0.5, state={n: dict(fast=torch.randn(shapes[n], generator=generator),
+                                                         slow=torch.randn(shapes[n], generator=generator)) for n in names})
+    checkpoint = Path(scratch) / 'ckpt_20.pt'
+    torch.save(saved, checkpoint.with_suffix('.optim.pt'))
+    o = diagnose_options(dict(tool='snr_spectrum', checkpoint='x', sequences=4, batch=2))
+    split = SimpleNamespace(train=rows, order=torch.arange(10, 15))
+    summary, tensors = snr_tool(model, split, checkpoint, o)
+    assert summary['first_sequence'] == 2 and summary['rows'] == [12, 13, 14, 10], summary['rows']
+    assert set(summary['energy_below_1']) == set(o['estimators']) == set(tensors)
+    for name in o['estimators']:
+        assert all(0 <= v <= 1 for v in summary['energy_below_1'][name].values()), (name, summary[name])
+        assert set(tensors[name]) == set(names)
 
 
 if __name__ == '__main__':

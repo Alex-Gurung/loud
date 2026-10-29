@@ -21,7 +21,7 @@ def mean_loss(model, rows, device, batch_size):
 
 
 class HeldoutScorer:
-    """Scores all held-out sequences in one forward."""
+    """Scores all held-out sequences, or a subset, in one forward."""
 
     def __init__(self, rows, log_path, device):
         self.rows, self.device = rows, device
@@ -31,17 +31,21 @@ class HeldoutScorer:
     def __bool__(self):
         return len(self.rows) > 0
 
-    def loss(self, model):
-        return mean_loss(model, self.rows, self.device, len(self.rows))
+    def loss(self, model, rows=None):
+        """The mean loss over all held-out sequences, or the subset `rows` (indices into them), in one forward."""
+        chosen = self.rows if rows is None else self.rows[list(rows)]
+        return mean_loss(model, chosen, self.device, len(chosen))
 
-    def score(self, model, step, reason, loss=None, **fields):
-        """Score and log one call. `reason` names the decision (or 'monitor' when nothing depends on it); `loss`, a
-        function of the model, replaces the one-forward mean (the Cut chain's end merge scores as the record does)."""
+    def score(self, model, step, reason, loss=None, rows=None, **fields):
+        """Score and log one call. `reason` names the decision (or 'monitor' when nothing depends on it); `rows`
+        scores a subset of the held-out sequences (logged with it); `loss`, a function of the model, replaces the
+        one-forward mean (the Cut chain's end merge scores as the record does)."""
         if not self:
             raise RuntimeError('this run holds out no sequences (heldout: 0)')
         start = time.perf_counter()
-        value = (loss or self.loss)(model)
+        value = loss(model) if loss is not None else self.loss(model, rows)
         self.calls += 1
+        subset = {} if rows is None else dict(rows=list(rows))
         self.log.write(dict(call=self.calls, step=step, reason=reason, heldout_loss=value,
-                            seconds=round(time.perf_counter() - start, 3), **fields))
+                            seconds=round(time.perf_counter() - start, 3), **subset, **fields))
         return value

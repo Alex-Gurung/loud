@@ -1,0 +1,16 @@
+# H6 item 4 on e1.bp_b8.s0's 100% checkpoint, E8's diagnostic (loud/snr.py): per block matrix, the SNR at batch 8 along
+# every singular direction of ANVIL II's momentum (the checkpoint's fast and slow rails, blended by its fast weight:
+# fixed before the measured sequences, so their noise cannot pick the directions), over the 64 training sequences the
+# run reads next, and the share of the momentum's energy below SNR 1. Four estimators of the per-sequence gradients on
+# the same sequences: backprop, H8 synthesis with exact credits, and partial rows at K = 4 by time and by token (E6's
+# two assignments; E8 reads E6's better one). Build E8's intervention (configs/followups/e8/) only if partial rows
+# push a large share of the energy below SNR 1.
+experiment: h6
+variant: snr_spectrum_c100
+task: diagnose
+seeds: [0]
+priority: 40
+after: [e1.bp_b8.s0]
+args:
+  tool: snr_spectrum
+  checkpoint: e1.bp_b8.s0:ckpt_100.pt

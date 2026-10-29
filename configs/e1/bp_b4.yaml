@@ -1,5 +1,5 @@
-# E1: backprop proxy at 4 sequences per update with the same (boost-cut's) rates: the upper end of the bracket for the
-# H8 experiments, which run at the 10M record's 4 sequences per update.
+# E1: backprop proxy at batch 4 (1,212 updates) with the same rates: the upper end of the bracket for the H8
+# experiments, which follow the 10M record's recipe at 4 sequences per update.
 experiment: e1
 variant: bp_b4
 task: proxy

@@ -24,9 +24,9 @@ SEED_DIR = re.compile(r'^s(\d+)$')
 ATTEMPT_DIR = re.compile(r'^(s\d+)\.attempt\d+$')
 
 
-# heldout.jsonl fields that mark a score of something other than the run's weights: a trajectory mean, an E3 copy,
-# midpoint or mean of copies
-OTHER_SCORES = ('mean_decay', 'copy', 'midpoint', 'mean')
+# heldout.jsonl fields that mark a score of something other than the run's weights on all held-out rows: a trajectory
+# mean, an E3 copy, midpoint or mean of copies, a subset of the rows
+OTHER_SCORES = ('mean_decay', 'copy', 'midpoint', 'mean', 'rows')
 
 
 def own_score(h):

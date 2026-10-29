@@ -1,6 +1,7 @@
-# E1: backprop proxy at 8 sequences per update, the anchor for 3.708 (about 3.71 here, with the last 32 sequences of
-# the order held out, as in every experiment cell). Seed 0 keeps the H4 checkpoints, with ANVIL II's state, for the
-# diagnostics run on backprop checkpoints.
+# E1: backprop proxy at batch 8 (606 updates), the anchor for 3.708 and the baseline of every proxy experiment (E2,
+# E3, E4, E8, E9). The last 32 sequences of the order are held out (H3), so baselines and arms train on the same
+# 4,848 sequences; expected about 3.71. Seed 0 keeps the H4 checkpoints, with ANVIL II's state (for the pending
+# update), as the proxy's diagnostic checkpoints (H6's snr_spectrum for E8).
 experiment: e1
 variant: bp_b8
 task: proxy

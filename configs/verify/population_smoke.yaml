@@ -1,6 +1,6 @@
-# Runs before E3: a complete short population run (the 1M range: 23 updates of 4 before the branch, then 4 copies for
-# 22 rounds) on the GPU through the select rule (held-out scoring, copying weights and optimizer state), the
-# midpoint log and official scoring. A few minutes.
+# Runs before E3: a complete short local-SGD population on the 1M range (11 updates of 8 before the branch, then 4
+# copies at local batch 2 for 46 updates) through the select rule (held-out scoring, copying weights and optimizer
+# state), the midpoint log and official scoring.
 experiment: verify
 variant: population_smoke
 task: population
@@ -11,7 +11,7 @@ args:
   recipe: boostcut
   sequences: 1M
   heldout: 32
-  batch: 4
+  batch: 8
   rule: select
-  every: 5
+  every: 10
 notes: Pipeline check only; its numbers are not a result.

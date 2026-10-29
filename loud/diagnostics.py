@@ -21,6 +21,11 @@ query live. Probes run through H8's reforward (Replay), as the chain runs them.
     ngram_tiers         E13: the credit energy and token share of the low tier (max(n-gram loss, model loss) <= theta)
                         on the held-out sequences, the n-gram table built from the training stream up to the checkpoint
                         (loud/ngram.py)
+    snr_spectrum        E8 (H6 item 4; loud/snr.py): per block matrix, the SNR at the update batch along each singular
+                        direction of the checkpoint's ANVIL II momentum, and the share of its energy below SNR 1, per
+                        estimator of the per-sequence gradients (backprop; H8 synthesis with exact credits; partial
+                        rows at K = 4, by time and by token). It measures the training sequences the run would read
+                        next (64), not held-out ones: the SNR is over the training distribution
 
 References are float32 (no autocast, 'highest' matmul precision), as in check_relay.py; probes run under bf16 where
 the chain does.
@@ -32,9 +37,10 @@ import json
 import torch
 import torch.nn.functional as F
 
-from . import h8, ngram, paths, refs
+from . import h8, ngram, paths, refs, snr
+from .anvil import is_anvil_matrix
 from .data import benchmark_split
-from .options import diagnose_options
+from .options import ESTIMATORS, H8, diagnose_options
 from .runlog import Run
 
 TYPES = ('attn.c_q', 'attn.c_k', 'attn.c_v', 'attn.c_proj', 'attn.ve_gate', 'mlp.c_fc', 'mlp.c_proj')
@@ -244,6 +250,45 @@ def load(checkpoint, device, key):
     return m, model.requires_grad_(False)
 
 
+def synthesized_gradients(model, rows, k, assign, batch):
+    """Per sequence, H8 synthesis's gradient of its mean loss for ANVIL II's matrices ({name: [S, rows, cols]}): the
+    cut graph's credits read through a Scheme of width / k rows per token, assigned by `assign` (k = 1: the exact
+    credits). Sequence s is read as part of update s // batch, so the rows a 'time' scheme reads rotate across
+    updates as in training and are shared within one."""
+    model = copy.deepcopy(model).float().requires_grad_(True)
+    named = [(n, p) for n, p in model.named_parameters() if is_anvil_matrix(n, p)]
+    width = model.config.n_embd
+    scheme = h8.Scheme(dict(H8, rows=width // k, row_assign=assign), width, rows.device, 0)
+    out = {n: [] for n, _ in named}
+    for s, row in enumerate(rows.split(1)):
+        grads, _, _ = h8.synthesis_gradients(model, row[:, :-1].contiguous(), row[:, 1:].contiguous(), scheme,
+                                             s // batch)
+        for n, p in named:
+            out[n].append(grads[id(p)].float())
+    return {n: torch.stack(gs) for n, gs in out.items()}
+
+
+def snr_tool(model, split, checkpoint, o):
+    """E8's diagnostic: snr.snr_spectrum for each estimator on the same sequences, the `sequences` training sequences
+    the run would read after the checkpoint's update (from the epoch's start again past its end, as at 100%), with
+    the momentum from the checkpoint's .optim.pt (e1.bp_b8 keeps it)."""
+    saved = torch.load(checkpoint.with_suffix('.optim.pt'), map_location='cpu', weights_only=True)
+    first = saved['step'] * o['batch']
+    picks = (torch.arange(o['sequences']) + first) % len(split.train)
+    device = next(model.parameters()).device
+    rows = split.train[picks].to(device)
+    summary = dict(step=saved['step'], first_sequence=first, rows=split.order[picks].tolist(), energy_below_1={})
+    tensors = {}
+    for name in o['estimators']:
+        spec = ESTIMATORS[name]
+        gradients = snr.exact_gradients if spec is None else \
+            (lambda mdl, r, spec=spec: synthesized_gradients(mdl, r, *spec, o['batch']))
+        with exact():
+            summary[name], tensors[name] = snr.snr_spectrum(model, rows, saved, o['batch'], gradients)
+        summary['energy_below_1'][name] = summary[name]['energy_below_1']  # per matrix type, side by side
+    return summary, tensors
+
+
 def checkpoint_path(ref):
     """'<job id>:<file>' (a finished run's checkpoint) or a path relative to the repo."""
     if ':' in ref:
@@ -262,9 +307,12 @@ def run_task(spec, run_dir):
     rows = split.heldout[o['row']:o['row'] + 1].to(device)
     x, y = rows[:, :-1].contiguous(), rows[:, 1:].contiguous()
     run = Run(run_dir, spec, dict(options=o, checkpoint=str(checkpoint),
-                                  heldout_rows=split.describe()['heldout_rows'][o['row']:o['row'] + 1]))
+                                  heldout_rows=None if o['tool'] == 'snr_spectrum' else
+                                  split.describe()['heldout_rows'][o['row']:o['row'] + 1]))
     if o['tool'] == 'ngram_tiers':  # E13's diagnostic: the 32 held-out sequences, the stream up to the checkpoint
         summary, tensors = ngram.tiers_tool(model, split.heldout.to(device), checkpoint), {}
+    elif o['tool'] == 'snr_spectrum':  # E8's: training sequences after the checkpoint
+        summary, tensors = snr_tool(model, split, checkpoint, o)
     else:
         summary, tensors = getattr(Toolkit(m, model, x, y), o['tool'])()
     (run_dir / f'{o["tool"]}.json').write_text(json.dumps(summary, indent=1) + '\n')

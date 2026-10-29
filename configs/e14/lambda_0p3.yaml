@@ -8,7 +8,7 @@ experiment: e14
 variant: lambda_0p3
 task: h8
 seeds: [0, 1, 2]
-priority: 65
+priority: 60
 after: [verify.score_record.s0, verify.nextlat_smoke.s0, h6.h8_validation.s0]
 args:
   sequences: 10M

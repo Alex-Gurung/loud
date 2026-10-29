@@ -20,6 +20,7 @@ TASKS = {
 RANGES = {'1M': 488, '10M': 4880, '30M': 14648}
 PRESETS = {'tiny': (4, 128), '2m': (2, 128), '7m': (4, 256), '38m': (8, 512), '243m': (16, 1024),
            'track3': (12, 1024)}  # track3: track-3 record #5's shape (E16, with arch: ngram)
+TRACK3_ROWS = 1048576  # track-3 record #5's n-gram table rows (train/arch/model.py's GPTConfig default)
 CHECKPOINT_DTYPES = ('bfloat16', 'float32')
 
 # What each task's result.json holds that `expect` may check.
@@ -74,7 +75,7 @@ TRAINING = dict(
     checkpoints=False,          # H4 fraction checkpoints (ckpt_00/10/20/50/100.pt): true, false, or the seeds that keep
                                 # them (e.g. [0]: only seed 0's, the ones the diagnostics read)
     checkpoint_dtype='bfloat16',
-    checkpoint_optimizer=False, # also ANVIL II's state with each checkpoint (about 0.2 GB each), for H6 direction_stats
+    checkpoint_optimizer=False, # also ANVIL II's state with each checkpoint (about 0.2 GB each), for H6 snr_spectrum
     means=False,                # H4: the record's nine trajectory means from 60%, scored on the held-out set at the end
     save_means=False,           # also write them to means.pt (2-D weights in checkpoint_dtype: about 0.7 GB in bf16)
     heldout_every=0,            # score the held-out set every N updates (monitoring only)
@@ -92,40 +93,37 @@ PROXY = dict(
     per_sequence_grads=False,   # H2
     grad_noise_every=0,         # log the H2 across-sequence spread every N updates (needs per_sequence_grads)
     warmdown=None,              # the recipe's warmdown fraction (None), or another; 0 holds every rate constant
-    # one-change variants (loud/variants.py), at most one per run:
-    smooth_tau=0.0,             # E2: antithetic blur at the nine probing sites, in PR #40 probe steps (0: off)
-    step_control='none',        # E4: 'reject' undoes an update that raised its batch's loss; 'adapt' also scales rates
-    accept_up=1.05,             # E4 adapt: rate multiplier after an accepted update
-    accept_down=0.8,            # E4 adapt: rate multiplier after a rejected one
-    token_shaping='none',       # E10: 'cap' or 'agree', on every nn.Linear weight gradient
-    cap_quantile=0.95,          # E10 cap: each token's credit norm is capped at this quantile over the batch
-    agree_threshold=0.7,        # E10 agree: the share of tokens whose contributions must agree in sign
-    agree_over='active',        # E10 agree: 'active' (tokens with a nonzero contribution) or 'all' (the plan's literal)
-    curvature_damping=0.0,      # E8: lambda, in squared ANVIL II steps (loud/curvature.py); 0 = off
-    damp_directions=16,         # E8: tracked top singular directions of each block matrix's pending update
-    damp_every=50,              # E8: updates between refreshes of the directions and their curvature
-    damp_where='step',          # E8: 'step' (after the orthogonalization) or 'pending' (the plan's literal placement)
-    fisher_damping=0.0,         # E9: true-Fisher left factor in place of ANVIL II's polar (loud/fisher.py); 0 = off
+    # one-change variants, at most one per run:
+    blur=0.0,                   # E2: antithetic displacement at the nine sites, per-coordinate RMS = blur x the
+                                # token's RMS (loud/variants.py); 0 = off
+    step_control='none',        # E4: 'reject' undoes an update that raised the loss on 4 held-out rows; 'adapt' also
+                                # scales every rate by the outcomes (loud/variants.py)
+    accept_up=1.1,              # E4 adapt: rate multiplier after an accepted update
+    accept_down=0.87,           # E4 adapt: after a rejected one (with 1.1: steady at 59% acceptance)
+    snr_scaling='none',         # E8: 'control', 'snr' or 'rate' in place of ANVIL II's polar factor (loud/snr.py)
+    fisher=False,               # E9: momentum left-preconditioned by the damped true-Fisher factor (loud/fisher.py)
     end_merge=False,            # the record's end merge of the nine means after the last update (recipes pr40, pr46)
+    arch='fixed',               # 'ngram' (E16): track-3 record #5's design (loud/arch.py), with recipe pr40
+    ngram_rows=TRACK3_ROWS,     # E16: rows of each hashed n-gram table (the record's)
 )
-STEP_CONTROLS, SHAPINGS = ('none', 'reject', 'adapt'), ('none', 'cap', 'agree')
+STEP_CONTROLS, SNR_ARMS = ('none', 'reject', 'adapt'), ('none', 'control', 'snr', 'rate')
+JUDGE_ROWS = 4  # E4: held-out rows each update is judged on, rotating through the 32
 # Each variant option, and the setting (of another option) it acts under.
-VARIANT_OPTIONS = {'accept_up': ('step_control', 'adapt'), 'accept_down': ('step_control', 'adapt'),
-                   'cap_quantile': ('token_shaping', 'cap'), 'agree_threshold': ('token_shaping', 'agree'),
-                   'agree_over': ('token_shaping', 'agree')}
+VARIANT_OPTIONS = {'accept_up': ('step_control', 'adapt'), 'accept_down': ('step_control', 'adapt')}
 
-# E3 (loud/population.py): copies of the proxy branched from one trajectory. Only POPULATION_FREE options may change;
-# the rest stay at their defaults (one change per variant, and the population loop has no H4 or monitoring).
+# E3 (loud/population.py): local SGD over copies branched from one trajectory. Only POPULATION_FREE options may
+# change; the rest stay at their defaults (one change per variant).
 POPULATION = dict(
     PROXY,
-    batch=4,                    # the batch-4 baseline's (e1.bp_b4)
     branch=0.2,                 # fraction of the single run's updates done before the copies branch
-    copies=4,
+    copies=4,                   # K: each update's batch is split evenly over the copies
     rule=None,                  # 'average' | 'select' | 'ensemble'
-    every=10,                   # N: updates per copy between averages or selections (ensemble: between logs)
+    every=10,                   # H: updates between averages (average) or between selections (select)
+    midpoints_every=10,         # updates between the pairwise-midpoint scores (monitoring)
 )
 POPULATION_FREE = ('sequences', 'heldout', 'batch', 'preset', 'test', 'official_eval', 'recipe', 'micro_batch',
-                   'lr_mult', 'branch', 'copies', 'rule', 'every', 'checkpoints', 'checkpoint_dtype')
+                   'lr_mult', 'branch', 'copies', 'rule', 'every', 'midpoints_every', 'checkpoints',
+                   'checkpoint_dtype')
 
 # H8 (loud/h8.py) on PR #40's recipe: Boost for the first 20% of updates, then Cut, 4 sequences per update.
 H8 = dict(
@@ -141,7 +139,7 @@ H8 = dict(
     compare_every=0,            # every N updates, the cosine of the block-local gradient to the identity scheme's (E6)
     rank_every=0,               # every N updates, the stable rank of ANVIL II's orthogonalization input (E6)
     arch='fixed',               # 'ngram' (E16): track-3 record #5's design, hashed n-gram value embeddings on every block
-    ngram_rows=1048576,         # E16: rows of each hashed n-gram table (the record's)
+    ngram_rows=TRACK3_ROWS,     # E16: rows of each hashed n-gram table (the record's)
     # latent objectives (loud/latent.py), cut mode, one per run:
     nextlat=0.0,                # E14: lambda of NextLat's latent-consistency loss (0: off)
     nextlat_target='ema',       # E14: the target latent, 'ema' (H4's teacher) or 'live' (the network's, detached)
@@ -179,8 +177,15 @@ DIAGNOSE = dict(
     tool=None,                  # one of TOOLS (loud/diagnostics.py)
     checkpoint=None,            # '<job id>:<file>' (e.g. e1.h8_synth.s0:ckpt_20.pt) or a path relative to the repo
     row=0,                      # the held-out sequence (0-31 of the 10M order's last 32) measured
+    sequences=64,               # snr_spectrum: the training sequences measured (the run's next, after the checkpoint)
+    batch=8,                    # snr_spectrum: the update batch the SNR is stated at (and the checkpoint run's)
+    estimators=['backprop', 'synthesis', 'time_k4', 'token_k4'],  # snr_spectrum: per-sequence gradients (ESTIMATORS)
 )
-TOOLS = ('cos_to_autograd', 'credit_dump', 'deep_readout_check', 'linearity_check', 'h8_validation', 'ngram_tiers')
+TOOLS = ('cos_to_autograd', 'credit_dump', 'deep_readout_check', 'linearity_check', 'h8_validation', 'ngram_tiers',
+         'snr_spectrum')
+# snr_spectrum's per-sequence gradients: autograd through the whole model, or H8 synthesis reading width / K rows
+# per token, assigned by time or by token (K = 1: the exact credits; E6's two assignments at E8's K = 4).
+ESTIMATORS = {'backprop': None, 'synthesis': (1, 'time'), 'time_k4': (4, 'time'), 'token_k4': (4, 'token')}
 
 
 def positive(o, *keys):
@@ -192,6 +197,20 @@ def positive(o, *keys):
 def checkpoints_on(o, seed):
     """Whether this seed's run keeps H4's fraction checkpoints (the `checkpoints` option: true, false or seeds)."""
     return o['checkpoints'] is True or (isinstance(o['checkpoints'], list) and seed in o['checkpoints'])
+
+
+def arch_checks(o, args):
+    """E16's arch and ngram_rows (H8 and the proxy)."""
+    if o['arch'] not in ('fixed', 'ngram'):
+        raise ValueError("arch must be 'fixed' or 'ngram'")
+    if 'ngram_rows' in args and o['arch'] != 'ngram':
+        raise ValueError('ngram_rows acts only with arch: ngram')
+    positive(o, 'ngram_rows')
+    if o['arch'] == 'ngram' and o['official_eval'] and (PRESETS[o['preset']] != PRESETS['track3']
+                                                        or o['ngram_rows'] != TRACK3_ROWS):
+        raise ValueError("the official scorer builds track 3's model from its GPTConfig() defaults (12 x 1024, "
+                         f"{TRACK3_ROWS:,} rows per table): preset track3 and the default ngram_rows, or "
+                         "official_eval: false")
 
 
 def check_types(o, table):
@@ -263,49 +282,33 @@ def proxy_options(args):
     if warmdown is not None and (isinstance(warmdown, bool) or not isinstance(warmdown, (int, float))
                                  or not 0 <= warmdown <= 1):
         raise ValueError("warmdown must be a fraction in [0, 1] (0: constant rates), or null for the recipe's")
-    if o['step_control'] not in STEP_CONTROLS or o['token_shaping'] not in SHAPINGS:
-        raise ValueError(f'step_control must be one of {STEP_CONTROLS}, token_shaping one of {SHAPINGS}')
-    variants = [key for key, on in (('smooth_tau', o['smooth_tau'] != 0), ('step_control', o['step_control'] != 'none'),
-                                    ('token_shaping', o['token_shaping'] != 'none'),
-                                    ('curvature_damping', o['curvature_damping'] != 0),
-                                    ('fisher_damping', o['fisher_damping'] != 0)) if on]
+    if o['step_control'] not in STEP_CONTROLS or o['snr_scaling'] not in SNR_ARMS:
+        raise ValueError(f'step_control must be one of {STEP_CONTROLS}, snr_scaling one of {SNR_ARMS}')
+    variants = [key for key, on in (('blur', o['blur'] != 0), ('step_control', o['step_control'] != 'none'),
+                                    ('snr_scaling', o['snr_scaling'] != 'none'), ('fisher', o['fisher'])) if on]
     if len(variants) > 1:
         raise ValueError(f'one change per variant: {variants} are separate experiments')
     for key, (mode, value) in VARIANT_OPTIONS.items():
         if key in args and o[mode] != value:
             raise ValueError(f'{key} acts only with {mode}: {value}')
-    if o['smooth_tau'] < 0:
-        raise ValueError('smooth_tau must be >= 0')
+    if o['blur'] < 0:
+        raise ValueError('blur must be >= 0')
     if not (o['accept_up'] >= 1 and 0 < o['accept_down'] <= 1):
         raise ValueError('accept_up must be >= 1 and accept_down in (0, 1]')
-    if o['agree_over'] not in ('active', 'all'):
-        raise ValueError("agree_over must be 'active' or 'all'")
-    if not 0 < o['cap_quantile'] <= 1:
-        raise ValueError('cap_quantile must be in (0, 1]')
-    if not 0.5 < o['agree_threshold'] <= 1:
-        raise ValueError('agree_threshold must be in (0.5, 1]: at least half the tokens always share the majority sign')
-    if o['per_sequence_grads'] and variants and variants[0] not in ('step_control', 'curvature_damping',
-                                                                      'fisher_damping'):
+    if o['step_control'] != 'none' and o['heldout'] < JUDGE_ROWS:
+        raise ValueError(f'step_control judges each update on {JUDGE_ROWS} held-out rows: heldout must be >= '
+                         f'{JUDGE_ROWS}')
+    if o['per_sequence_grads'] and variants and variants[0] not in ('step_control', 'snr_scaling', 'fisher'):
         raise ValueError(f"per_sequence_grads reads each sequence's plain gradient, which {variants[0]} replaces")
-    for key in ('damp_directions', 'damp_every', 'damp_where'):
-        if key in args and not o['curvature_damping']:
-            raise ValueError(f'{key} acts only with curvature_damping')
-    if o['curvature_damping'] < 0 or o['fisher_damping'] < 0:
-        raise ValueError('curvature_damping and fisher_damping must be >= 0 (0 = off)')
+    if o['snr_scaling'] != 'none' and not (o['per_sequence_grads'] and o['batch'] >= 2):
+        raise ValueError('snr_scaling reads per-sequence gradients (per_sequence_grads) over a batch of at least 2')
     if o['end_merge'] and not (o['recipe'] in ('pr40', 'pr46') and o['means'] and o['heldout']):
         raise ValueError("end_merge is the record's (recipe pr40 or pr46) and needs means and held-out sequences")
-    if (o['curvature_damping'] or o['fisher_damping']) and o['recipe'] != 'boostcut':
+    if (o['snr_scaling'] != 'none' or o['fisher']) and o['recipe'] != 'boostcut':
         raise ValueError("E8 and E9 hook boost-cut's ANVIL II (recipe: boostcut)")
-    if o['curvature_damping']:
-        positive(o, 'damp_directions', 'damp_every')
-        if not o['per_sequence_grads']:
-            raise ValueError('curvature_damping reads its noise from per-sequence gradients: set per_sequence_grads')
-        if o['batch'] < 2:
-            raise ValueError('curvature_damping needs batch >= 2: its noise is a variance across the sequences')
-        if o['damp_where'] not in ('step', 'pending'):
-            raise ValueError("damp_where must be 'step' or 'pending'")
-        if o['damp_directions'] > PRESETS[o['preset']][1]:
-            raise ValueError('damp_directions must be at most the width')
+    arch_checks(o, args)
+    if o['arch'] == 'ngram' and (o['recipe'] != 'pr40' or variants):
+        raise ValueError("arch ngram (E16) trains under PR #40's recipe (recipe: pr40), with no variant")
     return o
 
 
@@ -319,21 +322,23 @@ def population_options(args):
         raise ValueError("rule must be 'average', 'select' or 'ensemble'")
     if not 0 < o['branch'] < 1:
         raise ValueError('branch must be a fraction in (0, 1)')
-    positive(o, 'copies', 'every')
+    positive(o, 'copies', 'every', 'midpoints_every')
     if o['copies'] < 2:
         raise ValueError('a population needs at least two copies')
+    if o['batch'] % o['copies'] or (o['batch'] // o['copies']) % o['micro_batch']:
+        raise ValueError('each copy takes batch / copies sequences of every update: a whole number of micro-batches')
     if not o['heldout']:
         raise ValueError('the copies are scored on the held-out sequences: heldout must be > 0')
-    if branch_rows(o)[1] // o['copies'] < o['batch']:
-        raise ValueError('the sequences left after the branch give a copy no update')
+    branch, steps = branch_step(o)
+    if not 1 <= branch < steps:
+        raise ValueError('the branch must come after at least one update and before the last')
     return o
 
 
-def branch_rows(o):
-    """(single-run updates before the branch, update sequences left after it)."""
-    n = range_size(o['sequences']) - o['heldout']
-    prefix = round(o['branch'] * (n // o['batch']))
-    return prefix, n - prefix * o['batch']
+def branch_step(o):
+    """(the update after which the copies branch, the single run's updates): 121 of 606 at 10M and batch 8."""
+    steps = (range_size(o['sequences']) - o['heldout']) // o['batch']
+    return round(o['branch'] * steps), steps
 
 
 def h8_options(args):
@@ -366,14 +371,10 @@ def h8_options(args):
         raise ValueError("nextlat_target must be 'ema' or 'live', nextlat_onset 'handoff' or 'start'")
     if o['latent_boost'] not in ('none', 'plus', 'only'):
         raise ValueError("latent_boost must be 'none', 'plus' or 'only'")
-    if o['arch'] not in ('fixed', 'ngram'):
-        raise ValueError("arch must be 'fixed' or 'ngram'")
+    arch_checks(o, args)
     if o['arch'] == 'ngram' and o['mode'] != 'cut':
         raise ValueError("arch ngram runs in cut mode (E16): its n-gram tables feed every block, so synthesis's "
                          "block-local gradients are not defined for them")
-    if 'ngram_rows' in args and o['arch'] != 'ngram':
-        raise ValueError('ngram_rows acts only with arch: ngram')
-    positive(o, 'ngram_rows')
     latent = [k for k, on in (('nextlat', o['nextlat'] > 0), ('latent_boost', o['latent_boost'] != 'none')) if on]
     if len(latent) > 1:
         raise ValueError('nextlat (E14) and latent_boost (E15) are separate experiments')
@@ -464,6 +465,14 @@ def diagnose_options(args):
     check_types(o, DIAGNOSE)
     if o['row'] >= 32:
         raise ValueError('row must be one of the 32 held-out sequences (0-31)')
+    snr = [k for k in ('sequences', 'batch', 'estimators') if o[k] != DIAGNOSE[k]]
+    if snr and o['tool'] != 'snr_spectrum':
+        raise ValueError(f'{snr} apply to snr_spectrum only')
+    positive(o, 'sequences', 'batch')
+    if not o['estimators'] or set(o['estimators']) - set(ESTIMATORS) or len(set(o['estimators'])) < len(o['estimators']):
+        raise ValueError(f'estimators: distinct names from {sorted(ESTIMATORS)}')
+    if o['sequences'] < 2 * o['batch']:
+        raise ValueError('sequences must be at least twice batch (the SNR needs the variance over sequences)')
     return o
 
 

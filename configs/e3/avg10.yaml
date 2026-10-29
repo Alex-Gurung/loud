@@ -1,20 +1,20 @@
-# E3, rule (a): branch the batch-4 baseline (e1.bp_b4) at 20% of the epoch into 4 copies, each fed every 4th remaining
-# sequence; every 10 updates per copy, all copies continue from their weights' mean. Calibration: this should land
-# near a single run at batch 16, which the records found worse than batch 4. Success (any E3 variant): beats e1.bp_b4
-# by more than 0.02 on final val loss over seeds 0-2. Kill: none does, and the midpoints (population.jsonl) show no
-# barrier, i.e. the copies never explored anything the single run did not.
+# E3: population as local SGD (v2). The batch-8 proxy (e1.bp_b8's trajectory) to update 121 of 606, then 4 copies:
+# each update's 8 sequences go 2 to each copy, so every copy makes all 485 remaining updates at local batch 2 with the
+# baseline's rates, each with its own optimizer state. This arm: rule (a): every 10 update(s), every copy continues
+# from the mean of the copies' weights and optimizer state. Every 10 updates population.jsonl has each pairwise
+# midpoint's H3 loss and barrier. Success: any arm beats e1.bp_b8 by 0.02 (Lin et al. found local SGD after the early
+# phase beats large-batch SGD at equal steps; at this small batch it may not appear).
 experiment: e3
 variant: avg10
 task: population
 seeds: [0, 1, 2]
-priority: 55
+priority: 64
 after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0,
         verify.population_smoke.s0]
 args:
   recipe: boostcut
   sequences: 10M
   heldout: 32
-  batch: 4
-  checkpoints: true
+  batch: 8
   rule: average
   every: 10

@@ -1,5 +1,5 @@
-# A complete short run on the 1M range (E2's antithetic blur, tau 3) before its experiment's cells: the GPU paths the CPU checks cannot reach,
-# and the step time behind the README's cost estimate.
+# A complete short run on the 1M range (E2's antithetic blur, s 0.1) before its experiment's cells: the GPU paths the
+# CPU checks cannot reach, and the step time behind the cost estimate.
 experiment: verify
 variant: blur_smoke
 task: proxy
@@ -11,5 +11,5 @@ args:
   sequences: 1M
   heldout: 32
   batch: 8
-  smooth_tau: 3.0
+  blur: 0.1
 notes: Pipeline check only; its numbers are not a result.

@@ -19,10 +19,15 @@ MODULE = 'noise_arch_model'
 def module():
     """train/arch/model.py (self-contained: it imports only torch), loaded once by its pinned path."""
     if MODULE not in sys.modules:
-        spec = importlib.util.spec_from_file_location(MODULE, refs.verified('noise', 'train/arch/model.py'))
+        spec = importlib.util.spec_from_file_location(MODULE, model_file())
         sys.modules[MODULE] = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(sys.modules[MODULE])
     return sys.modules[MODULE]
+
+
+def model_file():
+    """The pinned model file, which the official scorer loads for track 3 (utils/eval.py --model)."""
+    return refs.verified('noise', 'train/arch/model.py')
 
 
 def config(n_layer, width, ngram_rows):

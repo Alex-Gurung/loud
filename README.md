@@ -1,17 +1,22 @@
 # loud: a one-GPU research harness for the Noise benchmark
 
-Implements the [engineering handoff](Noise%20Forward-Only%20Research%20Harness%20Engineering%20Handoff.md) (the
-plan): a single-GPU harness for [Noise](https://github.com/qlabs-eng/noise), pretraining a fixed 37.7M-parameter GPT
-without backpropagation. It includes a GPU job queue and workers that follow the stylo setup (Kubernetes Jobs on
-EIDF, the GPU cluster, sharing one volume).
+Implements the [engineering handoff v2](Noise%20Forward-Only%20Research%20Harness%20Engineering%20Handoff%20v2.md)
+(the plan; [v1](Noise%20Forward-Only%20Research%20Harness%20Engineering%20Handoff.md) is kept for its history): a
+single-GPU harness for [Noise](https://github.com/qlabs-eng/noise), pretraining a fixed 37.7M-parameter GPT without
+backpropagation. It includes a GPU job queue and workers that follow the stylo setup (Kubernetes Jobs on EIDF, the GPU
+cluster, sharing one volume).
 
 **Terms.**
 - **Proxy:** backprop with the record's optimizer, a development stand-in, never an entry.
+- **H8:** an autograd emulation of the 10M record's Boost and Cut (`loud/h8.py`): ordinary autograd on the *cut
+  graph*, the fixed network with the inputs to every key, value and gate held, which is what the chain measures. It
+  runs at backprop speed, so most forward-only questions are asked there first and only winners go to the real chain.
+- **Sites:** S0, the raw embedding, and S1 to S8, each block's mid stream (after attention, before the MLP).
 - **Identity path:** track 2's forward-only estimator (PR #26). One Hadamard cycle of 512 probes at the top stream,
   with credit handed down the residual scalars.
-- **Cut chain:** track 1's record estimator (PR #40).
+- **Cut chain:** track 1's 10M record estimator (PR #40), the real forward-only chain (`loud/cut.py`).
 - **ANVIL II:** the records' optimizer for block matrices.
-- **H1–H7 and E1–E12:** the plan's infrastructure pieces (its section 3) and experiments (section 4).
+- **H1–H8 and E1–E16:** the plan's infrastructure pieces (its section 3) and experiments (section 5).
 - **Verification 1–3:** the plan's three checks before any experiment (section 2).
 
 ## Status
@@ -22,30 +27,36 @@ EIDF, the GPU cluster, sharing one volume).
 | Record checkpoint `track1_boostcut_final.pt` (`499dff9f…`) | downloaded, hash checked |
 | H1 backprop proxy (`loud/proxy.py`) on the shared loop (`loud/train.py`); recipes boost-cut, PR #40, PR #46 | done; CPU tests on a tiny model |
 | H2 per-sequence gradients (`loud/pergrad.py`) | done, with an unbiased per-matrix noise scale |
-| H3 held-out scorer (`loud/heldout.py`) | done; every call logged to `heldout.jsonl` |
-| H4 fraction checkpoints and the record's nine trajectory means (`loud/checkpoints.py`); the record's end merge | done; means scored on H3 |
+| H3 held-out scorer (`loud/heldout.py`), on all 32 rows or a logged subset | done; every call logged to `heldout.jsonl` |
+| H4 fraction checkpoints (per seed), ANVIL II's state, the record's nine trajectory means (`loud/checkpoints.py`) | done; means scored on H3 |
 | H5 identity path, PR #26 on one GPU (`loud/identity.py`) | done; CPU tests: one update equals PR #26's own |
-| H5 Cut chain, PR #40 on one GPU (`loud/cut.py`, task `cut`), with v2's `rows`, `row_assign`, `prior` and E13's `row_budget` hook | done; CPU tests: 4 updates equal PR #40's own loop on 8 processes |
-| H6 diagnostic toolkit (`loud/diagnostics.py`, task `diagnose`): the plan's five tools and E5's `credit_recovery` | done; CPU tests on tiny models; `configs/h6/`, `configs/e5/` |
-| H7 runner, results table, per-experiment plots (`run.py`, `collect.py`, `python3 -m loud.plots <exp>`) | done |
-| E1 to E10 | configs in `configs/e<N>/`; see What runs |
+| H5 Cut chain, PR #40 on one GPU (`loud/cut.py`), with v2's `rows`, `row_assign`, `prior` and E13's `row_budget` hook | done; CPU tests: 4 updates equal PR #40's own loop on 8 processes |
+| H6 diagnostic toolkit (`loud/diagnostics.py`, task `diagnose`): v2's tools on H8's cut graph and reforward | done; CPU tests on tiny models |
+| H7 runner, results table, per-experiment plots and tables (`run.py`, `collect.py`, `python3 -m loud.plots <exp>`) | done |
+| H8 (`loud/h8.py`): cut, synthesis and Boost modes, probing schemes, `reforward`; the track-3 model (`loud/arch.py`) | done; CPU tests: synthesis matches PR #40's Cut (cosine ≥ 0.996 per matrix), Boost matches PR #40's |
+| E1 to E16 | configs in `configs/e<N>/`; see What runs |
 | Port checks against their sources (`compare` task) | done |
-| GPU queue and workers, one per GPU (`loud/jobqueue.py`, `loud/worker.py`, `worker/`) | done; tested end to end on CPU |
-| Independent review (Codex and Claude reviewers, [review/](review/README.md)) | rounds 1 to 6 triaged in [the ledger](review/LEDGER.md) |
+| GPU queue and workers, one per GPU, two-GPU pods (`loud/jobqueue.py`, `loud/worker.py`, `worker/`) | done; tested end to end on CPU |
+| Independent review (Codex and Claude reviewers, [review/](review/README.md)) | triaged in [the ledger](review/LEDGER.md) |
 
-Not built, on purpose:
-- **E5's implementation in the chain.** The plan says not to build it before the maintainers answer the rules question
-  in its section 6 (post it as an issue on qlabs-eng/noise). The diagnostic runs regardless.
-- **E9's kernel version** (the curvature term and sampled-label loss from the chain's probes). The plan builds it only
-  if the proxy test (`configs/e9/`) beats the batch-4 baseline by 0.02.
-- **E12** (30M runs, the plan's P3, for a rented 8×H100 node): its first one-GPU run, backprop on 30M with record #3's
-  recipe and end merge, waits in `configs/followups/e12/`, which a directory submission skips.
+Waiting, on purpose:
+- **E5's implementation in the chain.** The plan builds it only after the maintainers answer its rules question
+  (section 7; post it as an issue on qlabs-eng/noise, together with E14's and E15's auxiliary-state question). The
+  diagnostic runs regardless.
+- **E8's intervention and E9** wait in `configs/followups/`, which a directory submission skips: E8's only if its
+  diagnostic shows partial rows pushing a large share of the momentum's energy below SNR 1, E9 (P3) only if E8 shows
+  per-direction scaling matters with exact gradients. E9's kernel version follows only if it beats `e1.bp_b8` by 0.02.
+- **E14's and E15's follow-ups** (the teacher and onset variants) wait in `configs/followups/` for the first arms.
+- **E12** (30M, P3, rented 8×H100): there is no 8-GPU path; its one-GPU backprop run waits in `configs/followups/e12/`.
+- **Confirming a winner on the real chain** (the Cut chain on the 1M slice): its configs are written once H8 names
+  the winners, with the H5 flags (`rows`, `row_assign`, `prior`, `row_budget`).
 
-Nothing has run on a GPU yet. Every config together is 184 one-GPU jobs, roughly 55 GPU-hours by the estimates in
-the configs (most of it the Cut chain, about 35 minutes per 1M-slice run; a 10M proxy run is about 8 minutes), so
-about 14 hours on four workers or 7 on eight. They write about 95 GB (the final weights, about 0.15 GB, and the H4
-checkpoints, about 0.4 GB, per training run); workers pause when the shared volume has 15 GB left. All estimates
-scale the published 8×H100 times; the first runs measure them.
+Nothing has run on a GPU yet. The 154 jobs are about 21 GPU-hours on one H100 by v2's single-GPU estimates (10M
+backprop about 5 minutes, H8 cut mode about 6, H8 synthesis about 10; the track-3 model about 5 times that), so a
+day on one worker or about 11 hours on two. P1 is about 14 of those hours, and it runs first. They write about 30 GB:
+the final weights (0.15 GB per run, 1.5 GB for the track-3 model), and H4 checkpoints only where a diagnostic reads
+them (`e1.bp_b8.s0` with ANVIL II's state, `e1.h8_synth.s0`), in bf16. Workers pause when the shared volume has 15 GB
+left. The first runs measure the times.
 
 ## Running on GPUs
 
@@ -80,51 +91,53 @@ The CPU pod loses its pod-local disk on a restart: `scripts/cpu_env.sh` rebuilds
 On a GPU you already have: `python run.py --config configs/verify/bp_b8.yaml`. A direct run works in
 `s<seed>.direct<k>/`. It becomes `s<seed>/` when it finishes, unless that exists or the queue holds the same job.
 
-### What runs, and the gates
+### What runs, and in what order
 
 The plan says to stop if a verification disagrees by more than seed noise (0.01), so every experiment cell waits for
 its gates. A job runs only when each job in its `after` list is done and passed its own check. The comparison jobs
 wait only for their runs to finish (`after_done`), not to pass, so they still run when a final-loss gate fails, which
 is when they are needed to tell a port error from an environment difference.
 
-1. **Smoke runs.** `verify.smoke`: a complete 57-update proxy run on the 1M range through every H1–H4 path, the saved
-   means and optimizer state and official scoring; every other job waits for it. Each new method has its own complete
-   short run before its cells: `identity_smoke`, `cut_smoke` (128 token-assigned rows with the identity prior, H4,
-   the end merge),
-   `population_smoke`, `curvature_smoke` and `fisher_smoke`.
-2. **Verification 1**, `verify.score_record`: the record checkpoint must rescore to 3.94481 (val) and 3.93696 (test),
-   within 1e-5.
-3. **Verification 2**, `verify.bp_b8`: the proxy on the 10M set, one sequence per forward (the 8-GPU layout). Target:
-   boost-cut's ledger run `bp38_s0` of `backprop_preset.py`, val 3.7083 and test 3.7014, within 0.02. Three checks
-   use the per-step logs:
-   - `verify.bp_b8_ledger`: the training loss at every update the ledger logged (every 61) agrees within 0.01;
-   - `verify.bp_b8_script` and `verify.bp_b8_onefwd`: the unmodified script, and the proxy with whole-batch forwards
-     like it;
-   - `verify.bp_b8_match`: those two agree within 0.002 for 50 updates, and within 0.01 at the end.
-4. **Verification 3**, `verify.identity`: the identity path for a full 10M epoch, against PR #26's 4.1772 (within
-   0.02). `verify.identity_match` compares its first 20 updates with PR #26's published 8-GPU log.
-5. **The Cut chain's check**, `verify.cut_prefix`: the 10M schedule for 262 updates (all 242 Boost and 20 Cut), held by
-   `verify.cut_prefix_match` against PR #40's published 8-GPU log: within 0.003 over the first 20 updates (the plan's
-   steps 2 and 10) and within the plan's seed noise, 0.01, over all 262 (step 100 and the first Cut updates). Same
-   seed, data and draws, so only float rounding separates them. No measurement sets those bounds yet:
-   `verify.cut_prefix_reversed` runs the same prefix with the 8-way gradient sum in reversed rank order, and
-   `verify.cut_prefix_reversed_match` reports how far rounding alone moves the losses, the reference for relaxing
-   them.
-6. **E1**, the backprop baselines at batch 8 and batch 4 (the same rates), three seeds each, with held-out scoring
-   (`bp_b8` seed 0 keeps the H4 checkpoints and ANVIL II's state for the diagnostics); `e1.identity`, seed 0.
-7. **H6** on `e1.bp_b4.s0`'s checkpoints (`configs/h6/`): `credit_dump` and `cos_to_autograd` at all five fractions;
-   `token_map_svd`, `linearity_check` and `direction_stats` at 20% and 100%. Each measures held-out sequences.
-   `direction_stats` takes the top directions of the pending update (from the optimizer state `bp_b4` saves with
-   each checkpoint); its curvature is a central difference of autograd gradients, because flex attention has no
-   double backward.
-8. **E5's diagnostic** (`configs/e5/`): `credit_recovery` at 20% and 100%; `python3 -m loud.plots e5` prints the plan's
-   9 × 2 table.
-9. **Proxy experiments**, three seeds each, against their E1 baseline: E2 (`smooth_tau` 1, 3, 10) and E4 (`reject`,
-   `adapt`, `adapt_t60`, and both without the warmdown at seed 0) and E10 (`cap`, `agree` at 0.6, 0.7, 0.8) at batch 8;
-   E3 (five population rules, and `bp_b16`, the single batch-16 run averaging should land near) and E8 (three
-   dampings and the literal placement) and E9 (three dampings) at batch 4; E10 also counts agreement over all tokens
-   (`agree_all_t60/70/80`), the plan's literal reading. E8 also
-   waits for H6's `direction_stats`, which the plan runs first and which says where its knob should sit.
+The queue claims by priority, then seed: within a priority band every arm's seed 0 runs before any seed 1, so one GPU
+gives a first read of every arm early. The bands, in order (`priority:` in each config):
+
+1. **Smoke runs (1–4).** `verify.smoke`: a complete 57-update proxy run on the 1M range through every H1–H4 path and
+   official scoring; every other job waits for it. Each method has its own short complete run before its cells:
+   `h8_smoke`, `nextlat_smoke`, `latent_boost_smoke`, `track3_smoke` (the track-3 model at full size, scored with its
+   own model file), `identity_smoke`, `cut_smoke`, `population_smoke`, `blur_smoke`, `step_control_smoke`.
+2. **Verifications (5–11).**
+   - `verify.score_record` (verification 1): the record checkpoint must rescore to 3.94481 (val) and 3.93696 (test),
+     within 1e-5.
+   - `verify.bp_b8` (verification 2): the proxy on the 10M set, one sequence per forward. Target: boost-cut's ledger
+     run `bp38_s0` of `backprop_preset.py`, val 3.7083 and test 3.7014, within 0.02. `verify.bp_b8_ledger` checks the
+     training loss at every update the ledger logged (every 61) within 0.01; `verify.bp_b8_script` (the unmodified
+     script) and `verify.bp_b8_onefwd` (the proxy with whole-batch forwards like it) must agree within 0.002 for 50
+     updates and 0.01 at the end (`verify.bp_b8_match`).
+   - `verify.identity` (verification 3): the identity path for a full 10M epoch, within 0.02 of PR #26's 4.1772;
+     `verify.identity_match` compares its first 20 updates with PR #26's published 8-GPU log.
+   - `verify.cut_prefix`: the real Cut chain for 262 updates of the 10M schedule (242 Boost, 20 Cut), held to PR #40's
+     published 8-GPU log within 0.003 over 20 updates and 0.01 over all 262; `verify.cut_prefix_reversed` measures how
+     far float rounding alone moves them.
+3. **H8's validation (20).** `h6.h8_validation` on `e1.bp_b8.s0`'s 50% checkpoint: H8 synthesis against PR #40's Cut
+   estimate (cross-token patches off, every MLP unit routed), every matrix's cosine at least 0.99. Every H8 experiment
+   waits for it.
+4. **H6 diagnostics (30–40)** on `e1.h8_synth.s0`'s checkpoints, each on held-out sequences: `credit_dump` at 0, 10,
+   20, 50 and 100% (E7's precondition: `e7.precondition` passes only if the variance ratio is at most 0.5 at 50% and
+   100%), `cos_to_autograd` and `linearity_check` at 20% and 100%; `snr_spectrum` (E8's diagnostic) on
+   `e1.bp_b8.s0`'s.
+5. **E1, the baselines (50)**, three seeds: backprop at batch 8 and 4 (`bp_b8` seed 0 keeps the H4 checkpoints with
+   ANVIL II's state), H8 synthesis with the identity scheme (`h8_synth`, seed 0's checkpoints feed H6, E5 and E13),
+   H8 cut mode with and without Boost; `e1.identity`, one seed.
+6. **P1 experiments (55–64)**, three seeds each:
+   - 55: E6 (`time` and `token` row assignment at K = 4, 8, 16) and E7 (the identity prior at m = 64, 128; gated by
+     `e7.precondition`), against `e1.h8_synth`;
+   - 60: E14 (NextLat at λ = 0.3, 1, 3) and E15 (latent target beside or instead of the lens), against `e1.h8_cut`;
+   - 62: E2 (`blur` 0.03, 0.1, 0.3) and E4 (`reject`, `adapt`, `adapt_nowd`), against `e1.bp_b8`;
+   - 64: E3 (local SGD: `avg1`, `avg10`, `avg50`, `select50`, `ensemble`), against `e1.bp_b8`.
+7. **P2 (68–75)**: E5's diagnostic and E13's tiers diagnostic (68); E10 (`clip`, `agree`), E11 (`runway`) and E13
+   (θ = 2, 3, 4, each gated on the tiers: the low tier under 10% of the credit energy with over 40% of the tokens) at
+   70; E16 (75): the track-3 model under backprop and under H8 cut mode, and the fixed model under backprop with the
+   same recipe, two seeds each (`e1.h8_cut` seeds 0–1 is the fourth arm).
 
 ### How the queue works
 
@@ -137,6 +150,7 @@ is when they are needed to tell a port error from an environment difference.
   attempts stay where they are.
 - **Leases.** The worker heartbeats every 30 s. If a pod dies, its job's lease expires after 5 minutes and the job is
   queued again, with up to 3 attempts. SIGTERM (pod deletion) gives the job back immediately.
+- **Order.** Lower `priority` first, then lower seed, then submission time.
 - **Resubmitting** the same config:
   - a job that has not started takes the newer code, priority, `after` and `gpu`;
   - a crashed (failed) job is queued again;
@@ -167,14 +181,16 @@ is when they are needed to tell a port error from an environment difference.
 ```
 loud/            the harness package (frozen into each job's snapshot)
   train.py       the shared loop: warmup, timing, H3/H4, scoring      data.py      hash-checked splits, order, held-out
-  proxy.py       H1 backprop proxy (+ H2 per-sequence gradients)      identity.py  H5 identity path (PR #26)
+  proxy.py       H1 backprop proxy (+ H2 per-sequence gradients)      h8.py        H8: cut, synthesis and Boost modes
   heldout.py     H3                                                   checkpoints.py  H4
   score.py       official utils/eval.py scoring in a fresh process    compare.py   per-update loss check of two runs
-  cut.py         H5 Cut chain (PR #40)                                diagnostics.py  H6 and E5's diagnostic
-  variants.py    E2, E4, E10 (proxy options)                          population.py   E3: copies of the proxy
-  curvature.py   E8: steps by curvature-to-noise (proxy)              fisher.py    E9: true-Fisher left factor (proxy)
-  anvil.py       ANVIL II with a hook for E8, E9                      plots.py     per-experiment plots and tables
-  reference.py   run a pinned external script unmodified
+  identity.py    H5 identity path (PR #26)                            cut.py       H5 Cut chain (PR #40)
+  diagnostics.py H6, E5's and E8's diagnostics                        arch.py      E16: track-3 record #5's model
+  variants.py    E2, E4 (proxy options)                               population.py   E3: local SGD over copies
+  snr.py         E8: SNR spectrum and SNR-scaled steps (proxy)        fisher.py    E9: true-Fisher preconditioning
+  latent.py      E14 NextLat, E15 latent targets (H8)                 ema.py       H4's EMA teacher (E14, E15)
+  ngram.py       E13: streaming Witten-Bell n-grams, copies, tiers    anvil.py     ANVIL II with a hook for E8, E9
+  reference.py   run a pinned external script unmodified              plots.py     per-experiment plots and tables
   options.py     task registry, option tables and checks (no torch)   run.py       H7 runner
   collect.py     H7 results table                                     refs.py      pinned external imports
   jobqueue.py, worker.py, submit.py, status.py, snapshot.py            the GPU queue
@@ -198,7 +214,7 @@ Cut chain's checks run it eagerly (no compilation) with a 512-token vocabulary.
 ```yaml
 experiment: e1
 variant: bp_b4          # one change per variant; the file is configs/<experiment>/<variant>.yaml
-task: proxy             # proxy | identity | cut | population | score | reference | compare | diagnose | noop
+task: proxy             # proxy | h8 | identity | cut | population | score | reference | compare | diagnose | gate | noop
 seeds: [0, 1, 2]
 priority: 50            # lower runs first
 after: [verify.bp_b8.s0]
@@ -244,29 +260,20 @@ runs after the last update, timed, on the 32 held-out sequences; `final_plain.pt
   the same forward under bf16 autocast); `final.pt`, the scored weights, is always exact. `ckpt_100.pt` exists only
   for complete runs. Verification runs reproduce the published layout and keep only `final.pt`.
 
-**Proxy variants** (`loud/variants.py`) are one option each, off by default and at most one per run. The default
-path is unchanged: the CPU test of the float32 mean still holds bit for bit. All three cells run at batch 8 against
-`e1.bp_b8`.
-- **E2, `smooth_tau`.** The sites are the raw embedding and each block's mid stream. Each token gets a random r of
-  length tau × 0.01 × its RMS × √512. That is PR #40's chain probe, a ±1 Hadamard row times `chain_sigma` (0.01) times
-  the per-token RMS, which answers the plan's open question: the step is relative to each token's RMS. A clean no-grad
-  forward gives the RMS and `train_loss`; two forwards add +r and −r, and the mean of their gradients is the blurred
-  loss's gradient. `blurred_loss` is logged too. A CPU test checks the length, the shared r and the odd-order
-  cancellation (the error falls 4× when r halves). About 2.3× a baseline update.
-- **E4, `step_control`.** `reject`: after the step, one no-grad forward on the same micro-batches; if the loss rose,
-  the weights and all optimizer state (ANVIL II's rails and energy, Adam's moments and counts) are restored from a
-  snapshot, and the batch feeds no update. ANVIL II's clock, which drives its momentum schedule, keeps following the
-  loop's update count, as the warmdown does. `adapt` also multiplies every rate (and so ANVIL II's decay) by
-  `accept_up` after an accept and `accept_down` after a reject, on top of the schedule. `warmdown: 0` removes the hand
-  warmdown; ANVIL II's own momentum schedule stays. The plan's 1.05 and 0.8 settle at 82% acceptance, so `adapt_t60`
-  uses 0.9294 for its stated 0.6. Logged: `accepted`, `trial_loss`, `lr_multiplier`, and `lr` is the effective rate.
-  About 1.35× a baseline update.
-- **E10, `token_shaping`.** Every `nn.Linear` weight gradient (blocks, value-embedding gates, LM head; the embedding
-  tables keep theirs) is formed in hooks from each token's credit, the output gradient, and its input, with autograd's
-  own matmul (bit for bit on CPU). `cap` caps each token's credit norm at the batch's `cap_quantile`, per layer; it
-  keeps credits and inputs in bf16 until the batch is done (about 0.3 GB per sequence), roughly 1.1× a baseline update.
-  `agree` keeps entries where at least `agree_threshold` of the tokens with a nonzero contribution share the majority
-  sign; the counts are exact sign matmuls summed over micro-batches, roughly 2× a baseline update.
+**Proxy variants** are one option each, off by default and at most one per run; the default path is unchanged (the
+CPU test of the float32 mean still holds bit for bit). Every proxy experiment runs at batch 8 against `e1.bp_b8`.
+- **E2, `blur: s`** (`loud/variants.py`). The sites are the raw embedding and each block's mid stream. Each token gets
+  r = s × its RMS × √512 × u, u uniform on the sphere: each coordinate's RMS displacement is s times the token's RMS,
+  the units of PR #40's `chain_sigma` (0.01). A clean no-grad forward gives the RMS and `train_loss`; two forwards add
+  +r and −r, and the mean of their gradients is the gradient of the loss averaged over activation noise, to second
+  order. `blurred_loss` is logged too. Arms: s = 0.03, 0.1, 0.3. About 2.3× a baseline update.
+- **E4, `step_control`** (`loud/variants.py`). Each update is judged on 4 of the 32 held-out rows, rotating, by
+  their loss under the old and the new weights (2 forwards of 4 sequences). `reject`: if it rose, the weights and the
+  optimizer state (ANVIL II's rails and energy, Adam's moments and counts) are restored from a snapshot and the batch
+  feeds no update; ANVIL II's clock, which drives its momentum schedule, keeps following the loop's update count, as
+  the warmdown does. `adapt` also multiplies every rate by 1.1 after an accept and 0.87 after a reject (steady at 59%
+  acceptance), on top of the schedule; `adapt_nowd` removes the hand warmdown (`warmdown: 0`). Logged per update:
+  `accepted`, `heldout_before`, `heldout_after`, `judge_rows`, `lr_multiplier`; `lr` is the effective rate.
 
 **The identity path** imports PR #26's `train/speedrun/run.py@2604407` unchanged: its model, init, optimizer,
 settings and `FastRelay` estimator. There is one estimator per virtual GPU, seeded by its rank as on 8 GPUs. Their
@@ -275,27 +282,25 @@ one update over two virtual GPUs equals PR #26's FastRelay at ranks 0 and 1 with
 PR #26 only in the data order: the records' fixed order, `randperm(seed 1)`, for every seed (PR #26 shuffles with
 `seed + 1`; the two are identical at seed 0). v2 uses it for E1's single run and verification 3.
 
-**E3, populations** (task `population`). The job runs the batch-4 baseline's first 20% itself (the same code and
-seed as `e1.bp_b4`, so the same trajectory, about a minute) and branches into 4 copies. Copy c takes every 4th of the
-remaining sequences, `rest[c::4]`, in batches of 4. The copies take turns, so compute equals one run. Each copy update
-counts as the single run's next update number, which sets its rate and ANVIL II's clock, so the warmdown ends where
-the single run's does. Rules: `average` (every N updates per copy, weights only; each copy keeps its optimizer
-state), `select` (the worst copy takes the best's weights and optimizer state, by H3), `ensemble` (the mean at the end
-if H3 prefers it to the best copy). `population.jsonl` logs every N updates each copy's and each pairwise midpoint's
-held-out score, and the barrier (midpoint minus the worse end). H4: the trunk's checkpoints up to the branch, then each
-copy's at 50% and at its end (`ckpt_50.c<k>.pt`); no trajectory means, since the rules are E3's own merges.
+**E3, local SGD** (task `population`). The job runs `e1.bp_b8`'s trajectory (the same code and seed) to update 121 of
+606 and branches into 4 copies; each update's 8 sequences then go 2 to each copy, so every copy makes all 485
+remaining updates at local batch 2 with the baseline's rates and update numbers (and so ANVIL II's clock), each with
+its own optimizer state. Rules: `average` (every H = 1, 10, 50 updates: the mean of the weights and of every
+optimizer state tensor), `select` (every 50 updates the worst copy takes the best's weights and state, by H3),
+`ensemble` (the mean at the end if H3 prefers it to the best copy). `population.jsonl` logs every 10 updates, before
+the rule acts at that update, each copy's and each pairwise midpoint's held-out loss and the barrier (midpoint minus
+the worse end). Forward and backward cost one run; optimizer compute and state are 4×.
 
-**E8 and E9** replace ANVIL II's orthogonalization through one hook (`loud/anvil.py`); a CPU test checks the hooked
+**E8 and E9** change ANVIL II's orthogonalization through one hook (`loud/anvil.py`); a CPU test checks the hooked
 optimizer reproduces boost-cut's ANVIL II bit for bit, and with both off the proxy uses the original.
-- **E8** (`curvature_damping`): every 50 updates, the top 16 singular directions of each block matrix's pending
-  update, with the curvature along each (central differences of float32 gradients on 2 of the batch's sequences: 1,536
-  passes, about 30 s per refresh) and the across-sequence noise of the gradient along it (H2, averaged until the next
-  refresh). Each update's step along a direction is scaled by `1 / (1 + c / (B h^2 lambda))`, lambda in squared
-  ANVIL II steps. About 20 minutes per 10M run on one H100 (an estimate: `verify.curvature_smoke` times it).
-- **E9** (`fisher_damping`): a damped inverse root of the true Fisher's output-side factor (from a backward with
-  labels sampled from the model) multiplies the pending update in place of `polar()`, at the polar factor's norm.
-  About 8 minutes per 10M run (an estimate). The plan's kernel version in the Cut port waits on this test: if no
-  damping beats the batch-4 baseline by 0.02, it is skipped.
+- **E8** (`loud/snr.py`). The diagnostic is H6's `snr_spectrum` (above). The intervention (`snr_scaling`:
+  `control`, `snr`, `rate`; in `configs/followups/e8/`): polar's U Vᵀ becomes U diag(r) Vᵀ with r from the update's 8
+  per-sequence projections, ANVIL II's lane gain and renormalization off in every arm. One SVD per block matrix per
+  update.
+- **E9** (`fisher`, `loud/fisher.py`; P3, in `configs/followups/e9/`): the momentum is left-preconditioned by
+  (F + δI)^(−1/2), F the output-side Fisher from a backward with labels sampled from the model and δ = 1e-3 × its mean
+  eigenvalue, before ANVIL II's unchanged orthogonalization. The control is `e1.bp_b8`. Run only if E8 shows that
+  per-direction scaling matters with exact gradients; the kernel version follows only if this beats `e1.bp_b8` by 0.02.
 **The Cut chain** (task `cut`) imports PR #40's `archive/10M/train/val/run.py@4ef285e` (10M record #14, 3.676 in
 2101 s on 8×H100) unchanged: model, init, settings, the Boost and Cut estimators, optimizers, schedule and end merge.
 That script runs at batch 4 on 8 GPUs, two per sequence. The two GPUs of a sequence take complementary halves of every
@@ -331,48 +336,87 @@ order changes only the rounding). Differences from PR #40:
   and about 8 minutes for the end merge (less with `merge_batch`). A 1M-slice run takes about 35 minutes; the full
   10M epoch about 4.6 hours.
 
-**H8 synthesis experiments** (task `h8`, `mode: synthesis`, one option per run, each a fixed rule; `loud/h8.py`):
+**H8** (task `h8`, `loud/h8.py`) trains with PR #40's recipe (its model, init, ANVIL II + Adam, rates, warmdown,
+Boost for the first 20% of updates, then Cut, and the optimizer handoff) at its 4 sequences per update, with one
+forward of the whole batch. It rests on one fact: with the other tokens' keys and values held at their clean values
+and each token's own query live, every path from a site to a token's loss stays inside that token's row. So autograd
+on the *cut graph* (`cut_forward`: the fixed network with every stream-derived input to the keys, values and the
+value-embedding gate detached) gives, at every site at once, what the chain measures. H8 has neither the record's
+cross-token patches nor its top-512 MLP routes, so H8 and backprop bracket the cross-token credit.
+- **Modes of the Cut phase.** `cut`: one backward of the cut graph (block i's MLP also gets the own-query path
+  through block i + 1, which PR #40 leaves out). `synthesis`: the exact credits at S0–S8 and the top stream, put
+  through a probing scheme, then each sublayer's parameter gradient from its own output's credit alone, one
+  `autograd.grad` per sublayer, so a transformed credit never leaks between blocks or from an MLP into its attention.
+  With the identity scheme this is PR #40's core estimate. Boost is PR #40's: each sublayer against the shared head's
+  readout of the stream right after it (`boost: false` starts Cut at the first update).
+- **Schemes** (synthesis): `rows` m reads m rows of a site's signed Hadamard basis per token, scaled by 512 / m
+  (unbiased through the random column signs); `row_assign: time` (all tokens of update s share rows from
+  (s mod K) m, K = 512 / m) or `token` (token t reads rows from (t mod K) m); `prior: identity` measures only the
+  residual of the identity-path guess (E7). Logs: every `compare_every` updates the cosine of the summed weight
+  gradient to the identity scheme's (`cosine_to_identity`), and every `rank_every` the stable rank of ANVIL II's
+  orthogonalization input per matrix type (`stable_rank`).
+- **`reforward`** (`Replay`) reruns the network from a moved site with every key and value held, as the chain's
+  probes run; E11 and H6's readout and linearity tools use it.
+- **Validation** (v2's bar before use): on CPU, synthesis with the identity scheme matches PR #40's Cut estimate
+  (cross-token patches off, every unit routed) at cosine 0.996 to 1.0 per matrix, Boost matches PR #40's Boost at
+  0.997 or more, and reforward's first-order response matches the credits (cosine above 0.999). `h6.h8_validation`
+  repeats the check on a trained checkpoint on the GPU before any H8 experiment.
+
+**H8 experiments**, one option per run, each a fixed rule:
+- **E6** (`rows` 128, 64, 32 × `row_assign` time, token) and **E7** (`prior: identity` at m = 64, 128, token rows)
+  against `e1.h8_synth`; E6's success is K = 4 within 0.02 of K = 1 and K = 16 within 0.05.
 - **E10** `clip_credit`: each token's credit at a site capped at 3× the site's batch median norm. `agree`: each block
   weight-update entry kept only where |sign(G)ᵀ sign(X)| ≥ 0.4 × tokens (70% agreement when no contribution is zero;
   a zero contribution votes for neither sign), with the share of entries kept logged (`agree_kept`).
 - **E11** `runway`: each token's credit at a site weighted by the move along −g/|g| (0.01 to 0.08 of its RMS per
   coordinate, through `reforward`) that lowers its loss most, normalized to mean 1 per site; the chosen moves are
-  logged per site (`runway`). Several synthesis updates' worth of replays per update.
+  logged per site (`runway`).
 - **E13** `budget_theta`: 64 rows per site (token-assigned within the tier) where both a streaming Witten–Bell n-gram
-  model of the training stream (orders 1 to 4, `loud/ngram.py`) and the network put the token's loss at most θ, the
-  full cycle elsewhere. Its diagnostic `ngram_tiers` (the low tier's share of tokens and of credit energy, at 20% and
-  100% of `e1.h8_synth.s0`) gates each θ (`configs/e13/gate_theta*.yaml`). The 30M speedrun record's difficulty
-  order stratifies whole rows across batches; it does not give tokens different budgets.
+  model of the training stream (orders 1 to 4, `loud/ngram.py`, causal, held-out rows excluded) and the network put
+  the token's loss at most θ, the full cycle elsewhere. Its diagnostic `ngram_tiers` (the low tier's share of tokens
+  and of credit energy, at 20% and 100% of `e1.h8_synth.s0`) gates each θ. The speedrun record's difficulty-balanced
+  order stratifies whole sequences across batches; it does not give tokens different budgets.
+- **E14** (`nextlat`, cut mode; `loud/latent.py`, `loud/ema.py`): NextLat's latent consistency, following its code
+  (JaydenTeoh/NextLat at 3770be6) with v2's one-hidden-layer dynamics model: the final-norm latent and the next
+  token's raw embedding predict the next latent, smooth-L1 against the EMA teacher's latent or the live one
+  (`nextlat_target`), masked where the next token opens a document (`<|endoftext|>`, id 0), from the handoff or the
+  first update (`nextlat_onset`). It trains the trunk and wte, never the head. Logged: its gradient's cosine to the
+  next-token gradient at the top stream every 50 updates, and the effective ranks of the top latents and site credits
+  at 20% and 100%; the plots give the fraction of the `e1.h8_cut` to `e1.bp_b4` gap closed.
+- **E15** (`latent_boost`): during Boost, per-sublayer predictors to the teacher's latent (1 − cosine) beside the
+  logit-lens readouts (`plus`) or instead of them (`only`; the head then learns from the final readout alone);
+  logged: per-sublayer readout and latent losses, and the cut gradient's cosine to backprop's at the handoff. The EMA
+  teacher's decay rises linearly from 0.996 to 0.9995 (ProteinJEPA's end points; it does not publish the curve).
+- **E16** (`arch: ngram`, `loud/arch.py`): track-3 record #5's design, the pinned `train/arch/model.py` (12 × 1,024,
+  value embeddings on every block plus per-block projections of hashed bigram, trigram and skip-bigram tables, 614M
+  parameters), built with PR #40's init, under H8 cut mode (its n-gram embeddings flow through the cut graph, Boost and
+  reforward) and under the proxy with `recipe: pr40` at batch 4. The official scorer builds it from the same file, as
+  Noise scores track 3, so only the record's own shape (`preset: track3`, the default table rows) can be scored.
 
-**E5's diagnostic** (`credit_recovery`, on a checkpoint, one held-out sequence). Each token's raw embedding takes a
-full cycle of 512 probes (signed Hadamard rows times PR #40's step, 0.01 of the token's RMS), run forward as PR #40's
-chain runs its cycles: forward differences against the clean pass, each MLP through the record's 512 routed units,
-bf16 products (and float32 for comparison), every attention output frozen as the plan says (so without the chain's
-own-query response). At each later site, the probes' changes there and the token's loss changes give a 512 × 512
-system; its ridge solution toward the identity-path guess (ridges 0 to 1e-3, one SVD per site) is compared with a
-direct cycle at that site, run the same way. A second launch, block 0's cycle read at mid1 to mid7, asks whether two
-cycles could stand in for nine. The probe at the embedding also moves x0, which every block reads, so recovery from
-it is biased at the bottom sites; a reviewer measured 0.83 to 0.92 at mid0 to mid2 on the 10M record's checkpoint
-(128 tokens, on CPU), against 0.9999 for the mid0 launch at every site. The runs on E1's checkpoints decide.
+**H6, the diagnostic toolkit** (task `diagnose`, `loud/diagnostics.py`), offline on H4 checkpoints, one held-out
+sequence unless noted. Exact credits are the cut graph's in float32; probes run through `reforward` in bf16 where the
+chain does.
+- `credit_dump`: per site, the exact credit, the identity-path guess, their per-token cosine and E7's variance ratio
+  ‖g − p‖² / ‖g‖².
+- `cos_to_autograd`: PR #26's estimate of the weight gradient against autograd's, per matrix type, block and group.
+- `linearity_check`: per site and probe size, how far each token's loss response to +v and −v is from linear.
+- `deep_readout_check` (E5): one 512-probe signed Hadamard cycle launched at S1, read at S2 to S8: per site the
+  512 × 512 system's median condition number and the median cosine of its solution to the exact credit (plain, and
+  with the ridge 1e-3 × mean diag toward the guess). S0 keeps its own cycle in E5, since its probes also move x0.
+- `h8_validation`: H8 synthesis against PR #40's Cut estimate, per matrix.
+- `snr_spectrum` (E8): per block matrix, the SNR at batch 8 along each singular direction of the checkpoint's ANVIL
+  II momentum, over the 64 training sequences the run reads next, and the share of the momentum's energy below SNR 1,
+  for four estimators of the per-sequence gradients: backprop, H8 synthesis with exact credits, and partial rows at
+  K = 4 by time and by token.
+- `ngram_tiers` (E13): the low tier's share of tokens and of credit energy on the 32 held-out sequences.
 
 **Plots** (`python3 -m loud.plots <exp>`) read only the run files. Every experiment gets the final validation loss per
-variant (seeds and mean ± sd, with the E1 baseline and its −0.02 line where the plan compares against one) and the
-train and held-out curves. Added where the plan names a series: E2's train/val gap, E3's basin barriers, E4's
-acceptance rate per 50 updates and effective rate against the hand schedule, E6's and E7's loss and time against
-the full cycle (`e1.h8_synth`), E8's damping, E12's validation loss over time with the 3.5 line and time to 3.5; E5
-and E7 diagnostic tables, E8's h²/c per matrix type.
-
-**E14 and E15 in H8** (task `h8`, cut mode; `loud/latent.py`, `loud/ema.py`). E14 (`nextlat`): NextLat's latent
-consistency, following its code (JaydenTeoh/NextLat at 3770be6) with v2's one-hidden-layer dynamics model: the
-final-norm latent and the next token's raw embedding predict the next latent, smooth-L1 against the EMA teacher's
-latent or the live one (`nextlat_target`), masked where the next token opens a document (`<|endoftext|>`, id 0), from
-the handoff or the first update (`nextlat_onset`). It trains the trunk and wte, never the head. Logged: its gradient's
-cosine to the next-token gradient at the top stream every 50 updates, and the effective ranks of the top latents and
-site credits at 20% and 100%; `python3 -m loud.plots e14` gives the fraction of the e1.h8_cut to e1.bp_b4 gap closed.
-E15 (`latent_boost`): during Boost, per-sublayer predictors to the teacher's latent (1 - cosine) beside the logit-lens
-readouts (`plus`) or instead of them (`only`; the head then learns from the final readout alone); logged: per-sublayer
-readout and latent losses, and the cut gradient's cosine to backprop's at the handoff. The EMA teacher's decay rises
-linearly from 0.996 to 0.9995 (ProteinJEPA's end points; it does not publish the curve), in float32.
+variant (seeds and mean ± sd, with the reference cell and its −0.02 line where the plan compares against one) and the
+train and held-out curves. Tables where the plan names a comparison: each H8 experiment's difference from its
+reference cell (E6 and E7 with the cosine to K = 1 and the stable rank), E14's and E15's gap closed, E16's ranking
+of the two models under both trainers, E2's train/val gap, E3's basin barriers, E4's acceptance rate and effective
+rate, E8's energy below SNR 1 per estimator; the diagnostics E5 (the 7 × 2 table and its decision rule), E7
+(the variance ratio per site and checkpoint) and E13 (the tiers and the build condition).
 
 ## Review
 
@@ -383,14 +427,15 @@ finding is triaged in [review/LEDGER.md](review/LEDGER.md). See [review/README.m
 ## Differences from the handoff found so far
 
 - The live track-1 record is now **3.338** (PR #46, a forward readout of cross-token credit, 56 min on 8×H100), not
-  3.409. Track 2 is now **3.499 in 8 min 20 s** (PR #44, the identity path, then Cut-lite at 8 rows per update).
+  3.409. Track 2 is now **3.499 in 8 min 20 s** (PR #44, the identity path, then Cut-lite at 8 rows per update); the
+  speedrun record is 22.9 s (PR #52).
 - The pod image ships torch 2.13. Noise pins torch 2.10.0, and the published runs used 2.10.
   `verify.score_record` (scoring) and the verification runs (training) show whether that matters.
 - The backprop target is boost-cut's ledger, 3.70835 at seed 0. The handoff's 3.708 is the same run rounded.
-- E4's factors 1.05 and 0.8 hold steady at 82% acceptance, not the 60% the plan targets
-  (a · ln 1.05 + (1 − a) · ln 0.8 = 0); `adapt_t60` keeps 1.05 and uses 0.9294 so that 60% is the steady state.
-- E5's embedding launch is biased at the bottom sites by x0's skip paths (see E5 above); a mid0 launch is reported
-  beside it.
-- E8 says to damp before ANVIL II's orthogonalization. `polar()` maps every singular value of the pending update to
-  about 1, so damping its top directions there leaves them at about 1 (and slightly enlarges the rest). E8 damps right
-  after `polar()` by default; `damp_where: pending` is the literal placement, run once as a control.
+- H8's cut mode gives each block's MLP the own-query path through the next block, which PR #40's out-credit leaves
+  out; synthesis mode follows PR #40 exactly.
+- E8's diagnostic takes its directions from the checkpoint's momentum (its rails) rather than from the update that
+  also holds the measured sequences' own gradient: directions chosen from the same sequences make their noise look like
+  signal (a pure-noise check showed SNR ~100 along them). It measures training sequences, since the held-out set has
+  only 32.
+- E16's backprop arms use PR #40's recipe at batch 4, the same as H8's arms, so the comparison isolates the trainer.

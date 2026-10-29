@@ -1,0 +1,16 @@
+# E16's smoke run: track-3 record #5's design at its full shape (12 x 1,024, 614M parameters with the n-gram tables)
+# for a 1M-slice H8 cut-mode run, scored by the official scorer with the pinned train/arch/model.py (as Noise scores
+# track 3). It shows the memory, the time per update and that the scorer takes the checkpoint before any E16 cell.
+experiment: verify
+variant: track3_smoke
+task: h8
+seeds: [0]
+priority: 4
+after: [verify.smoke.s0]
+args:
+  sequences: 1M
+  heldout: 32
+  preset: track3
+  arch: ngram
+  mode: cut
+notes: Pipeline check only; its numbers are not a result.

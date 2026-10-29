@@ -537,6 +537,7 @@ class H8:
         from .cut import record_settings
         m = self.m = refs.trainer_module('pr40')
         self.o, self.device, self.seed, self.steps = o, device, seed, steps
+        self.model_file = arch.model_file() if o['arch'] == 'ngram' else None  # what the official scorer builds
         self.probe = heldout[:PROBE_ROWS].to(device) if len(heldout) else None  # E14/E15's untimed logs
         self.settings = s = record_settings(m, o['preset'], o['batch'])
         if not o['boost']:

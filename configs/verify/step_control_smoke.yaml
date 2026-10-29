@@ -1,5 +1,5 @@
-# A complete short run on the 1M range (E4's adapt) before its experiment's cells: the GPU paths the CPU checks cannot reach,
-# and the step time behind the README's cost estimate.
+# A complete short run on the 1M range (E4's adapt) before its experiment's cells: the GPU paths the CPU checks cannot
+# reach, and the step time behind the cost estimate.
 experiment: verify
 variant: step_control_smoke
 task: proxy

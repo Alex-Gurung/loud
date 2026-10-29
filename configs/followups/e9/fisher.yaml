@@ -1,0 +1,18 @@
+# E9, the proxy test (v2, P3): each block matrix's momentum left-preconditioned by (F + delta I)^(-1/2) before ANVIL
+# II's orthogonalization, F the output-side Fisher from sampled-label gradients, delta fixed at 1e-3 times its mean
+# eigenvalue; everything after the orthogonalization unchanged. The control arm is e1.bp_b8 (the same config without
+# fisher). Build condition (v2): E8's intervention shows that per-direction scaling matters with exact gradients;
+# submit this directory then. Success: beats e1.bp_b8 by 0.02; if not, skip the kernel version.
+experiment: e9
+variant: fisher
+task: proxy
+seeds: [0, 1, 2]
+priority: 65
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0, verify.fisher_smoke.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 8
+  heldout_every: 50
+  fisher: true

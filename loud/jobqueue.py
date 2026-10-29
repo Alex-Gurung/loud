@@ -39,8 +39,9 @@ def job_id(experiment, variant, seed):
 
 
 def queue_order(job):
-    """Claim order: priority (lower first), then submission time."""
-    return job.get('priority', 100), job.get('submitted_ts', 0), job['id']
+    """Claim order: priority (lower first), then seed, then submission time. Within a priority every arm's seed 0
+    runs before any seed 1, so one GPU gives a first read of every arm early and fills in seeds after."""
+    return job.get('priority', 100), job.get('spec', {}).get('seed', 0), job.get('submitted_ts', 0), job['id']
 
 
 def free_name(path, suffix):

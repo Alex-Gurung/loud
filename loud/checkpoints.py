@@ -48,8 +48,8 @@ class FractionCheckpoints:
     def save(self, model, step, optimizer=None, copy=None):
         """Save the checkpoint(s) due at this step; coinciding fractions link to the first file. With `copy` (E3), the
         name is ckpt_<f>.c<copy>.pt. With `optimizer` (the records' Optimizers(ANVIL II, Adam)), also <name>.optim.pt:
-        ANVIL II's per-matrix state in float32 and the betas and fast weight of its next step, which H6's
-        direction_stats needs to rebuild the pending update."""
+        ANVIL II's per-matrix state in float32 and the betas and fast weight of its next step, from which H6's
+        snr_spectrum rebuilds the momentum."""
         first, *rest = self.at[step]
         path = self.dir / self.name(first, copy)
         torch.save(state_dict_cpu(model, self.dtype), path)
