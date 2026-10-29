@@ -67,8 +67,9 @@ class NGramBudget:
         self.table = NGram(vocab)
 
     def rows(self, capture):
-        row = torch.cat([capture.x.flatten(), capture.y.flatten()[-1:]]).cpu().numpy()[None]
-        ngram = torch.from_numpy(self.table.losses(row)[0]).float()
+        x, y = (capture.x, capture.y) if capture.x.dim() == 2 else (capture.x[None], capture.y[None])
+        rows = torch.cat([x, y[:, -1:]], 1).cpu().numpy()  # each sequence with its own last target
+        ngram = torch.from_numpy(self.table.losses(rows)).float().flatten()
         low = torch.maximum(ngram, capture.clean_loss.flatten().float().cpu()) <= self.theta
         return torch.where(low, self.low, self.high)
 

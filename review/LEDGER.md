@@ -374,3 +374,10 @@ wrong or not worth it) or **deferred** (why, and what it waits on). "Same as" po
 | 7–14 | minor | Dry run on a missing queue; `--cancel` with `--dry-run`, lists and patterns; arg job ids unchecked; `after_done` hidden; stale help; no one-GPU guidance; gate skips read as errors; jargon | fixed | Gates' ids may sit in `after` or `after_done`; `skipped (gate … says skip)` |
 | 15 | minor | `followups/e8` queues the H8 arms with a placeholder assignment | deferred | Their comments say to set E6's winner first; E8 waits on its diagnostic anyway |
 | nits | nit | Missing seeds, tracebacks, status lines, layout | fixed | |
+
+### 20261029T141200Z-code-codex.md (re-review of round 7's fixes, commit c9e0ac6)
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | major | E13's chain budget joins a capture's sequences before scoring them | fixed | Each sequence gets its own last target; `cut_budget` checks a two-sequence capture. No queued job used it |
+| 2 | minor | E15's logged readouts stay in the clock | deferred | No E15 result reads its time; the readouts every tenth Boost update are the remaining timed logging |

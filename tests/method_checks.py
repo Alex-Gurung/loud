@@ -484,6 +484,11 @@ def cut_budget(scratch):
     assert budget.rows(capture).tolist() == [64] * 64  # seen: every token is easy for both, so the low tier
     capture.clean_loss = torch.full((64,), 9.0)  # the network finds every token hard: the full cycle everywhere
     assert budget.rows(capture).tolist() == [128] * 64
+    other = (torch.arange(65) * 3) % 8  # a capture of two sequences: each scored with its own last target
+    budget.observe(other[None])
+    two = SimpleNamespace(x=torch.stack([row[:-1], other[:-1]]), y=torch.stack([row[1:], other[1:]]),
+                          clean_loss=torch.zeros(128))
+    assert budget.rows(two).tolist() == [64] * 128, budget.rows(two)
     assert all(torch.equal(seen, data[s:s + 1]) for s, seen in enumerate(fresh.observed))  # each batch, in order
     try:
         loud.cut.CutChain(dict(o, row_budget='missing'), torch.device('cpu'), 0, 10, data[-8:])
