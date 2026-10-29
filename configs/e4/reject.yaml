@@ -1,7 +1,8 @@
-# E4: accept-or-reject steps, against the batch-8 baseline e1.bp_b8. After every update, one no-grad forward scores the
-# same batch at the new weights; if its loss rose, the weights and the whole optimizer state go back to before the
-# update, and that batch feeds no update.
-# Version one, zero knobs: reject only. Logs per update: accepted, trial_loss. Read with the adapt cells.
+# E4: measured step control (v2), against e1.bp_b8. Each update is judged on 4 of the 32 held-out sequences
+# (rotating), under the old and the new weights: a paired comparison costing 2 forwards of 4 sequences, never on the
+# producing batch. This arm: v1, zero knobs: if the held-out loss rose, the weights and optimizer state go back and
+# the batch feeds no update. Logs per update: accepted, heldout_before, heldout_after, lr_multiplier and the effective
+# rates. Success: adapt_nowd matches e1.bp_b8 within noise, a recipe that retunes itself when the token count changes.
 experiment: e4
 variant: reject
 task: proxy
@@ -14,7 +15,5 @@ args:
   sequences: 10M
   heldout: 32
   batch: 8
-  means: true
   heldout_every: 50
-  checkpoints: true
   step_control: reject

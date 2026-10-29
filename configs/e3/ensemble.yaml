@@ -1,6 +1,9 @@
-# E3, rule (c): the 4 copies run independently to the end; the final weights are their mean if it scores below the
-# best copy on the held-out set (H3), else the best copy. No knob; `every` only sets how often population.jsonl
-# records the copies' and pairwise midpoints' held-out scores. Success: beats e1.bp_b4 by more than 0.02 (seeds 0-2).
+# E3: population as local SGD (v2). The batch-8 proxy (e1.bp_b8's trajectory) to update 121 of 606, then 4 copies:
+# each update's 8 sequences go 2 to each copy, so every copy makes all 485 remaining updates at local batch 2 with the
+# baseline's rates, each with its own optimizer state. This arm: rule (c): no averaging until the end, then the mean
+# of the copies kept only if H3 scores it below the best copy. Every 10 updates population.jsonl has each pairwise
+# midpoint's H3 loss and barrier. Success: any arm beats e1.bp_b8 by 0.02 (Lin et al. found local SGD after the early
+# phase beats large-batch SGD at equal steps; at this small batch it may not appear).
 experiment: e3
 variant: ensemble
 task: population
@@ -12,7 +15,5 @@ args:
   recipe: boostcut
   sequences: 10M
   heldout: 32
-  batch: 4
-  checkpoints: true
+  batch: 8
   rule: ensemble
-  every: 50

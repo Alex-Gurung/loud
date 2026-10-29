@@ -1,13 +1,13 @@
-# E4: accept-or-reject steps, against the batch-8 baseline e1.bp_b8. After every update, one no-grad forward scores the
-# same batch at the new weights; if its loss rose, the weights and the whole optimizer state go back to before the
-# update, and that batch feeds no update.
-# Version two (the plan's factors) with the warmdown removed: constant base rates, so the multiplier alone shapes the
-# end of training. Success, the point of E4: matches the tuned baseline e1.bp_b8 within noise, a recipe that retunes
-# itself when the token count changes. One seed, as the plan asks.
+# E4: measured step control (v2), against e1.bp_b8. Each update is judged on 4 of the 32 held-out sequences
+# (rotating), under the old and the new weights: a paired comparison costing 2 forwards of 4 sequences, never on the
+# producing batch. This arm: v2b: v2 with the warmdown removed, at a constant base rate; if acceptance falls late in
+# training, the multiplier decays geometrically, and that decay is the measured warmdown. Logs per update: accepted,
+# heldout_before, heldout_after, lr_multiplier and the effective rates. Success: adapt_nowd matches e1.bp_b8 within
+# noise, a recipe that retunes itself when the token count changes.
 experiment: e4
 variant: adapt_nowd
 task: proxy
-seeds: [0]
+seeds: [0, 1, 2]
 priority: 55
 after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0,
         verify.step_control_smoke.s0]
@@ -16,10 +16,6 @@ args:
   sequences: 10M
   heldout: 32
   batch: 8
-  means: true
   heldout_every: 50
-  checkpoints: true
   step_control: adapt
-  accept_up: 1.05
-  accept_down: 0.8
   warmdown: 0

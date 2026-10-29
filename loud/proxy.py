@@ -5,10 +5,9 @@ block matrices, Adam elsewhere), rates and warmdown, with the shared loop's data
 (loud/train.py). The 8-GPU script gives each GPU one sequence, averages the float32 gradients across GPUs and casts
 back to each parameter's dtype; here each micro-batch (default: one sequence) is one GPU's share, and the same float32
 average is formed before the cast. The batch-mean loss is the gradient's objective, as there. Adds H2 (per-sequence
-gradients), the one-change variants of E2, E4 and E10 (loud/variants.py), and the hooks through which E8 and E9
-replace ANVIL II's orthogonalization (loud/anvil.py), each off by default.
+gradients), the one-change variants of E2 and E4 (loud/variants.py), and the hook through which E8 (loud/snr.py) and
+E9 (loud/fisher.py) change ANVIL II's orthogonalization (loud/anvil.py), each off by default.
 """
-import contextlib
 import copy
 from dataclasses import asdict, is_dataclass
 
@@ -16,12 +15,12 @@ import torch
 
 from . import checkpoints, refs
 from .anvil import shaped_optimizer
-from .curvature import CurvatureDamping
 from .fisher import FisherFactor
 from .options import PRESETS, proxy_options
 from .pergrad import PerSequenceGrads
+from .snr import SNRScaling
 from .train import current_rates, rate_labels, set_rate, train
-from .variants import Blur, StepControl, TokenShaping
+from .variants import Blur, StepControl
 
 
 class Reference:
@@ -61,8 +60,10 @@ class Reference:
 
 
 class Backprop:
-    def __init__(self, o, reference, device, seed, steps):
+    def __init__(self, o, reference, device, seed, steps, heldout=None):
+        """heldout: the run's held-out rows (H3), which E4 judges its updates on."""
         self.o, self.reference, self.device, self.seed, self.steps = o, reference, device, seed, steps
+        self.heldout = heldout
         self.warmdown = reference.warmdown if o['warmdown'] is None else o['warmdown']
         self.finish = self.end_merge if o['end_merge'] else None  # loud/train.py runs it after the last update
         self.reset()
@@ -78,10 +79,10 @@ class Backprop:
         self.accumulators = [torch.zeros_like(p, dtype=torch.float32) for p in self.params]
         self.labels = rate_labels(self.optimizer, self.reference.settings.lr)
         self.pergrad = PerSequenceGrads(self.model.named_parameters()) if o['per_sequence_grads'] else None
-        self.blur = Blur(self.model, o['smooth_tau'], self.seed, self.device) if o['smooth_tau'] else None
+        self.blur = Blur(self.model, o['blur'], self.seed, self.device) if o['blur'] else None
         self.blurred = None  # E2: the last update's mean loss at the displaced points
-        self.control = StepControl(self.model, self.optimizer, o) if o['step_control'] != 'none' else None
-        self.shaping = TokenShaping(self.model, self.accumulators, o) if o['token_shaping'] != 'none' else None
+        self.control = (StepControl(self.model, self.optimizer, o, self.heldout, self.device)
+                        if o['step_control'] != 'none' else None)
 
     def describe(self):
         described = self.reference.describe()
@@ -115,17 +116,14 @@ class Backprop:
         torch._foreach_zero_(self.accumulators)
         losses, blurred = [], []
         self.model.requires_grad_(True)
-        with self.shaping.batch() if self.shaping is not None else contextlib.nullcontext():
-            for micro in batch.split(self.o['micro_batch']):
-                if self.blur is None:
-                    losses.append(self.backward(micro))
-                    continue
-                losses.append(self.blur.measure(lambda: self.loss_of(micro)))
-                for sign in (1, -1):
-                    with self.blur.shifted(sign):
-                        blurred.append(self.backward(micro))
-            if self.shaping is not None:
-                self.shaping.finish()
+        for micro in batch.split(self.o['micro_batch']):
+            if self.blur is None:
+                losses.append(self.backward(micro))
+                continue
+            losses.append(self.blur.measure(lambda: self.loss_of(micro)))
+            for sign in (1, -1):
+                with self.blur.shifted(sign):
+                    blurred.append(self.backward(micro))
         self.model.requires_grad_(False)
         passes = len(blurred) or len(losses)  # backward passes: two per micro-batch with the blur
         torch._foreach_div_(self.accumulators, passes)
@@ -135,11 +133,6 @@ class Backprop:
             self.blurred = torch.stack(blurred).mean()
         return torch.stack(losses).mean()
 
-    @torch.no_grad()
-    def batch_loss(self, batch):
-        """The batch's mean loss at the current weights, over the same micro-batches as gradient()."""
-        return torch.stack([self.loss_of(micro).float() for micro in batch.split(self.o['micro_batch'])]).mean()
-
     def update(self, step, batch):
         set_rate(self.optimizer, step, self.steps, self.warmdown, self.reference.final)
         if self.control is not None:
@@ -147,7 +140,7 @@ class Backprop:
         fields = current_rates(self.optimizer, self.labels)
         loss = self.gradient(batch)
         if self.control is not None:
-            self.control.save()
+            self.control.save(step)
         if self.shaper is not None:
             self.shaper.before_step(step, self.pergrad)
         self.optimizer.step()
@@ -155,7 +148,7 @@ class Backprop:
             self.shaper.after_step(self.model, batch, self.pergrad)
         self.optimizer.zero_grad(set_to_none=True)
         if self.control is not None:
-            fields.update(self.control.judge(loss, self.batch_loss(batch)))
+            fields.update(self.control.judge(step))
         return loss, fields
 
     def diagnose(self, step):
@@ -185,16 +178,17 @@ class Backprop:
 
 
 def shaper(o, reference, model, seed):
-    """E8's curvature damping or E9's Fisher factor in place of ANVIL II's polar(), or None."""
-    if o['curvature_damping']:
-        return CurvatureDamping(o, model, reference.settings.anvil_lr, reference.module.polar)
-    if o['fisher_damping']:
-        return FisherFactor(o, model, seed, reference.module.polar)
+    """E8's SNR scaling in place of ANVIL II's polar factor, E9's Fisher preconditioning before it, or None."""
+    if o['snr_scaling'] != 'none':
+        return SNRScaling(o['snr_scaling'], model)
+    if o['fisher']:
+        return FisherFactor(model, seed, reference.module.polar)
     return None
 
 
 def run(spec, run_dir):
     o = proxy_options(spec.get('args', {}))
     reference = Reference(o['recipe'], o['lr_mult'], o['preset'])
-    return train(spec, run_dir, o, lambda device, seed, steps, heldout: Backprop(o, reference, device, seed, steps),
+    return train(spec, run_dir, o, lambda device, seed, steps, heldout: Backprop(o, reference, device, seed, steps,
+                                                                               heldout),
                  method='backprop')

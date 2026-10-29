@@ -1,0 +1,20 @@
+# E2: smoothing with exact antithetic pairs (v2), against e1.bp_b8. Every update displaces each token at the nine
+# sites (the raw embedding, each block's mid stream) by +r, then by the same -r, r = s * RMS(h[t]) * sqrt(512) * u
+# with u uniform on the unit sphere, and averages the two gradients: the gradient of the loss averaged over activation
+# noise, to second order. Here s = 0.3 (each coordinate's RMS displacement, in units of the token's activation RMS;
+# the record's probe step is 0.01, where the response is still linear). About 2.3x a baseline update. Logs: train_loss
+# (clean), blurred_loss, val_loss and their gap. Success: some s beats e1.bp_b8 by 0.02. Kill: none does, or train
+# loss rises while val stays flat.
+experiment: e2
+variant: blur_s03
+task: proxy
+seeds: [0, 1, 2]
+priority: 55
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0, verify.blur_smoke.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 8
+  heldout_every: 50
+  blur: 0.3

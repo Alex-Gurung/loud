@@ -1,0 +1,15 @@
+# Before E9's arm (submitted with it): a complete short run on the 1M range through the sampled-label backward and the
+# Fisher preconditioning.
+experiment: verify
+variant: fisher_smoke
+task: proxy
+seeds: [0]
+priority: 3
+after: [verify.smoke.s0]
+args:
+  recipe: boostcut
+  sequences: 1M
+  heldout: 32
+  batch: 8
+  fisher: true
+notes: Pipeline check only; its numbers are not a result.

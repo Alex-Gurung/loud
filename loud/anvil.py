@@ -3,11 +3,12 @@ block matrices) and PR #40's BatchedAnvil (the Cut chain's).
 
 Anvil.step forms each matrix's pending update, g.lerp(w * fast + (1 - w) * slow, beta), and orthogonalizes it with
 polar() before the per-lane gain, the decay and the step. ShapedAnvil.step is that code with one change: the
-orthogonalized update is `shaper.direction(p, pending)`. BatchedAnvil does the same for each stack of same-shape
-matrices at once (anvil_update, with polar_batch); ShapedBatchedAnvil runs anvil_update's lines with one change: each
-matrix's orthogonalized update becomes `shaper.after_polar(p, pending, update)`. The optimizers keep the unchanged
-classes unless E8 or E9 is on; tests/method_checks.py (anvil_hook, batched_anvil_hook) checks that each shaped class
-reproduces the original bit for bit when the shaper returns the orthogonalized update.
+orthogonalized update is `shaper.direction(p, pending)`; a shaper with lane_gain False also skips the per-lane gain and
+its Frobenius renormalization (E8, whose per-direction scaling they would undo). BatchedAnvil does the same for each
+stack of same-shape matrices at once (anvil_update, with polar_batch); ShapedBatchedAnvil runs anvil_update's lines
+with one change: each matrix's orthogonalized update becomes `shaper.after_polar(p, pending, update)`. The optimizers
+keep the unchanged classes unless E8 or E9 is on; tests/method_checks.py (anvil_hook, batched_anvil_hook) checks that
+each shaped class reproduces the original bit for bit when the shaper returns the orthogonalized update.
 """
 import torch
 
@@ -38,9 +39,10 @@ def shaped_anvil_class(m):
                     fast.lerp_(g, 1 - fast_beta)
                     slow.lerp_(g, 1 - self.slow_beta)
                     update = self.shaper.direction(p, g.lerp(weight * fast + (1 - weight) * slow, beta))
-                    energy.lerp_(update.square().mean(lanes, keepdim=True), 1 - self.lane_beta)
-                    gained = update * energy.clamp_min(1e-10).rsqrt()
-                    update = gained * (update.norm() / gained.norm().clamp_min(1e-10))
+                    if self.shaper.lane_gain:  # E8 turns the gain and its renormalization off: they undo its scaling
+                        energy.lerp_(update.square().mean(lanes, keepdim=True), 1 - self.lane_beta)
+                        gained = update * energy.clamp_min(1e-10).rsqrt()
+                        update = gained * (update.norm() / gained.norm().clamp_min(1e-10))
                     w = p.float()
                     decay = (slow * w >= 0) * w * (wd * lr)
                     p.copy_(w - lr * max(1, p.size(0) / p.size(1)) ** 0.5 * (update + decay))

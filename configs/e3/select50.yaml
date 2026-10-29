@@ -1,4 +1,9 @@
-# E3, rule (b) with N = 50: as select10, selecting every 50 updates per copy.
+# E3: population as local SGD (v2). The batch-8 proxy (e1.bp_b8's trajectory) to update 121 of 606, then 4 copies:
+# each update's 8 sequences go 2 to each copy, so every copy makes all 485 remaining updates at local batch 2 with the
+# baseline's rates, each with its own optimizer state. This arm: rule (b): no averaging; every 50 updates the copies
+# are scored on H3 and the worst takes the best's weights and optimizer state. Every 10 updates population.jsonl has
+# each pairwise midpoint's H3 loss and barrier. Success: any arm beats e1.bp_b8 by 0.02 (Lin et al. found local SGD
+# after the early phase beats large-batch SGD at equal steps; at this small batch it may not appear).
 experiment: e3
 variant: select50
 task: population
@@ -10,7 +15,6 @@ args:
   recipe: boostcut
   sequences: 10M
   heldout: 32
-  batch: 4
-  checkpoints: true
+  batch: 8
   rule: select
   every: 50

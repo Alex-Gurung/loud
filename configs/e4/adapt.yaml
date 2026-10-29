@@ -1,9 +1,9 @@
-# E4: accept-or-reject steps, against the batch-8 baseline e1.bp_b8. After every update, one no-grad forward scores the
-# same batch at the new weights; if its loss rose, the weights and the whole optimizer state go back to before the
-# update, and that batch feeds no update.
-# Version two with the plan's factors: every rate times a global multiplier, x1.05 after an accept and x0.8 after a
-# reject, the hand warmdown underneath. These factors settle at about 82% acceptance, not the plan's stated 0.6
-# (ln 1.25 / (ln 1.05 + ln 1.25)); adapt_t60 has the factor for 0.6. Logs: accepted, lr_multiplier, lr (effective).
+# E4: measured step control (v2), against e1.bp_b8. Each update is judged on 4 of the 32 held-out sequences
+# (rotating), under the old and the new weights: a paired comparison costing 2 forwards of 4 sequences, never on the
+# producing batch. This arm: v2: v1 plus a global step multiplier, x1.1 after an accept and x0.87 after a reject, on
+# top of the hand warmdown (both factors from one choice, a target acceptance of 0.6: ln(1/0.87) / ln(1.1/0.87) =
+# 0.59). Logs per update: accepted, heldout_before, heldout_after, lr_multiplier and the effective rates. Success:
+# adapt_nowd matches e1.bp_b8 within noise, a recipe that retunes itself when the token count changes.
 experiment: e4
 variant: adapt
 task: proxy
@@ -16,9 +16,5 @@ args:
   sequences: 10M
   heldout: 32
   batch: 8
-  means: true
   heldout_every: 50
-  checkpoints: true
   step_control: adapt
-  accept_up: 1.05
-  accept_down: 0.8

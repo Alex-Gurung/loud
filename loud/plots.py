@@ -265,19 +265,27 @@ def e2_table(out):
 
 
 def e8_table(out):
-    """E8: at each run's last refresh, per matrix type: the median curvature-to-noise ratio, damping factor and overlap
-    of the tracked directions with the previous refresh's, means over seeds."""
+    """E8 (v2): H6's snr_spectrum, the share of the momentum's energy in directions below SNR 1 per matrix type at
+    20% and 100% (the build condition), and per SNR arm and matrix type the mean r and Frobenius ratio over its
+    updates and seeds."""
+    texts = []
+    found = {c: diagnostic('h6', f'snr_spectrum_c{c}') for c in (20, 100)}
+    kinds = sorted({k for s in found.values() if s for k in s['energy_below_1']})
+    if kinds:
+        rows = [[k] + [f'{s["energy_below_1"][k]:.3f}' if s else '-' for s in found.values()] for k in kinds]
+        texts.append(markdown(['matrix', 'energy below SNR 1, 20%', 'energy below SNR 1, 100%'], rows))
     rows = []
     for v, runs_ in sorted(counted('e8').items()):
-        last = [next((m['damping'] for m in reversed(metrics(r)) if 'damping' in m), None) for r in runs_]
-        last = [d for d in last if d]
-        for kind in sorted(last[0]) if last else []:
-            values = [[d[kind].get(key) for d in last] for key in ('h2_over_c', 'factor', 'overlap')]
-            rows.append([v, kind] + [f'{statistics.fmean(x):.4g}' if None not in x else '-' for x in values])
-    if not rows:
+        ratios = [m['snr_ratios'] for r in runs_ for m in metrics(r) if 'snr_ratios' in m]
+        for kind in sorted(ratios[0]) if ratios else []:
+            rows.append([v, kind] + [f'{statistics.fmean(x[kind][key] for x in ratios):.4f}'
+                                     for key in ('r_mean', 'frobenius')])
+    if rows:
+        texts.append(markdown(['variant', 'matrix', 'mean r', 'Frobenius ratio'], rows))
+    if not texts:
         return None
-    text = markdown(['variant', 'matrix', 'h2/c', 'factor', 'overlap'], rows)
-    (out / 'damping.md').write_text(text)
+    text = '\n'.join(texts)
+    (out / 'snr.md').write_text(text)
     return text
 
 
@@ -388,40 +396,13 @@ def e7_table(out):
     return text
 
 
-def e8_plot(plt, out):
-    """E8's diagnostic (H6 direction_stats): the distribution of h^2 / c per matrix type, per checkpoint."""
-    found = {c: diagnostic('h6', f'direction_stats_c{c}') for c in (20, 100)}
-    found = {c: s for c, s in found.items() if s}
-    if not found:
-        return None
-    types = ('attn.c_q', 'attn.c_k', 'attn.c_v', 'attn.c_proj', 'mlp.c_fc', 'mlp.c_proj')
-    fig, axes = plt.subplots(1, len(found), figsize=(5.5 * len(found), 3.6), squeeze=False)
-    for ax, (c, summary) in zip(axes[0], found.items()):
-        for y, kind in enumerate(types):
-            values = [d['h2_over_c'] for name, ds in summary.items() if name.endswith(f'{kind}.weight')
-                      for d in ds if d.get('h2_over_c')]
-            ax.scatter(values, [y] * len(values), s=22, color=SLOTS[0], alpha=0.5, linewidth=0)
-            if values:
-                ax.scatter([statistics.median(values)], [y], s=60, marker='|', color=INK, linewidth=2)
-        ax.set_xscale('log')
-        ax.set_yticks(range(len(types)), types)
-        ax.set_ylim(-0.6, len(types) - 0.4)
-        ax.grid(axis='y', visible=False)
-        ax.set_xlabel('h² / c along the top directions of the pending update (tick: median)')
-        ax.set_title(f'{c}% checkpoint', loc='left', fontsize=9)
-    fig.tight_layout()
-    fig.savefig(out / 'h2_over_c.png')
-    plt.close(fig)
-    return True
-
-
 EXTRA = {'e3': [e3_plot], 'e4': [e4_plots], 'e6': [drift_plot], 'e12': [val_time_plot]}
 TABLES = {'e2': e2_table, 'e5': e5_table, 'e6': partial(time_table, 'e6'), 'e7': e7_tables, 'e8': e8_table,
           'e11': partial(time_table, 'e11', baseline=('e6', 'cut_k1')), 'e12': e12_table}
 # The plan's reference cell for experiments whose baseline lives in E1.
-BASELINES = {'e2': ('e1', 'bp_b8'), 'e4': ('e1', 'bp_b8'), 'e10': ('e1', 'bp_b8'), 'e3': ('e1', 'bp_b4'),
-             'e8': ('e1', 'bp_b4'), 'e9': ('e1', 'bp_b4'), 'e7': ('e6', 'cut_k1'), 'e11': ('e6', 'cut_k1')}
-FIGURES = {'e8': e8_plot}
+BASELINES = {'e2': ('e1', 'bp_b8'), 'e4': ('e1', 'bp_b8'), 'e10': ('e1', 'bp_b8'), 'e3': ('e1', 'bp_b8'),
+             'e8': ('e1', 'bp_b8'), 'e9': ('e1', 'bp_b8'), 'e7': ('e6', 'cut_k1'), 'e11': ('e6', 'cut_k1')}
+FIGURES = {}
 
 
 def plot(experiment):

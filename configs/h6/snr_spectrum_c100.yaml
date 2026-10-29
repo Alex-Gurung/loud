@@ -1,0 +1,15 @@
+# H6 item 4 on e1.bp_b8.s0's 100% checkpoint, E8's diagnostic (loud/snr.py): per block matrix, the SNR at batch 8
+# along every singular direction of ANVIL II's momentum (the checkpoint's fast and slow rails, blended by its fast
+# weight: fixed before the measured sequences, so their noise cannot pick the directions) over 64 sequences, with
+# exact per-sequence gradients, and the share of the momentum's energy below SNR 1. The H8 partial-row version (E6's
+# best assignment at K = 4) plugs H8's synthesized gradients into the same function.
+experiment: h6
+variant: snr_spectrum_c100
+task: diagnose
+seeds: [0]
+priority: 70
+after: [e1.bp_b8.s0]
+args:
+  tool: snr_spectrum
+  checkpoint: e1.bp_b8.s0:ckpt_100.pt
+  batch: 64

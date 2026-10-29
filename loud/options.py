@@ -93,40 +93,35 @@ PROXY = dict(
     per_sequence_grads=False,   # H2
     grad_noise_every=0,         # log the H2 across-sequence spread every N updates (needs per_sequence_grads)
     warmdown=None,              # the recipe's warmdown fraction (None), or another; 0 holds every rate constant
-    # one-change variants (loud/variants.py), at most one per run:
-    smooth_tau=0.0,             # E2: antithetic blur at the nine probing sites, in PR #40 probe steps (0: off)
-    step_control='none',        # E4: 'reject' undoes an update that raised its batch's loss; 'adapt' also scales rates
-    accept_up=1.05,             # E4 adapt: rate multiplier after an accepted update
-    accept_down=0.8,            # E4 adapt: rate multiplier after a rejected one
-    token_shaping='none',       # E10: 'cap' or 'agree', on every nn.Linear weight gradient
-    cap_quantile=0.95,          # E10 cap: each token's credit norm is capped at this quantile over the batch
-    agree_threshold=0.7,        # E10 agree: the share of tokens whose contributions must agree in sign
-    agree_over='active',        # E10 agree: 'active' (tokens with a nonzero contribution) or 'all' (the plan's literal)
-    curvature_damping=0.0,      # E8: lambda, in squared ANVIL II steps (loud/curvature.py); 0 = off
-    damp_directions=16,         # E8: tracked top singular directions of each block matrix's pending update
-    damp_every=50,              # E8: updates between refreshes of the directions and their curvature
-    damp_where='step',          # E8: 'step' (after the orthogonalization) or 'pending' (the plan's literal placement)
-    fisher_damping=0.0,         # E9: true-Fisher left factor in place of ANVIL II's polar (loud/fisher.py); 0 = off
+    # one-change variants, at most one per run:
+    blur=0.0,                   # E2: antithetic displacement at the nine sites, per-coordinate RMS = blur x the
+                                # token's RMS (loud/variants.py); 0 = off
+    step_control='none',        # E4: 'reject' undoes an update that raised the loss on 4 held-out rows; 'adapt' also
+                                # scales every rate by the outcomes (loud/variants.py)
+    accept_up=1.1,              # E4 adapt: rate multiplier after an accepted update
+    accept_down=0.87,           # E4 adapt: after a rejected one (with 1.1: steady at 59% acceptance)
+    snr_scaling='none',         # E8: 'control', 'snr' or 'rate' in place of ANVIL II's polar factor (loud/snr.py)
+    fisher=False,               # E9: momentum left-preconditioned by the damped true-Fisher factor (loud/fisher.py)
     end_merge=False,            # the record's end merge of the nine means after the last update (recipes pr40, pr46)
 )
-STEP_CONTROLS, SHAPINGS = ('none', 'reject', 'adapt'), ('none', 'cap', 'agree')
+STEP_CONTROLS, SNR_ARMS = ('none', 'reject', 'adapt'), ('none', 'control', 'snr', 'rate')
+JUDGE_ROWS = 4  # E4: held-out rows each update is judged on, rotating through the 32
 # Each variant option, and the setting (of another option) it acts under.
-VARIANT_OPTIONS = {'accept_up': ('step_control', 'adapt'), 'accept_down': ('step_control', 'adapt'),
-                   'cap_quantile': ('token_shaping', 'cap'), 'agree_threshold': ('token_shaping', 'agree'),
-                   'agree_over': ('token_shaping', 'agree')}
+VARIANT_OPTIONS = {'accept_up': ('step_control', 'adapt'), 'accept_down': ('step_control', 'adapt')}
 
-# E3 (loud/population.py): copies of the proxy branched from one trajectory. Only POPULATION_FREE options may change;
-# the rest stay at their defaults (one change per variant, and the population loop has no H4 or monitoring).
+# E3 (loud/population.py): local SGD over copies branched from one trajectory. Only POPULATION_FREE options may
+# change; the rest stay at their defaults (one change per variant).
 POPULATION = dict(
     PROXY,
-    batch=4,                    # the batch-4 baseline's (e1.bp_b4)
     branch=0.2,                 # fraction of the single run's updates done before the copies branch
-    copies=4,
+    copies=4,                   # K: each update's batch is split evenly over the copies
     rule=None,                  # 'average' | 'select' | 'ensemble'
-    every=10,                   # N: updates per copy between averages or selections (ensemble: between logs)
+    every=10,                   # H: updates between averages (average) or between selections (select)
+    midpoints_every=10,         # updates between the pairwise-midpoint scores (monitoring)
 )
 POPULATION_FREE = ('sequences', 'heldout', 'batch', 'preset', 'test', 'official_eval', 'recipe', 'micro_batch',
-                   'lr_mult', 'branch', 'copies', 'rule', 'every', 'checkpoints', 'checkpoint_dtype')
+                   'lr_mult', 'branch', 'copies', 'rule', 'every', 'midpoints_every', 'checkpoints',
+                   'checkpoint_dtype')
 
 IDENTITY = dict(
     TRAINING,
@@ -240,49 +235,30 @@ def proxy_options(args):
     if warmdown is not None and (isinstance(warmdown, bool) or not isinstance(warmdown, (int, float))
                                  or not 0 <= warmdown <= 1):
         raise ValueError("warmdown must be a fraction in [0, 1] (0: constant rates), or null for the recipe's")
-    if o['step_control'] not in STEP_CONTROLS or o['token_shaping'] not in SHAPINGS:
-        raise ValueError(f'step_control must be one of {STEP_CONTROLS}, token_shaping one of {SHAPINGS}')
-    variants = [key for key, on in (('smooth_tau', o['smooth_tau'] != 0), ('step_control', o['step_control'] != 'none'),
-                                    ('token_shaping', o['token_shaping'] != 'none'),
-                                    ('curvature_damping', o['curvature_damping'] != 0),
-                                    ('fisher_damping', o['fisher_damping'] != 0)) if on]
+    if o['step_control'] not in STEP_CONTROLS or o['snr_scaling'] not in SNR_ARMS:
+        raise ValueError(f'step_control must be one of {STEP_CONTROLS}, snr_scaling one of {SNR_ARMS}')
+    variants = [key for key, on in (('blur', o['blur'] != 0), ('step_control', o['step_control'] != 'none'),
+                                    ('snr_scaling', o['snr_scaling'] != 'none'), ('fisher', o['fisher'])) if on]
     if len(variants) > 1:
         raise ValueError(f'one change per variant: {variants} are separate experiments')
     for key, (mode, value) in VARIANT_OPTIONS.items():
         if key in args and o[mode] != value:
             raise ValueError(f'{key} acts only with {mode}: {value}')
-    if o['smooth_tau'] < 0:
-        raise ValueError('smooth_tau must be >= 0')
+    if o['blur'] < 0:
+        raise ValueError('blur must be >= 0')
     if not (o['accept_up'] >= 1 and 0 < o['accept_down'] <= 1):
         raise ValueError('accept_up must be >= 1 and accept_down in (0, 1]')
-    if o['agree_over'] not in ('active', 'all'):
-        raise ValueError("agree_over must be 'active' or 'all'")
-    if not 0 < o['cap_quantile'] <= 1:
-        raise ValueError('cap_quantile must be in (0, 1]')
-    if not 0.5 < o['agree_threshold'] <= 1:
-        raise ValueError('agree_threshold must be in (0.5, 1]: at least half the tokens always share the majority sign')
-    if o['per_sequence_grads'] and variants and variants[0] not in ('step_control', 'curvature_damping',
-                                                                      'fisher_damping'):
+    if o['step_control'] != 'none' and o['heldout'] < JUDGE_ROWS:
+        raise ValueError(f'step_control judges each update on {JUDGE_ROWS} held-out rows: heldout must be >= '
+                         f'{JUDGE_ROWS}')
+    if o['per_sequence_grads'] and variants and variants[0] not in ('step_control', 'snr_scaling', 'fisher'):
         raise ValueError(f"per_sequence_grads reads each sequence's plain gradient, which {variants[0]} replaces")
-    for key in ('damp_directions', 'damp_every', 'damp_where'):
-        if key in args and not o['curvature_damping']:
-            raise ValueError(f'{key} acts only with curvature_damping')
-    if o['curvature_damping'] < 0 or o['fisher_damping'] < 0:
-        raise ValueError('curvature_damping and fisher_damping must be >= 0 (0 = off)')
+    if o['snr_scaling'] != 'none' and not (o['per_sequence_grads'] and o['batch'] >= 2):
+        raise ValueError('snr_scaling reads per-sequence gradients (per_sequence_grads) over a batch of at least 2')
     if o['end_merge'] and not (o['recipe'] in ('pr40', 'pr46') and o['means'] and o['heldout']):
         raise ValueError("end_merge is the record's (recipe pr40 or pr46) and needs means and held-out sequences")
-    if (o['curvature_damping'] or o['fisher_damping']) and o['recipe'] != 'boostcut':
+    if (o['snr_scaling'] != 'none' or o['fisher']) and o['recipe'] != 'boostcut':
         raise ValueError("E8 and E9 hook boost-cut's ANVIL II (recipe: boostcut)")
-    if o['curvature_damping']:
-        positive(o, 'damp_directions', 'damp_every')
-        if not o['per_sequence_grads']:
-            raise ValueError('curvature_damping reads its noise from per-sequence gradients: set per_sequence_grads')
-        if o['batch'] < 2:
-            raise ValueError('curvature_damping needs batch >= 2: its noise is a variance across the sequences')
-        if o['damp_where'] not in ('step', 'pending'):
-            raise ValueError("damp_where must be 'step' or 'pending'")
-        if o['damp_directions'] > PRESETS[o['preset']][1]:
-            raise ValueError('damp_directions must be at most the width')
     return o
 
 
@@ -296,21 +272,23 @@ def population_options(args):
         raise ValueError("rule must be 'average', 'select' or 'ensemble'")
     if not 0 < o['branch'] < 1:
         raise ValueError('branch must be a fraction in (0, 1)')
-    positive(o, 'copies', 'every')
+    positive(o, 'copies', 'every', 'midpoints_every')
     if o['copies'] < 2:
         raise ValueError('a population needs at least two copies')
+    if o['batch'] % o['copies'] or (o['batch'] // o['copies']) % o['micro_batch']:
+        raise ValueError('each copy takes batch / copies sequences of every update: a whole number of micro-batches')
     if not o['heldout']:
         raise ValueError('the copies are scored on the held-out sequences: heldout must be > 0')
-    if branch_rows(o)[1] // o['copies'] < o['batch']:
-        raise ValueError('the sequences left after the branch give a copy no update')
+    branch, steps = branch_step(o)
+    if not 1 <= branch < steps:
+        raise ValueError('the branch must come after at least one update and before the last')
     return o
 
 
-def branch_rows(o):
-    """(single-run updates before the branch, update sequences left after it)."""
-    n = range_size(o['sequences']) - o['heldout']
-    prefix = round(o['branch'] * (n // o['batch']))
-    return prefix, n - prefix * o['batch']
+def branch_step(o):
+    """(the update after which the copies branch, the single run's updates): 121 of 606 at 10M and batch 8."""
+    steps = (range_size(o['sequences']) - o['heldout']) // o['batch']
+    return round(o['branch'] * steps), steps
 
 
 def identity_options(args):

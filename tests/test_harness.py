@@ -61,10 +61,9 @@ def test_means_follow_the_record():
     ('args: {checkpoints: 1}', 'checkpoints must be true or false'),
     ('expect: {val_loss: 3.5}', r'needs \[target, tolerance'),
     ('expect: {val_los: [3.5, 0.1]}', "no 'val_los'"),
-    ('args: {smooth_tau: 1, token_shaping: cap}', 'one change per variant'),
+    ('args: {blur: 0.1, fisher: true}', 'one change per variant'),
     ('args: {step_control: reject, accept_down: 0.9}', 'accept_down acts only with step_control: adapt'),
-    ('args: {token_shaping: agree, agree_threshold: 0.5}', r'agree_threshold must be in \(0.5, 1\]'),
-    ('args: {per_sequence_grads: true, token_shaping: cap}', 'per_sequence_grads'),
+    ('args: {per_sequence_grads: true, blur: 0.1}', 'per_sequence_grads'),
     ('args: {warmdown: 1.5}', 'warmdown must be a fraction'),
     ('args: {step_control: undo}', 'step_control must be one of'),
 ])
@@ -229,14 +228,13 @@ def test_plots_read_only_the_run_files(tmp_path, monkeypatch):
                     'bf16 mid0 ridge 0.0': site} for s in plots.SITES}
     fake_run(tmp_path, 'e5', 'recovery_c20', 0, None, summary=dict(recovery, settings=dict(ridges=[0.0, 1e-4])))
     fake_run(tmp_path, 'h6', 'credit_dump_c20', 0, None, summary={s: site for s in plots.SITES})
-    stats = {'transformer.h.0.attn.c_q.weight': [dict(h2_over_c=2.0), dict(h2_over_c=0.5)]}
-    fake_run(tmp_path, 'h6', 'direction_stats_c20', 0, None, summary=stats)
+    fake_run(tmp_path, 'h6', 'snr_spectrum_c20', 0, None, summary=dict(energy_below_1={'attn.c_q': 0.25}))
     for seed in (0, 1):
         fake_run(tmp_path, 'e1', 'bp_b8', seed, 3.71, lambda s: dict(lr=dict(anvil=0.02 * (1 - s / 120))))
         fake_run(tmp_path, 'e4', 'adapt', seed, 3.70, lambda s: dict(accepted=s % 3 > 0, lr=dict(anvil=0.02)))
-        fake_run(tmp_path, 'e2', 'smooth_t3', seed, 3.69, lambda s: dict(blurred_loss=8.1 - s / 50))
-        fake_run(tmp_path, 'e8', 'lambda_3e1', seed, 3.70, lambda s: dict(damping={'mlp.c_fc': dict(
-            h=1.0, c=2.0, h2_over_c=0.5, factor=0.9, overlap=0.8)}) if s % 50 == 1 else {})
+        fake_run(tmp_path, 'e2', 'blur_s01', seed, 3.69, lambda s: dict(blurred_loss=8.1 - s / 50))
+        fake_run(tmp_path, 'e8', 'snr', seed, 3.70, lambda s: dict(snr_ratios={'mlp.c_fc': dict(
+            r_mean=0.5, frobenius=0.6)}))
         fake_run(tmp_path, 'e3', 'avg10', seed, 3.72)
         (tmp_path / 'runs' / 'e3' / 'avg10' / f's{seed}' / 'population.jsonl').write_text(''.join(
             json.dumps(dict(round=r, step=242 + 4 * r, barriers={'0-1': 0.01 * r, '0-2': -0.01})) + '\n'
@@ -244,9 +242,10 @@ def test_plots_read_only_the_run_files(tmp_path, monkeypatch):
     for experiment in ('e2', 'e3', 'e4', 'e8'):
         plots.plot(experiment)
     made = {p.relative_to(tmp_path / 'plots').as_posix() for p in (tmp_path / 'plots').rglob('*.*')}
-    assert {'e4/step_control.png', 'e3/barriers.png', 'e2/gap.md', 'e8/damping.md', 'e2/final.png'} <= made
+    assert {'e4/step_control.png', 'e3/barriers.png', 'e2/gap.md', 'e8/snr.md', 'e2/final.png'} <= made
     assert '| baseline e1.bp_b8 | 2 | 3.7100 |' in (tmp_path / 'plots' / 'e2' / 'gap.md').read_text()
-    assert '| lambda_3e1 | mlp.c_fc | 0.5 | 0.9 | 0.8 |' in (tmp_path / 'plots' / 'e8' / 'damping.md').read_text()
+    snr = (tmp_path / 'plots' / 'e8' / 'snr.md').read_text()
+    assert '| snr | mlp.c_fc | 0.5000 | 0.6000 |' in snr and '| attn.c_q | 0.250 | - |' in snr
     timed = lambda s: dict(train_seconds=s * 6.0, val_loss=5 - s / 40) if s % 25 == 0 else {}
     fake_run(tmp_path, 'e12', 'record', 0, 3.34, timed)
     for experiment in ('e6', 'e5', 'e7', 'e8', 'e12'):
@@ -256,7 +255,6 @@ def test_plots_read_only_the_run_files(tmp_path, monkeypatch):
     assert {p.name for p in (tmp_path / 'plots' / 'e6').iterdir()} == {'final.png', 'curves.png', 'drift.png', 'time.md'}
     assert '| mid7 | 0.9 | 0.9 | 0.9 | 0.9 |' in (tmp_path / 'plots' / 'e5' / 'recovery.md').read_text()
     assert '| emb | - | - | 0.9 | - | - |' in (tmp_path / 'plots' / 'e7' / 'credit_dump.md').read_text()
-    assert (tmp_path / 'plots' / 'e8' / 'h2_over_c.png').exists()
 
 
 def test_one_gpu_jobs_keep_their_config_hash(tmp_path):

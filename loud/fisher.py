@@ -1,35 +1,36 @@
-"""E9 (proxy test): a damped true-Fisher left factor in place of ANVIL II's orthogonalization on the block matrices.
+"""E9 (v2's proxy test, P3): each block matrix's momentum left-preconditioned by a damped true-Fisher factor before
+ANVIL II's orthogonalization.
 
-For each block matrix W (rows = outputs), S is an exponential mean (FISHER_DECAY per update) of E_t[d_t d_t^T], where
+For each block matrix W (rows = outputs), F is an exponential mean (FISHER_DECAY per update) of E_t[d_t d_t^T], where
 d_t is the gradient of the summed loss with respect to W's output at token t when the labels are sampled from the
 model's own softmax: the true Fisher's output-side Kronecker factor (K-FAC's G). Each sequence's training forward
 feeds one extra backward for these labels, to the layer outputs only (no weight gradients). Every FISHER_EVERY updates
-(from update 1), R = (S + fisher_damping * mean eig(S) * I)^(-1/2) by eigh. ANVIL II's polar(pending) becomes
-R @ pending, scaled to the Frobenius norm polar(pending) has (about sqrt(min(rows, cols)), less where the pending update
-has small singular values), so the step's size is ANVIL II's and only its direction changes; the
-rails, per-lane gain, decay and rates are unchanged. fisher_damping is the one knob: large values flatten R towards
-the identity (the raw pending update), small ones whiten the output side fully.
+(from update 1), R = (F + delta I)^(-1/2) by eigh, with delta fixed at DAMPING x tr(F) / rows (v2: 1e-3 tr(F) / 512,
+which is the same for the 512-row matrices; c_fc's F has 2,048 rows). ANVIL II then orthogonalizes R @ pending
+instead of the pending update, and everything after (polar, the per-lane gain, the decay, the rates) is unchanged.
 
 The labels come from a generator seeded by the job's seed. Cost per sequence: one backward to the outputs (about a
 third of a training step) and the d^T d products (about 180 GFLOP for the 38M model); every 10 updates, 48 eighs.
-The plan's kernel version (the curvature term and sampled-label loss from the Cut chain's probes) waits on this test:
-if it fails, that work is skipped.
+The kernel version in the Cut port (the curvature term and the sampled-label loss from the chain's probes) is built
+only if this test shows per-direction scaling matters.
 """
 import torch
 import torch.nn.functional as F
 
 from .anvil import is_anvil_matrix
 
-FISHER_DECAY = 0.95   # exponential mean of S per update, as K-FAC's running factors
+DAMPING = 1e-3        # delta = DAMPING x the mean eigenvalue of F (v2's fixed 1e-3 tr(F) / 512)
+FISHER_DECAY = 0.95   # exponential mean of F per update, as K-FAC's running factors
 FISHER_EVERY = 10     # updates between inverse roots
 SAMPLE_SEED = 7919    # offset of the label generator's seed from the job's
 
 
 class FisherFactor:
-    """The E9 shaper of ShapedAnvil (loud/anvil.py), and the hooks that measure S on the training forwards."""
+    """The E9 shaper of ShapedAnvil (loud/anvil.py), and the hooks that measure F on the training forwards."""
+    lane_gain = True  # ANVIL II after the orthogonalization is unchanged
 
-    def __init__(self, o, model, seed, polar):
-        self.damping, self.polar = o['fisher_damping'], polar
+    def __init__(self, model, seed, polar):
+        self.polar = polar
         self.model, self.vocab = model, model.config.vocab_size
         named = [(n, p) for n, p in model.named_parameters() if is_anvil_matrix(n, p)]
         self.index = {id(p): i for i, (_, p) in enumerate(named)}
@@ -38,7 +39,7 @@ class FisherFactor:
         self.outputs = [None] * len(self.modules)
         self.hooks = [module.register_forward_hook(self.keep(i)) for i, module in enumerate(self.modules)]
         self.batch_sum = [torch.zeros(p.size(0), p.size(0), device=p.device) for _, p in named]
-        self.tokens, self.S, self.R = None, None, None  # tokens: a device tensor, so counting never syncs
+        self.tokens, self.F, self.R = None, None, None  # tokens: a device tensor, so counting never syncs
         self.generator = torch.Generator(next(model.parameters()).device).manual_seed(seed + SAMPLE_SEED)
 
     def keep(self, i):
@@ -65,18 +66,17 @@ class FisherFactor:
         self.outputs = [None] * len(self.modules)
 
     def before_step(self, step, pergrad=None):
-        """Fold this update's sums into S; on the refresh updates, recompute R."""
+        """Fold this update's sums into F; on the refresh updates, recompute R."""
         batch = [total / self.tokens for total in self.batch_sum]
-        self.S = batch if self.S is None else [s.lerp_(b, 1 - FISHER_DECAY) for s, b in zip(self.S, batch)]
+        self.F = batch if self.F is None else [f.lerp_(b, 1 - FISHER_DECAY) for f, b in zip(self.F, batch)]
         for total in self.batch_sum:
             total.zero_()
         self.tokens = None
         if (step - 1) % FISHER_EVERY == 0:
-            self.R = [inverse_root(s, self.damping) for s in self.S]
+            self.R = [inverse_root(fisher) for fisher in self.F]
 
     def direction(self, p, pending):
-        update = self.R[self.index[id(p)]] @ pending
-        return update * (self.polar(pending).norm() / update.norm().clamp_min(1e-30))
+        return self.polar(self.R[self.index[id(p)]] @ pending)
 
     def after_step(self, model, batch, pergrad=None):
         pass
@@ -89,8 +89,8 @@ class FisherFactor:
             hook.remove()
 
 
-def inverse_root(S, damping):
-    """(S + damping * mean eig(S) * I)^(-1/2) for a symmetric positive semi-definite S."""
-    eig, Q = torch.linalg.eigh(S)
+def inverse_root(fisher):
+    """(F + delta I)^(-1/2) for a symmetric positive semi-definite F, delta = DAMPING x its mean eigenvalue."""
+    eig, Q = torch.linalg.eigh(fisher)
     eig = eig.clamp_min(0)
-    return (Q * (eig + damping * eig.mean()).clamp_min(1e-30).rsqrt()) @ Q.T
+    return (Q * (eig + DAMPING * eig.mean()).clamp_min(1e-30).rsqrt()) @ Q.T

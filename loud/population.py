@@ -1,30 +1,28 @@
-"""E3: a population of copies of the backprop proxy on split data, at the compute of one run.
+"""E3 (v2): population as local SGD. Does any rule over several weight copies beat one trajectory at equal steps and
+equal data?
 
-The job first runs the batch-4 baseline (e1.bp_b4's trainer, the same code and seed, so the same trajectory) for its
-first round(branch * steps) updates (branch 0.2: the plan's branch point; copies branched from the initialization do
-not average well). It branches there into K copies (weights and optimizer state). Copy c receives every K-th of the
-remaining sequences in the benchmark's order (rest[c::K]) and updates on batches of B from its share; the copies take
-turns (round r: copy 0, 1, ..., K - 1), so together they use each sequence at most once (the up to B - 1 sequences
-left in a share feed nothing) and the total compute is one run's.
+The job runs the batch-8 proxy (e1.bp_b8's trainer: the same code, seed and data, so the same trajectory) to the
+branch, 20% of the updates (update 121 of 606 on the 10M set), and branches into K copies (weights and optimizer
+state). From then on each update's B sequences go B / K to each copy (2 of 8 for K = 4, in batch order), so every copy
+makes every remaining update, at local batch B / K with the baseline's rates and schedule (the same update number, so
+ANVIL II's clock and the warmdown are the single run's). Forward and backward compute equal one run; optimizer compute
+and state are K times. Each copy keeps its own optimizer state.
 
-Schedule: the copies' updates count as the single run's updates in turn order: copy c's r-th update is global update
-prefix + (r - 1) K + c + 1, which sets its rate (the warmdown over the same horizon as the single run, so the copies'
-warmdown ends where the single run's does) and ANVIL II's clock (its rail-beta ramp and engage step).
-
-Rules (one per variant), applied after every N = `every` rounds and at the end:
-  average   every copy continues from the mean of the copies' weights; each keeps its own optimizer state (momenta
-            are not averaged: they are each copy's record of its own data). Final: the mean.
-  select    the copies are scored on the held-out set (H3); the worst takes the best's weights and optimizer state.
-            Final: the best copy.
-  ensemble  the copies run independently; `every` only sets the logging. Final: the mean if H3 scores it below the
-            best copy, else the best copy.
-Every N rounds (before the rule acts) population.jsonl records each copy's H3 score and each pairwise midpoint's, and
-the barrier of each pair, midpoint minus the worse end (above 0: the pair has left one basin). These scores are
-untimed monitoring, except the ones a rule decides on. metrics.jsonl has one record per update, naming its copy.
-H4 (checkpoints): the trunk's fractions before the branch (ckpt_00, _10, _20), then each copy's (ckpt_50.c<k>,
-ckpt_100.c<k>) after the round in which the copies pass that fraction of the single run's updates (the copies' last
-updates fall just short of the run's last, so 100% is their end); final.pt is the rule's choice. No trajectory means:
-after the branch there is no single trajectory, and the rules are themselves E3's merges.
+Rules (one per arm):
+  average   every H updates (`every`), every copy continues from the mean of the copies' weights AND optimizer state
+            (ANVIL II's rails and energy, Adam's moments); a last average after the final update. Final: the mean.
+            H = 1 is a sanity anchor near the baseline, though not identical, since ANVIL's orthogonalization is
+            nonlinear.
+  select    no averaging; every H updates the copies are scored on the held-out set (H3) and the worst takes the
+            best's weights and optimizer state. Final: the best copy by the held-out set after the last update.
+  ensemble  no averaging until the end, then the mean of the copies' weights if H3 scores it below the best copy,
+            else the best copy.
+Every `midpoints_every` updates after the branch, before the rule acts at that update, population.jsonl records each
+copy's held-out loss, each pairwise midpoint's and the barrier, midpoint minus the worse end (above 0: the pair has
+left one connected basin), with the rule's action that follows. These are
+untimed monitoring; the scores a rule decides on are timed. metrics.jsonl has one record per update, with each copy's
+training loss after the branch. H4 (checkpoints): the trunk's fractions up to the branch, then each copy's
+(ckpt_<f>.c<k>.pt); final.pt is the rule's choice.
 """
 from contextlib import contextmanager
 from itertools import combinations
@@ -37,25 +35,32 @@ from .checkpoints import FractionCheckpoints
 from .common import JsonlLog
 from .data import SEQ, benchmark_split
 from .heldout import HeldoutScorer, mean_loss
-from .options import branch_rows, population_options
+from .options import branch_step, population_options
 from .proxy import Backprop, Reference
 from .runlog import Run
 from .score import score_in_subprocess
 from .train import device
 
 
-def shares(count, copies, batch):
-    """Indices of the sequences after the branch: copy c's rest[c::copies], cut to whole batches, and the unused."""
-    index = torch.arange(count)
-    per = [index[c::copies] for c in range(copies)]
-    rounds = min(len(p) for p in per) // batch
-    used = [p[:rounds * batch] for p in per]
-    return used, torch.cat([p[rounds * batch:] for p in per]), rounds
+def state_tensors(trainer):
+    """A copy's weights and every optimizer state tensor, in one order shared by all copies."""
+    held = list(trainer.model.parameters())
+    for o in trainer.optimizer.optimizers:
+        for p in trainer.model.parameters():
+            state = o.state.get(p, {})
+            held += [state[k] for k in sorted(state) if torch.is_tensor(state[k])]
+    return held
 
 
-def global_step(prefix, copies, r, c):
-    """The single run's update number that copy c's r-th update counts as (one-based)."""
-    return prefix + (r - 1) * copies + c + 1
+@torch.no_grad()
+def average_into(groups):
+    """groups[c]: copy c's tensors, in one order. Each tensor becomes the float32 mean over the copies."""
+    mean = [t.float().clone() for t in groups[0]]
+    for group in groups[1:]:
+        torch._foreach_add_(mean, [t.float() for t in group])
+    torch._foreach_div_(mean, len(groups))
+    for group in groups:
+        torch._foreach_copy_(group, mean)
 
 
 @torch.no_grad()
@@ -63,12 +68,6 @@ def load_mean(model, sources):
     """Set the model's parameters to the mean of the sources' (taken in float32)."""
     for p, *qs in zip(model.parameters(), *(s.parameters() for s in sources)):
         p.copy_(torch.stack([q.float() for q in qs]).mean(0))
-
-
-@torch.no_grad()
-def load_weights(model, source):
-    for p, q in zip(model.parameters(), source.parameters()):
-        p.copy_(q)
 
 
 class Clock:
@@ -98,8 +97,8 @@ class Clock:
 
 
 class Population:
-    def __init__(self, o, trunk, reference, dev, seed, heldout, events, clock):
-        self.o, self.heldout, self.events, self.clock = o, heldout, events, clock
+    def __init__(self, o, trunk, reference, dev, seed, heldout, clock):
+        self.o, self.heldout, self.clock = o, heldout, clock
         self.copies = [trunk]
         for _ in range(o['copies'] - 1):
             twin = Backprop(trunk.o, reference, dev, seed, trunk.steps)
@@ -107,56 +106,52 @@ class Population:
             self.copies.append(twin)
         self.scratch = reference.make_model(dev, seed)  # holds means and midpoints
 
-    def models(self):
-        return [c.model for c in self.copies]
+    def update(self, step, batch):
+        """Every copy's update on its share of the batch. Returns (their losses, the first copy's rate fields)."""
+        share = len(batch) // len(self.copies)
+        out = [c.update(step, batch[k * share:(k + 1) * share]) for k, c in enumerate(self.copies)]
+        return torch.stack([loss for loss, _ in out]), out[0][1]
+
+    def average(self):
+        average_into([state_tensors(c) for c in self.copies])
 
     def scores(self, step, reason):
-        return [self.heldout.score(c.model, step, reason, copy=i) for i, c in enumerate(self.copies)]
+        return [self.heldout.score(c.model, step, reason, copy=k) for k, c in enumerate(self.copies)]
 
-    def checkpoint(self, r, step, last=False):
-        """After every N rounds and at the end: log the copies and midpoints, then apply the rule. Scores a rule
-        decides on are timed (select's every time, the ensemble's choice at the end); the rest is monitoring."""
-        rule = self.o['rule']
-        if rule == 'select' or (rule == 'ensemble' and last):
-            copies = self.scores(step, rule)
-        else:
-            with self.clock.paused():
-                copies = self.scores(step, 'monitor')
-        midpoints, barriers = {}, {}
+    def select(self, step):
+        """The worst copy takes the best's weights and optimizer state (timed: the rule decides on these scores)."""
+        scores = self.scores(step, 'select')
+        best, worst = scores.index(min(scores)), scores.index(max(scores))
+        if scores[best] < scores[worst]:
+            self.copies[worst].assign(self.copies[best])
+        return dict(select=best, replace=worst, scores=scores)
+
+    def midpoints(self, step):
+        """Monitoring (untimed): each copy's held-out loss, each pairwise midpoint's and the barrier."""
         with self.clock.paused():
+            copies = self.scores(step, 'monitor')
+            midpoints, barriers = {}, {}
             for i, j in combinations(range(len(self.copies)), 2):
                 load_mean(self.scratch, [self.copies[i].model, self.copies[j].model])
                 pair = f'{i}-{j}'
                 midpoints[pair] = self.heldout.score(self.scratch, step, 'monitor', midpoint=pair)
                 barriers[pair] = midpoints[pair] - max(copies[i], copies[j])
-        event = dict(round=r, step=step, copies=copies, midpoints=midpoints, barriers=barriers)
-        if rule == 'average':
-            load_mean(self.scratch, self.models())
-            for c in self.copies:
-                load_weights(c.model, self.scratch)
-            event['action'] = 'average'
-        elif rule == 'select':
-            best, worst = copies.index(min(copies)), copies.index(max(copies))
-            if copies[best] < copies[worst]:
-                self.copies[worst].assign(self.copies[best])
-            event['action'] = dict(select=best, replace=worst)
-        self.events.write(event)
-        return copies
+        return dict(step=step, copies=copies, midpoints=midpoints, barriers=barriers)
 
-    def final(self, step, copies):
-        """The run's final weights and how they were chosen, after the last round's checkpoint()."""
+    def final(self, step):
+        """The run's final weights and how they were chosen, after the last update."""
         rule = self.o['rule']
-        if rule == 'average':  # the copies were just averaged
+        if rule == 'average':
+            self.average()
             return self.copies[0].model, dict(final='mean')
-        if rule == 'select':  # the scores taken before the last selection still name the best copy
-            best = copies.index(min(copies))
-            return self.copies[best].model, dict(final=f'copy {best}', final_copy_scores=copies)
-        load_mean(self.scratch, self.models())  # the copies' scores are the last checkpoint()'s
-        mean = self.heldout.score(self.scratch, step, 'ensemble', mean=True)
-        best = copies.index(min(copies))
-        choice = dict(final_copy_scores=copies, final_mean_score=mean)
-        if mean < copies[best]:
-            return self.scratch, dict(choice, final='mean')
+        scores = self.scores(step, rule)
+        best = scores.index(min(scores))
+        choice = dict(final_copy_scores=scores)
+        if rule == 'ensemble':
+            load_mean(self.scratch, [c.model for c in self.copies])
+            choice['final_mean_score'] = mean = self.heldout.score(self.scratch, step, 'ensemble', mean=True)
+            if mean < scores[best]:
+                return self.scratch, dict(choice, final='mean')
         return self.copies[best].model, dict(choice, final=f'copy {best}')
 
 
@@ -166,16 +161,11 @@ def run(spec, run_dir):
     torch.set_float32_matmul_precision('high')
     split = benchmark_split(o['sequences'], o['heldout'])
     B, K = o['batch'], o['copies']
-    steps = len(split.train) // B  # the single run's updates: the schedule's horizon
-    prefix, rest = branch_rows(o)
-    assert rest == len(split.train) - prefix * B
-    used, unused, rounds = shares(rest, K, B)
-    rows = [split.train[prefix * B:][u] for u in used]
+    branch, steps = branch_step(o)
     reference = Reference(o['recipe'], o['lr_mult'], o['preset'])
     trunk = Backprop(o, reference, dev, seed, steps)
     run = Run(run_dir, spec, dict(options=o, method=f'population ({o["rule"]})', trainer=trunk.describe(),
-                                  data=split.describe(), steps=steps, branch_step=prefix, rounds=rounds,
-                                  updates=prefix + rounds * K, unused_sequences=len(unused)))
+                                  data=split.describe(), steps=steps, branch_step=branch, local_batch=B // K))
 
     # untimed warmup on random tokens (compiles the update and the scorer's shapes), then a fresh trainer
     held = len(split.heldout)
@@ -188,59 +178,63 @@ def run(spec, run_dir):
     heldout = HeldoutScorer(split.heldout, run_dir / 'heldout.jsonl', dev)
     events = JsonlLog(run_dir / 'population.jsonl')
     checkpoints = FractionCheckpoints(run_dir, steps, dtype=o['checkpoint_dtype'], enabled=o['checkpoints'])
-    pending = sorted(s for s in checkpoints.at if s > prefix) if o['checkpoints'] else []
     if dev.type == 'cuda':
         torch.cuda.reset_peak_memory_stats()
     clock = Clock(dev)
-    previous = 0.0
+    previous, population = 0.0, None
 
-    def record(step, loss, fields, **extra):
+    def record(step, losses, fields, **extra):
         nonlocal previous
-        loss = loss.item()  # also waits for the update, so the step time is the GPU's
+        values = losses.tolist()  # also waits for the update, so the step time is the GPU's
+        loss = sum(values) / len(values)
         if not math.isfinite(loss):
             raise FloatingPointError(f'non-finite training loss at update {step}')
         elapsed = clock.elapsed()
         seqs = step * B
         run.metrics.write(dict(step=step, **extra, seqs=seqs, tokens=seqs * (SEQ - 1), train_loss=loss,
-                               step_seconds=round(elapsed - previous, 4), train_seconds=round(elapsed, 2), **fields))
+                               step_seconds=round(elapsed - previous, 4), train_seconds=round(elapsed, 2), **fields,
+                               **(dict(copy_losses=values) if len(values) > 1 else {})))
         previous = elapsed
         if step % 50 == 0:
             print(dict(step=step, train_loss=loss, train_seconds=round(elapsed, 2), **extra), flush=True)
         return loss
 
-    for step in range(0, prefix + 1):
+    for step in range(0, steps + 1):
         if step:
             batch = split.train[(step - 1) * B:step * B].to(dev)
-            record(step, *trunk.update(step, batch), phase='prefix')
+            if step <= branch:
+                loss, fields = trunk.update(step, batch)
+                last = record(step, loss.reshape(1), fields, phase='trunk')
+            else:
+                losses, fields = population.update(step, batch)
+                last = record(step, losses, fields, phase='copies')
+                after, action = step - branch, None
+                # before the rule acts: an average would leave every barrier at 0
+                monitor = population.midpoints(step) if after % o['midpoints_every'] == 0 else None
+                if o['rule'] == 'average' and after % o['every'] == 0:
+                    population.average()
+                    action = 'average'
+                elif o['rule'] == 'select' and after % o['every'] == 0:
+                    action = population.select(step)
+                if monitor is not None:
+                    events.write(dict(monitor, **({} if action is None else dict(action=action))))
+        if step == branch:
+            population = Population(o, trunk, reference, dev, seed, heldout, clock)
         if checkpoints.due(step):
             with clock.paused():
-                checkpoints.save(trunk.model, step)
-    population = Population(o, trunk, reference, dev, seed, heldout, events, clock)
-    for r in range(1, rounds + 1):
-        losses = []
-        for c, member in enumerate(population.copies):
-            step = global_step(prefix, K, r, c)
-            member.optimizer.optimizers[0].t = step - 1  # ANVIL II's clock follows the single run's
-            batch = rows[c][(r - 1) * B:r * B].to(dev)
-            losses.append(record(step, *member.update(step, batch), phase='population', copy=c, round=r))
-        while pending and (pending[0] <= step or r == rounds):
-            with clock.paused():
-                for c, member in enumerate(population.copies):
-                    checkpoints.save(member.model, pending[0], copy=c)
-            pending.pop(0)
-        if r % o['every'] == 0 or r == rounds:
-            scores = population.checkpoint(r, step, last=r == rounds)
-    model, choice = population.final(step, scores)
+                for k, member in enumerate(population.copies if step > branch else [trunk]):
+                    checkpoints.save(member.model, step, copy=k if step > branch else None)
+    model, choice = population.final(steps)
     clock.sync()
     elapsed = clock.elapsed()
     events.close()
 
     final = checkpoints.save_final(model)
     run.update_config(checkpoints=checkpoints.saved)
-    result = dict(steps=steps, updates=prefix + rounds * K, complete=True, train_seconds=round(elapsed, 2),
-                  update_sequences=(prefix + rounds * K) * B, train_loss_last=sum(losses) / len(losses),
-                  rule=o['rule'], every=o['every'], copies=K, branch_step=prefix, **choice)
-    result['heldout_loss'] = heldout.score(model, step, 'monitor', final=True)
+    result = dict(steps=steps, updates=steps, complete=True, train_seconds=round(elapsed, 2),
+                  update_sequences=steps * B, train_loss_last=last, rule=o['rule'], every=o['every'], copies=K,
+                  branch_step=branch, **choice)
+    result['heldout_loss'] = heldout.score(model, steps, 'monitor', final=True)
     if dev.type == 'cuda':
         result['peak_cuda_gb'] = round(torch.cuda.max_memory_allocated() / 1e9, 3)
     if o['official_eval']:
