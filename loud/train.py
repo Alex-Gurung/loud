@@ -23,7 +23,7 @@ import time
 
 import torch
 
-from .checkpoints import MERGE_DECAYS, FractionCheckpoints, TrajectoryMeans
+from .checkpoints import MERGE_DECAYS, FractionCheckpoints, TrajectoryMeans, shrink_final
 from .data import SEQ, benchmark_split, load_split
 from .heldout import HeldoutScorer, mean_loss
 from .options import checkpoints_on
@@ -172,4 +172,13 @@ def train(spec, run_dir, o, build, method):
         if plain is not None:
             scores = score_in_subprocess(plain, splits, run_dir / 'score_plain.json', model_file)
             result.update({f'{k}_plain': v for k, v in scores.items()})
+        shrink_scored(o, result, [final] + ([plain] if plain is not None else []))
     return run.finish(result, spec.get('expect'))
+
+
+def shrink_scored(o, result, paths):
+    """final_dtype: the scored final checkpoints' 2-D weights in bf16 from here on (the scores are the exact ones)."""
+    if o['final_dtype'] != 'float32':
+        for path in paths:
+            shrink_final(path, getattr(torch, o['final_dtype']))
+        result['final_dtype'] = o['final_dtype']

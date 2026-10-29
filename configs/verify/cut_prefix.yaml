@@ -10,6 +10,7 @@ seeds: [0]
 priority: 10
 after: [verify.cut_smoke.s0]
 args:
+  final_dtype: float32  # exact: verifications and baselines keep their scored weights
   sequences: 10M
   heldout: 32
   batch: 4

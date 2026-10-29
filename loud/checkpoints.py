@@ -3,8 +3,9 @@
 Checkpoints: ckpt_00.pt (the initialization), ckpt_10, ckpt_20, ckpt_50 after round(f * steps) updates, and ckpt_100
 after the last update of a complete run. All five store 2-D weights in one dtype, bfloat16 by default (half the disk;
 an identical forward under bf16 autocast, which casts weights to bf16 anyway), so diagnostics that compare them
-compare training progress, not precision; `checkpoint_dtype: float32` keeps them exact. final.pt is always the exact
-trained state dict, whatever the run's length.
+compare training progress, not precision; `checkpoint_dtype: float32` keeps them exact. final.pt is the exact trained
+state dict, whatever the run's length, until the official score has read it; then `final_dtype` (bf16 by default)
+applies to its 2-D weights (shrink_final), and score.json keeps the exact file's sha256.
 
 Means: as PR #40's end merge: from 60% of the epoch (the step's first sequence at or past 0.6 of the update sequences),
 every 5 updates and at the last update, nine exponential means of every parameter in float32, weight
@@ -75,6 +76,17 @@ class FractionCheckpoints:
         path = self.dir / name
         torch.save(state_dict_cpu(model), path)
         return path
+
+
+def shrink_final(path, dtype):
+    """Re-save a scored final checkpoint with its 2-D floating weights in `dtype` (atomically); returns bytes saved."""
+    before = path.stat().st_size
+    state = torch.load(path, map_location='cpu', weights_only=True)
+    state = {k: v.to(dtype) if v.ndim == 2 and v.is_floating_point() else v for k, v in state.items()}
+    tmp = path.with_suffix('.tmp')
+    torch.save(state, tmp)
+    os.replace(tmp, path)
+    return before - path.stat().st_size
 
 
 class TrajectoryMeans:

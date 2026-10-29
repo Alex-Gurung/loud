@@ -39,7 +39,7 @@ from .options import branch_step, checkpoints_on, population_options
 from .proxy import Backprop, Reference
 from .runlog import Run
 from .score import score_in_subprocess
-from .train import device
+from .train import device, shrink_scored
 
 
 def state_tensors(trainer):
@@ -242,4 +242,5 @@ def run(spec, run_dir):
         if dev.type == 'cuda':
             torch.cuda.empty_cache()
         result.update(score_in_subprocess(final, ['val', 'test'] if o['test'] else ['val'], run_dir / 'score.json'))
+        shrink_scored(o, result, [final])
     return run.finish(result, spec.get('expect'))

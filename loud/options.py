@@ -83,6 +83,9 @@ TRAINING = dict(
     eval_every=0,               # untimed val.pt curve every N updates: a plot only, never a decision
     test=True,                  # also score test.pt at the end
     official_eval=True,
+    final_dtype='bfloat16',     # after the official score of the exact weights, final.pt (and final_plain.pt) keep
+                                # their 2-D weights in this dtype (score.json keeps the exact file's sha256); 'float32'
+                                # keeps them exact (verifications, E1). The disk is shared
 )
 
 PROXY = dict(
@@ -122,7 +125,8 @@ POPULATION = dict(
     every=10,                   # H: updates between averages (average) or between selections (select)
     midpoints_every=10,         # updates between the pairwise-midpoint scores (monitoring)
 )
-POPULATION_FREE = ('sequences', 'heldout', 'batch', 'preset', 'test', 'official_eval', 'recipe', 'micro_batch',
+POPULATION_FREE = ('sequences', 'heldout', 'batch', 'preset', 'test', 'official_eval', 'final_dtype', 'recipe',
+                   'micro_batch',
                    'lr_mult', 'branch', 'copies', 'rule', 'every', 'midpoints_every', 'checkpoints',
                    'checkpoint_dtype')
 
@@ -261,6 +265,8 @@ def training_options(args, table, task):
         raise ValueError('save_means needs means')
     if o['checkpoint_optimizer'] and not o['checkpoints']:
         raise ValueError('checkpoint_optimizer needs checkpoints')
+    if o['final_dtype'] not in CHECKPOINT_DTYPES:
+        raise ValueError(f'final_dtype must be one of {CHECKPOINT_DTYPES}')
     return o
 
 

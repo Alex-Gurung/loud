@@ -45,18 +45,20 @@ Waiting, on purpose:
   diagnostic runs regardless.
 - **E8's intervention and E9** wait in `configs/followups/`, which a directory submission skips: E8's (both settings,
   proxy and H8, with their smoke runs) only if its diagnostic shows partial rows pushing a large share of the
-  momentum's energy below SNR 1, E9 (P3) only if E8 shows per-direction scaling matters with exact gradients. E9's kernel version follows only if it beats `e1.bp_b8` by 0.02.
+  momentum's energy below SNR 1, E9 (P3) only if E8 shows per-direction scaling matters with exact gradients. E9's
+  kernel version follows only if it beats `e1.bp_b8` by 0.02.
 - **E14's and E15's follow-ups** (the teacher and onset variants) wait in `configs/followups/` for the first arms.
 - **E12** (30M, P3, rented 8×H100): there is no 8-GPU path; its one-GPU backprop run waits in `configs/followups/e12/`.
 - **Confirming a winner on the real chain** (the Cut chain on the 1M slice): its configs are written once H8 names
   the winners, with the H5 flags (`rows`, `row_assign`, `prior`, `row_budget`).
 
-Nothing has run on a GPU yet. The 154 jobs are about 21 GPU-hours on one H100 by v2's single-GPU estimates (10M
+Nothing has run on a GPU yet. The 156 jobs are about 21 GPU-hours on one H100 by v2's single-GPU estimates (10M
 backprop about 5 minutes, H8 cut mode about 6, H8 synthesis about 10; the track-3 model about 5 times that), so a
-day on one worker or about 11 hours on two. P1 is about 14 of those hours, and it runs first. They write about 30 GB:
-the final weights (0.15 GB per run, 1.5 GB for the track-3 model), and H4 checkpoints only where a diagnostic reads
-them (`e1.bp_b8.s0` with ANVIL II's state, `e1.h8_synth.s0`), in bf16. Workers pause when the shared volume has 15 GB
-left. The first runs measure the times.
+day on one worker or about 11 hours on two. P1 is about 14 of those hours, and it runs first. They write about 19 GB:
+each run's `final.pt` is scored exact, then keeps its matrices in bf16 (`final_dtype`; 75 MB, against 130 MB exact;
+the verifications and E1 keep theirs exact), the track-3 model's is about 1.2 GB, and H4 checkpoints exist only where
+a diagnostic reads them (`e1.bp_b8.s0` with ANVIL II's state, `e1.h8_synth.s0`), in bf16. Workers pause when the
+shared volume has 15 GB left; it had 38 GB free on 2026-10-29. The first runs measure the times.
 
 ## Running on GPUs
 
@@ -205,9 +207,9 @@ external/  data/  artifacts/        shared-volume state, gitignored
 
 Recreate `external/` with `scripts/fetch_external.sh` (it clones Noise again at PR #26's commit as
 `external/noise-pr26`), and the data with `scripts/prepare_data.sh`. Run the tests with
-`PYTHONPATH=. /opt/loud-cpu-venv/bin/python -m pytest tests`, 110 tests in about 15 minutes on this pod. The method tests use
-tiny models and short sequences, with dense attention instead of flex attention (which has no CPU backward); the
-Cut chain's checks run it eagerly (no compilation) with a 512-token vocabulary.
+`PYTHONPATH=. /opt/loud-cpu-venv/bin/python -m pytest tests`, 111 tests in about 15 minutes on this pod. The method
+tests use tiny models and short sequences, with dense attention instead of flex attention (which has no CPU
+backward); the Cut chain's checks run it eagerly (no compilation) with a 512-token vocabulary.
 
 ## Run configs
 

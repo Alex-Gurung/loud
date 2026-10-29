@@ -9,6 +9,7 @@ seeds: [0]
 priority: 10
 after: [verify.smoke.s0]
 args:
+  final_dtype: float32  # exact: verifications and baselines keep their scored weights
   recipe: boostcut
   sequences: 10M
   heldout: 0

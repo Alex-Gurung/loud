@@ -305,3 +305,25 @@ def test_checkpoints_for_some_seeds_only(tmp_path):
     keeps = [checkpoints_on(spec['args'], spec['seed']) for spec, _ in specs_from_config(path)]
     assert keeps == [True, False]
     assert checkpoints_on(dict(checkpoints=True), 5) and not checkpoints_on(dict(checkpoints=False), 0)
+
+
+def test_scored_finals_shrink_to_bf16_unless_kept_exact(tmp_path):
+    torch = pytest.importorskip('torch')
+    from loud.checkpoints import shrink_final
+    from loud.options import proxy_options
+    from loud.train import shrink_scored
+    state = dict(w=torch.randn(64, 64), lam=torch.randn(8), emb=torch.randn(16, 8).bfloat16(), n=torch.arange(3))
+    for name in ('a.pt', 'b.pt'):
+        torch.save(state, tmp_path / name)
+    result = {}
+    shrink_scored(proxy_options({}), result, [tmp_path / 'a.pt'])
+    shrunk = torch.load(tmp_path / 'a.pt', weights_only=True)
+    assert result == dict(final_dtype='bfloat16') and shrunk['w'].dtype == torch.bfloat16
+    assert torch.equal(shrunk['w'], state['w'].bfloat16()) and torch.equal(shrunk['lam'], state['lam'])
+    assert torch.equal(shrunk['emb'], state['emb']) and torch.equal(shrunk['n'], state['n'])
+    exact = {}
+    shrink_scored(proxy_options(dict(final_dtype='float32')), exact, [tmp_path / 'b.pt'])
+    assert exact == {} and torch.load(tmp_path / 'b.pt', weights_only=True)['w'].dtype == torch.float32
+    assert shrink_final(tmp_path / 'b.pt', torch.bfloat16) > 0
+    with pytest.raises(ValueError, match='final_dtype'):
+        proxy_options(dict(final_dtype='float16'))
