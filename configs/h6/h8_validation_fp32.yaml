@@ -1,6 +1,6 @@
 # h6.h8_validation with both sides in float32 (the record's chain_precision fp32, its capture in float32, H8 without
-# autocast): if the query matrices and x0_lambdas reach 0.99 here, their gap in bf16 is the record's rounding through
-# the softmax; if not, H8's query credit differs from the record's and E6/E7's H8 results need that caveat.
+# autocast). Result (2026-10-29): every block matrix at 0.992 or more (the queries' bf16 gap was the record's
+# rounding; attn.c_v and attn.c_proj unchanged at 0.995 to 0.999), x0_lambdas at 0.980 in both precisions.
 experiment: h6
 variant: h8_validation_fp32
 task: diagnose

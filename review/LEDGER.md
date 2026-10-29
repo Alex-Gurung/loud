@@ -381,3 +381,21 @@ wrong or not worth it) or **deferred** (why, and what it waits on). "Same as" po
 | --- | --- | --- | --- | --- |
 | 1 | major | E13's chain budget joins a capture's sequences before scoring them | fixed | Each sequence gets its own last target; `cut_budget` checks a two-sequence capture. No queued job used it |
 | 2 | minor | E15's logged readouts stay in the clock | deferred | No E15 result reads its time; the readouts every tenth Boost update are the remaining timed logging |
+
+## Round 8: the first queue's results (147 runs, 2026-10-29)
+
+### 20261029T230000Z-results-claude.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | major | The H8 validation bar was set at the observed value, and float32 refutes its explanation for x0_lambdas, c_v, c_proj | fixed (doc) | Configs and README now say what float32 showed: the query gap is rounding; c_v and c_proj differ systematically but stay at 0.995+; x0_lambdas 0.980 in both, far from autograd for both estimators, cause open. `h8_validation` now reports the matrices' and the scalars' minima apart |
+| 2 | major | Boost does nothing in H8, so E15's verdict cannot transfer | fixed (doc) | README Differences and the reading; E15's lambda follow-ups not run; the no-Boost arm now logs the cut cosine at the record's handoff update |
+| 3 | major | README says nothing has run; estimates not replaced | fixed | Status paragraph: the first queue, shared-GPU times as bounds |
+| 4 | minor | E16's verdict mixes seed sets | fixed | Seed-matched (0-1): backprop +0.1411, H8 +0.1430, beside the leaderboard's +0.127 |
+| 5 | minor | E7's skip is borderline | fixed | Its two arms run without the precondition (6 short runs) |
+| 6 | minor | E4's explanation is wrong | fixed (doc) | The multiplier rises in the warmdown tail, where the judge accepts nearly every shrunken step |
+| 7 | minor | E10 clip and E11 never acted | fixed | The board reads their logs: E11 `null (the rule never acted)`, E10's note gives clip's cosine and agree's kept share |
+| 8 | minor | `cosine_to_identity` under bf16 exceeds 1 | fixed | Computed with autocast off |
+| 9 | minor | Shared-GPU wall-clocks unflagged | fixed | `collect.py` flags `shared GPU` from each run's job record |
+| 10 | minor | E5's float32 rerun tests the method, not the bf16 readout the plan specifies | deferred | A chain-style bf16 replay (differencing the changes) needs the record's kernels; float32 is necessary, not sufficient, and the README says so |
+| 11 | nit | Board's 1e-5, score.json's hash after bf16, E13's reading, identity_match's one update, E15 s1's spike | fixed (partly) | Board text; E13's note in the reading; the rest recorded here |

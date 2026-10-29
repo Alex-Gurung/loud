@@ -63,14 +63,16 @@ Waiting, on purpose:
 - **Confirming a winner on the real chain** (the Cut chain on the 1M slice): its configs are written once H8 names
   the winners, with the H5 flags (`rows`, `row_assign`, `prior`, `row_budget`).
 
-Nothing has run on a GPU yet. The 161 jobs are about 21 GPU-hours on one H100 by v2's single-GPU estimates (10M
-backprop about 5 minutes, H8 cut mode about 6, H8 synthesis about 10; the track-3 model about 5 times that). Run
-one after another that is a day; four at a time on one GPU (`LOUD_JOBS_PER_GPU`), likely 7 to 8 hours, and half that
-on two GPUs. P1 is about two thirds of it and runs first. The first runs measure the times. They write about 19 GB:
-each run's `final.pt` is scored exact, then keeps its matrices in bf16 (`final_dtype`; 75 MB, against 130 MB exact;
-the verifications and E1 keep theirs exact), the track-3 model's is about 1.2 GB, and H4 checkpoints exist only where
-a diagnostic reads them (`e1.bp_b8.s0` with ANVIL II's state, `e1.h8_synth.s0`), in bf16. Workers pause when the
-shared volume has 15 GB left; it had 38 GB free on 2026-10-29.
+**First queue (2026-10-29, one H100, four jobs at a time):** all 147 runnable jobs finished, none failed, and 15
+were skipped by their gates; it took about 8 hours of wall-clock. Every verification passed (verification 1 at
+1e-4 under torch 2.13). Shared-GPU wall-clocks ran: 10M backprop 2 to 5 minutes, H8 cut and synthesis 1 to 2, the
+identity path 7, E11's runway 21, the track-3 model 4 to 6; `collect.py` flags them `shared GPU`, so they bound the
+plan's estimates without replacing them. The results, and each experiment's verdict, are on the board (below) and
+in `python3 collect.py`; review round 8 (`review/LEDGER.md`) checked them. They write about 19 GB: each run's
+`final.pt` is scored exact, then keeps its matrices in bf16 (`final_dtype`; 75 MB, against 130 MB exact; the
+verifications and E1 keep theirs exact), the track-3 model's is about 1.2 GB, and H4 checkpoints exist only where a
+diagnostic reads them (`e1.bp_b8.s0` with ANVIL II's state, `e1.h8_synth.s0`), in bf16. Workers pause when the
+shared volume has 15 GB left.
 
 ## Running on GPUs
 
@@ -537,7 +539,21 @@ finding is triaged in [review/LEDGER.md](review/LEDGER.md). See [review/README.m
   verification 1's tolerance is 1e-4. The training verifications show whether training moves more.
 - The backprop target is boost-cut's ledger, 3.70835 at seed 0. The handoff's 3.708 is the same run rounded.
 - H8's cut mode gives each block's MLP the own-query path through the next block, which PR #40's out-credit leaves
-  out; synthesis mode follows PR #40 exactly.
+  out. Synthesis mode matches PR #40's core estimate at 0.99 or more on every block matrix in float32
+  (`h6.h8_validation_fp32`: the bf16 query gap is the record's rounding; `attn.c_v` and `attn.c_proj` differ slightly
+  but systematically, 0.995 to 0.999); the 8 `x0_lambdas` scalars stay at 0.980, and both estimates are far from
+  autograd there, cause not yet found.
+- In H8, Boost does not help: `e1.h8_cut_noboost` ties `e1.h8_cut` (3.802 against 3.799, paired differences of
+  -0.005 to +0.009), and the cut gradient's cosine to backprop is already 0.992 at the handoff. E15 asks whether
+  Boost's lens is a crutch for the chain's weak early gradient, which H8 does not have, so its H8 result does not
+  carry to the chain.
+- E4's `adapt` multiplier rises in the warmdown tail (to 32-52x by the last update): once the hand schedule shrinks
+  the steps, the 4-row judge accepts nearly every one, so the rule undoes the end of the warmdown.
+- E5's float32 readout tests the method without rounding; the plan's test is from bf16 forward differences as the
+  chain's kernels take them (differencing the changes, which the bf16 replay does not), so a float32 pass is
+  necessary, not sufficient.
+- E11's runway grid (0.01 to 0.08) is too short for this model: 99.98% of tokens still gain at 0.08, so every weight
+  is 1 and the arm is the baseline; E10's clip changes the gradient by a cosine of 0.999. Both are nulls by inaction.
 - E8's diagnostic takes its directions from the checkpoint's momentum (its rails) rather than from the update that
   also holds the measured sequences' own gradient: directions chosen from the same sequences make their noise look like
   signal (a pure-noise check showed SNR ~100 along them). It measures training sequences, since the held-out set has

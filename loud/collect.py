@@ -8,7 +8,8 @@ Never report a number that is not in this table.
 Only complete runs (full epoch, scored, and not failing their own check) enter the means; the rest are listed apart,
 with run directories that hold no result.json. Flags: 'mixed GPUs' / 'mixed code' when one variant's seeds differ;
 'GPU differs' / 'code differs' when a variant differs from another variant of the same experiment, so wall-clocks
-(or, for code, numbers) need care before they are compared.
+(or, for code, numbers) need care before they are compared; 'shared GPU' when its runs shared a GPU with other jobs
+(LOUD_JOBS_PER_GPU), so its train_seconds are not the method's.
 """
 import argparse
 import json
@@ -64,6 +65,7 @@ def runs(root=RUNS, experiment=None, active=()):
             complete=result.get('complete', True), check=(result.get('check') or {}).get('status'),
             gpu=result.get('gpu'), torch=(config.get('environment') or {}).get('torch'),
             code=code.get('digest'), commit=(git.get('commit') or '')[:9] + ('+dirty' if git.get('dirty') else ''),
+            shared=bool((read_json(run_dir / 'job.json') if (run_dir / 'job.json').exists() else {}).get('slot')),
             run_dir=str(run_dir)))
     return rows, missing
 
@@ -99,7 +101,7 @@ def table(rows):
                         val=fmt(val[0], val[1]), val_mean=val[0], val_sd=val[1], test=fmt(test[0], test[1]),
                         heldout=fmt(held[0], held[1]), heldout_min=fmt(low[0], low[1]),
                         train_seconds=fmt(secs[0], secs[1], 1), check=f'pass {len(checks)}' if checks else '-',
-                        gpus={r['gpu'] for r in rs}, codes={r['code'] for r in rs},
+                        gpus={r['gpu'] for r in rs}, codes={r['code'] for r in rs}, shared=any(r.get('shared') for r in rs),
                         gpu=', '.join(sorted(str(r['gpu']) for r in rs)),
                         code=', '.join(sorted({str(r['code'])[:8] for r in rs})),
                         commit=', '.join(sorted({r['commit'] for r in rs}))))
@@ -114,6 +116,8 @@ def table(rows):
             flags.append('GPU differs')
         if any(d['codes'] != c['codes'] for d in others):
             flags.append('code differs')
+        if c['shared']:
+            flags.append('shared GPU')  # LOUD_JOBS_PER_GPU > 1: train_seconds include other jobs' contention
         c['flags'] = ', '.join(flags)
     for c in out:
         del c['gpus'], c['codes']

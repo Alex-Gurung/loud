@@ -32,7 +32,7 @@ RESULTS = {'proxy': TRAINING_RESULTS, 'identity': TRAINING_RESULTS, 'h8': TRAINI
            'score': ('val_loss', 'test_loss'),
            'reference': ('val_loss', 'test_loss', 'train_seconds'),
            'compare': ('train_loss_max_diff', 'train_loss_mean_diff', 'train_loss_max_diff_all', 'val_loss_diff'),
-           'diagnose': ('min_cosine', 'share_099'),  # h8_validation's
+           'diagnose': ('min_cosine', 'min_cosine_matrices', 'min_cosine_scalars', 'share_099'),  # h8_validation's
            'gate': (),  # its args name its values
            'noop': ('val_loss',)}
 

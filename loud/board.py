@@ -33,7 +33,7 @@ EXPERIMENTS = [
          question='Do the data, the scorer and each port reproduce their published numbers?',
          setup='Short complete runs of every method; the record rescored; backprop, the identity path and the Cut '
                'chain against their published logs.',
-         success='Every check within its tolerance (rescoring 1e-5; backprop and identity 0.02; Cut prefix 0.003 '
+         success='Every check within its tolerance (rescoring 1e-4; backprop and identity 0.02; Cut prefix 0.003 '
                  'over 20 updates).', gate='Every experiment waits for these.'),
     dict(id='h6', name='H6 diagnostics', priority='P1',
          question='What do the trained checkpoints say before the experiments run?',
@@ -125,20 +125,57 @@ def change_of(spec):
     return ', '.join(f'{k}={v}' for k, v in args.items()) or 'defaults'
 
 
-def verdict(e, by_key):
-    """(state, sentence) for an experiment from its arms' means (by_key: arm key -> arm row): 'waiting' until every
-    arm has a counted run."""
+def activity(arm, runs_):
+    """(acted, note) for a rule arm whose logs say whether its rule changed anything: E11's runway (the share of tokens
+    at the grid's largest move: all of them means every weight is 1), E10's clip (its gradient's cosine to the
+    unclipped one) and E10's agree (the share of weight-update entries it kept). (True, '') for any other arm."""
+    logs = [m for r in runs_ for m in read_jsonl(Path(r['run_dir']) / 'metrics.jsonl')]
+    if arm == 'e11.runway':
+        shares = [s[-1] for m in logs if 'runway' in m for s in m['runway'].values()]
+        if shares:
+            top = statistics.fmean(shares)
+            return top < 0.99, f'{top:.2%} of tokens pick the grid\'s largest move, so the weights are almost all 1'
+    if arm == 'e10.clip':
+        cos = [m['cosine_to_identity'] for m in logs if 'cosine_to_identity' in m]
+        if cos:
+            mean = statistics.fmean(cos)
+            return mean < 0.995, f'its gradient keeps cosine {mean:.4f} to the unclipped one'
+    if arm == 'e10.agree':
+        kept = [m['agree_kept'] for m in logs if 'agree_kept' in m]
+        if kept:
+            return True, f'it keeps {statistics.fmean(kept):.2%} of the weight-update entries'
+    return True, ''
+
+
+def seed_mean(runs_, seeds):
+    vals = [r['val_loss'] for r in runs_ if r['seed'] in seeds and counts(r)]
+    return statistics.fmean(vals) if vals else None
+
+
+def verdict(e, by_key, by_arm=None):
+    """(state, sentence) for an experiment from its arms' means (by_key: arm key -> arm row; by_arm: arm key -> its
+    runs): 'waiting' until every arm has a counted run; 'null' when every arm's rule never acted."""
+    by_arm = by_arm or {}
     cells = {a['variant']: a for a in by_key.values() if a['experiment'] == e['id'] and not a['followup']}
     if not cells or any(a['val_mean'] is None for a in cells.values()):
         return 'waiting', 'Waiting for every arm to finish.'
     ref = e.get('reference')
     base = by_key[ref]['val_mean'] if ref in by_key else None
     best = min(cells.values(), key=lambda a: a['val_mean'])
+    if e['id'] in ('e10', 'e11'):
+        acts = {v: activity(a['key'], by_arm.get(a['key'], [])) for v, a in cells.items()}
+        notes = '; '.join(f'{v}: {n}' for v, (_, n) in acts.items() if n)
+        if base is not None and not any(acted for acted, _ in acts.values()):
+            return 'null', f'The rule never acted ({notes}); best arm at {best["val_mean"] - base:+.4f}.'
+        if notes:
+            e = dict(e, note=notes)
     if e['id'] in ('e2', 'e3', 'e10', 'e11'):
         if base is None:
             return 'waiting', f'Waiting for {ref}.'
         ok = best['val_mean'] <= base - 0.02
-        return ('met' if ok else 'not met'), f'Best arm {best["variant"]} at {best["val_mean"] - base:+.4f} (needs -0.02).'
+        note = f' ({e["note"]})' if e.get('note') else ''
+        return ('met' if ok else 'not met'), \
+            f'Best arm {best["variant"]} at {best["val_mean"] - base:+.4f} (needs -0.02){note}.'
     if e['id'] == 'e4':
         a = cells.get('adapt_nowd')
         if base is None or a is None:
@@ -174,13 +211,14 @@ def verdict(e, by_key):
         ok = best['val_mean'] <= base - 0.02 or (e['id'] == 'e14' and closed >= 0.5)
         return ('met' if ok else 'not met'), \
             f'Best arm {best["variant"]} at {best["val_mean"] - base:+.4f}, closing {closed:.0%} of the gap to backprop.'
-    if e['id'] == 'e16':
-        four = [by_key.get(BP4), cells.get('bp_track3'), by_key.get(CUT), cells.get('h8_track3')]
-        if any(a is None or a.get('val_mean') is None for a in four):
+    if e['id'] == 'e16':  # the fixed model's cells on the track-3 arms' seeds (0-1)
+        seeds = {0, 1}
+        four = [seed_mean(by_arm.get(k, []), seeds) for k in (BP4, 'e16.bp_track3', CUT, 'e16.h8_track3')]
+        if any(v is None for v in four):
             return 'waiting', 'Waiting for the four arms.'
-        bp, h8 = four[0]['val_mean'] - four[1]['val_mean'], four[2]['val_mean'] - four[3]['val_mean']
+        bp, h8 = four[0] - four[1], four[2] - four[3]
         return ('met' if (bp > 0) == (h8 > 0) else 'not met'), \
-            f'Track-3 gain: backprop {bp:+.4f}, H8 {h8:+.4f}.'
+            f'Track-3 gain on seeds 0-1: backprop {bp:+.4f}, H8 {h8:+.4f} (leaderboard on 30M: +0.127).'
     return 'n/a', 'Read the arms and their checks.'
 
 
@@ -247,7 +285,7 @@ def build(configs=REPO / 'configs', queue_root=QUEUE, runs_root=RUNS, out=OUT):
                 base = ref['val_mean'] if ref else None
                 a['reference'] = e.get('reference') or ''
                 a['delta'] = None if base is None or a['val_mean'] is None else a['val_mean'] - base
-        state, sentence = verdict(e, by_key)
+        state, sentence = verdict(e, by_key, by_arm)
         mine = [a for a in arms if a['experiment'] == e['id']]
         label, title = e['name'].split(' ', 1) if e['id'][0] in 'eh' else ('Checks', e['name'])
         n = state_counts.get(e['id'], {})

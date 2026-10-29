@@ -2,10 +2,12 @@
 # identity scheme against PR #40's Cut estimate with its cross-token patches off, no future draws, every MLP unit
 # routed and every own-query key logit rerun. Every H8 experiment waits for it. v2's bar is a per-matrix cosine of
 # 0.99. The first run (2026-10-29, H100) met it on 56 of 60 matrices; below it: three attention query matrices
-# (0.986, 0.987, 0.989; the median query matrix 0.9925) and x0_lambdas (0.980), with keys, MLPs, head and embeddings
-# at 0.9995 or more. The record measures the query's and the scalars' credit by bf16 finite differences through the
-# softmax, where H8 differentiates exactly, so the bar here is every matrix at 0.98 and 90% at 0.99, and
-# h6.h8_validation_fp32 (both sides in float32) says whether the gap is the record's rounding.
+# (0.986, 0.987, 0.989) and x0_lambdas (0.980). The bar here became every matrix at 0.98 and 90% at 0.99, set after
+# that run. h6.h8_validation_fp32 (both sides in float32) then showed: the query gap is the record's bf16 rounding
+# (every query matrix at 0.992 or more); attn.c_v (0.9946-0.9975) and attn.c_proj (0.9949-0.9986) are unchanged, a
+# small systematic difference, all still above 0.99; x0_lambdas stays at 0.980, and on the trained checkpoint both H8
+# (-0.07) and the record (+0.31) are far from autograd there (h6.cos_to_autograd_*_c100), cause not yet found. So every
+# block matrix meets v2's bar in float32, and the 8 x0_lambdas scalars are the one exception (review round 8).
 experiment: h6
 variant: h8_validation
 task: diagnose

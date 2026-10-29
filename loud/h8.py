@@ -590,9 +590,10 @@ def synthesis_gradients(model, idx, targets, scheme, step, freeze_queries=False,
         with untimed():
             exact = block_local(credits, False)
             keys = list(exact)  # block-local only: the head and scalars are the cut graph's in both
-            a = torch.cat([grads[k].float().flatten() for k in keys])
-            b = torch.cat([exact[k].float().flatten() for k in keys])
-            fields['cosine_to_identity'] = float(a @ b / (a.norm() * b.norm()).clamp_min(1e-30))
+            with torch.autocast(idx.device.type, enabled=False):  # float32: under bf16 the dot product exceeds 1
+                a = torch.cat([grads[k].float().flatten() for k in keys])
+                b = torch.cat([exact[k].float().flatten() for k in keys])
+                fields['cosine_to_identity'] = float(a @ b / (a.norm() * b.norm()).clamp_min(1e-30))
     return grads, losses, fields
 
 
@@ -757,7 +758,10 @@ class H8:
         if step in (round(0.2 * self.steps), self.steps):  # every run, so E14's arms have their baseline's
             record['effective_rank'] = effective_ranks(self.model, x, y, self.device)
         handoff = next((i for i, b in enumerate(self.schedule, 1) if b[0] == 'cut'), None)
-        if handoff is not None and step == handoff - 1:  # every Boost run: E15's arms and their baseline, e1.h8_cut
+        # every run at the Boost -> Cut handoff (E15's arms and e1.h8_cut), and a run without Boost at the update where
+        # the record hands off (e1.h8_cut_noboost: E15's no-Boost reference)
+        at = None if handoff is None else handoff - 1 if handoff > 1 else round(self.m.Settings().switch * self.steps)
+        if at and step == at:
             record['handoff_cut_cosine'] = cut_cosine(self.model, x, y, self.device)
         return record
 

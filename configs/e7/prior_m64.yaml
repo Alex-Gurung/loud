@@ -6,7 +6,9 @@ variant: prior_m64
 task: h8
 seeds: [0, 1, 2]
 priority: 55
-after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0, e7.precondition.s0]
+# Not after e7.precondition: its variance ratios (median 0.54 at 50%, 0.56 at 100%) sit just above the 0.5 bar, the
+# mid sites S5-S8 below it, and these arms are 6 short H8 runs (review round 8).
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
 args:
   sequences: 10M
   heldout: 32

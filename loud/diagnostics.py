@@ -49,6 +49,7 @@ from .data import benchmark_split
 from .options import ESTIMATORS, H8, diagnose_options
 from .runlog import Run
 
+SCALARS = ('resid_lambdas', 'x0_lambdas')  # the mixing scalars: 8 numbers each, which the record estimates apart
 TYPES = ('attn.c_q', 'attn.c_k', 'attn.c_v', 'attn.c_proj', 'attn.ve_gate', 'mlp.c_fc', 'mlp.c_proj')
 CHAIN_SIGMA = 0.01  # PR #40's Settings.chain_sigma: the probe step per coordinate, relative to the token's RMS
 
@@ -418,6 +419,9 @@ def run_task(spec, run_dir):
     result = dict(tool=o['tool'], complete=True, summary_file=f'{o["tool"]}.json')
     if o['tool'] == 'h8_validation':  # numbers other jobs can gate on (expect: {min_cosine: {min: 0.98}, ...})
         cosines = list(summary['cosines'].values())
+        matrices = [c for n, c in summary['cosines'].items() if n not in SCALARS]
         result['min_cosine'] = min(cosines)
+        result['min_cosine_matrices'] = min(matrices)  # v2's bar applies here; the mixing scalars apart
+        result['min_cosine_scalars'] = min((c for n, c in summary['cosines'].items() if n in SCALARS), default=1.0)
         result['share_099'] = sum(c >= 0.99 for c in cosines) / len(cosines)
     return run.finish(result, spec.get('expect'))
