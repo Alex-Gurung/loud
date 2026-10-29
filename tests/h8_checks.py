@@ -166,6 +166,8 @@ def h6_tools(scratch):
                for n in names)
     valid, _ = tools.h8_validation()
     assert not valid['below_099'], valid
+    exact, _ = tools.h8_validation('float32')  # both sides in float32: the record's fp32 chain, its capture
+    assert not exact['below_099'] and exact['precision'] == 'float32', exact
     synth, _ = tools.cos_to_autograd('h8')  # H8's estimate is the cut graph's: close to autograd, short of 1
     assert set(synth['sites']) == set(names) and 0.5 < synth['all'] < 1, synth
     medians = [synth['sites'][n]['median'] for n in names]  # the top site, with the least above it, misses the least

@@ -118,7 +118,8 @@ class Toolkit:
     def cos_to_autograd(self, estimator='identity'):
         """An estimator's weight gradient on this sequence against autograd of the summed loss, both on the checkpoint
         (identity: PR #26's FastRelay at its main() defaults; h8: H8 synthesis with the identity scheme, plus per site
-        the per-token cosine of the cut graph's credit to the full graph's; cut: PR #40's Cut, the record's settings)."""
+        the per-token cosine of the cut graph's credit to the full graph's; cut: PR #40's Cut, the record's
+        settings)."""
         m, summary = self.m, {}
         ref = copy.deepcopy(self.model).float().requires_grad_(True)
         with exact():
@@ -241,9 +242,11 @@ class Toolkit:
                                                            signal=quantiles(torch.cat(signals)))
         return summary, {}
 
-    def h8_validation(self):
+    def h8_validation(self, precision='bf16'):
         """H8's synthesis mode (identity scheme) against PR #40's Cut estimate on this checkpoint, the record's
-        cross-token patches off, no future draws, every MLP unit routed (v2 H8, 'Validation before use')."""
+        cross-token patches off, no future draws, every MLP unit routed (v2 H8, 'Validation before use'). precision
+        'float32' runs both sides without bf16 (the record's chain_precision fp32, its capture in float32), to tell
+        the record's own rounding from a difference in what H8 computes."""
         from .cut import record_settings
         from .options import H8, PRESETS
         m, config = self.m, self.model.config
@@ -252,15 +255,21 @@ class Toolkit:
         s.value_path = s.path_scalars = s.gate_path = False
         s.key_path_draws, s.future_draws, s.route_k = 0, 0, 4 * config.n_embd
         s.query_keys = 0  # every key logit of the own query, as H8's live query has (the record caps them at 256)
+        exact32 = precision == 'float32'
+        if exact32:
+            s.chain_precision = 'fp32'
         model = self.model.requires_grad_(True)
         params = dict(model.named_parameters())
         scheme = h8.Scheme(dict(H8), config.n_embd, self.x.device, 0)  # the defaults: the identity scheme
-        with torch.autocast(self.x.device.type, dtype=torch.bfloat16, enabled=self.x.is_cuda):
+        with torch.autocast(self.x.device.type, dtype=torch.bfloat16, enabled=self.x.is_cuda and not exact32):
             synth, _, _ = h8.synthesis_gradients(model, self.x, self.y, scheme, 1)
         model.requires_grad_(False)
-        record = m.Cut(model, s, 0, 0, 1, 1, None).estimate(self.x, self.y)
+        cut = m.Cut(model, s, 0, 0, 1, 1, None)
+        if exact32:
+            cut.capture.dtype = torch.float32
+        record = cut.estimate(self.x, self.y)
         found = {n: cosine(synth[id(p)], record[n]) for n, p in params.items() if record[n].any()}
-        return dict(cosines=found, below_099=sorted(n for n, c in found.items() if c < 0.99)), {}
+        return dict(cosines=found, below_099=sorted(n for n, c in found.items() if c < 0.99), precision=precision), {}
 
     def synth_vs_real(self, rows=128):
         """H6 item 6: H8 synthesis against the real chain's partial-row estimate with the same rows and signs. PR #40's
@@ -395,12 +404,15 @@ def run_task(spec, run_dir):
     elif o['tool'] == 'snr_spectrum':  # E8's: training sequences after the checkpoint
         summary, tensors = snr_tool(model, split, checkpoint, o)
     else:
-        kwargs = dict(estimator=o['estimator']) if o['tool'] == 'cos_to_autograd' else {}
+        kwargs = (dict(estimator=o['estimator']) if o['tool'] == 'cos_to_autograd' else
+                  dict(precision=o['precision']) if o['tool'] == 'h8_validation' else {})
         summary, tensors = getattr(Toolkit(m, model, x, y), o['tool'])(**kwargs)
     (run_dir / f'{o["tool"]}.json').write_text(json.dumps(summary, indent=1) + '\n')
     if tensors:
         torch.save(tensors, run_dir / f'{o["tool"]}.pt')
     result = dict(tool=o['tool'], complete=True, summary_file=f'{o["tool"]}.json')
-    if o['tool'] == 'h8_validation':  # a number other jobs can gate on (expect: {min_cosine: {min: 0.99}})
-        result['min_cosine'] = min(summary['cosines'].values())
+    if o['tool'] == 'h8_validation':  # numbers other jobs can gate on (expect: {min_cosine: {min: 0.98}, ...})
+        cosines = list(summary['cosines'].values())
+        result['min_cosine'] = min(cosines)
+        result['share_099'] = sum(c >= 0.99 for c in cosines) / len(cosines)
     return run.finish(result, spec.get('expect'))

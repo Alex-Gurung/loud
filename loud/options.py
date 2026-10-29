@@ -32,7 +32,7 @@ RESULTS = {'proxy': TRAINING_RESULTS, 'identity': TRAINING_RESULTS, 'h8': TRAINI
            'score': ('val_loss', 'test_loss'),
            'reference': ('val_loss', 'test_loss', 'train_seconds'),
            'compare': ('train_loss_max_diff', 'train_loss_mean_diff', 'train_loss_max_diff_all', 'val_loss_diff'),
-           'diagnose': ('min_cosine',),  # h8_validation's
+           'diagnose': ('min_cosine', 'share_099'),  # h8_validation's
            'gate': (),  # its args name its values
            'noop': ('val_loss',)}
 
@@ -190,6 +190,7 @@ DIAGNOSE = dict(
     batch=8,                    # snr_spectrum: the update batch the SNR is stated at (and the checkpoint run's)
     estimators=['backprop', 'synthesis', 'time_k4', 'token_k4'],  # snr_spectrum: per-sequence gradients (ESTIMATORS)
     estimator='identity',       # cos_to_autograd: 'identity' (PR #26), 'h8' (H8 synthesis) or 'cut' (PR #40's Cut)
+    precision='bf16',           # h8_validation: 'float32' runs both sides without bf16
 )
 TOOLS = ('cos_to_autograd', 'credit_dump', 'deep_readout_check', 'linearity_check', 'h8_validation', 'ngram_tiers',
          'snr_spectrum', 'synth_vs_real')
@@ -489,8 +490,11 @@ def diagnose_options(args):
     snr = [k for k in ('sequences', 'batch', 'estimators') if o[k] != DIAGNOSE[k]]
     if snr and o['tool'] != 'snr_spectrum':
         raise ValueError(f'{snr} apply to snr_spectrum only')
-    if o['estimator'] not in ('identity', 'h8', 'cut') or (o['estimator'] != 'identity' and o['tool'] != 'cos_to_autograd'):
+    if o['estimator'] not in ('identity', 'h8', 'cut') or (
+            o['estimator'] != 'identity' and o['tool'] != 'cos_to_autograd'):
         raise ValueError("estimator ('identity', 'h8' or 'cut') applies to cos_to_autograd only")
+    if o['precision'] not in ('bf16', 'float32') or (o['precision'] != 'bf16' and o['tool'] != 'h8_validation'):
+        raise ValueError("precision ('bf16' or 'float32') applies to h8_validation only")
     positive(o, 'sequences', 'batch')
     names = o['estimators']
     if not names or set(names) - set(ESTIMATORS) or len(set(names)) < len(names):
