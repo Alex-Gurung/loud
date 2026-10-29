@@ -7,16 +7,28 @@ backpropagation. It includes a GPU job queue and workers that follow the stylo s
 cluster, sharing one volume).
 
 **Terms.**
+- **Tracks 1–3:** Noise's leaderboard tracks. Track 1 is the validation-loss record at fixed data, track 2 the
+  speedrun to 3.5, track 3 architecture changes.
+- **1M, 10M, 30M:** the training ranges, the first 488, 4,880 and 14,648 sequences of `train.pt` (about that many
+  tokens). The 10M record is track 1's record on the 10M range (PR #40).
+- **Sites:** S0, the raw embedding, and S1 to S8, each block's mid stream (after attention, before the MLP).
+- **Boost and Cut:** the two phases of the 10M record (PR #40). Boost, for the first 20% of updates, trains each
+  sublayer against the shared head's readout of the stream right after it. Cut then measures each site's credit (the
+  loss gradient there) with forward probes.
 - **Proxy:** backprop with the record's optimizer, a development stand-in, never an entry.
 - **H8:** an autograd emulation of the 10M record's Boost and Cut (`loud/h8.py`): ordinary autograd on the *cut
   graph*, the fixed network with the inputs to every key, value and gate held, which is what the chain measures. It
   runs at backprop speed, so most forward-only questions are asked there first and only winners go to the real chain.
-- **Sites:** S0, the raw embedding, and S1 to S8, each block's mid stream (after attention, before the MLP).
 - **Identity path:** track 2's forward-only estimator (PR #26). One Hadamard cycle of 512 probes at the top stream,
   with credit handed down the residual scalars.
 - **Cut chain:** track 1's 10M record estimator (PR #40), the real forward-only chain (`loud/cut.py`).
 - **ANVIL II:** the records' optimizer for block matrices.
+- **boost-cut:** the repository with the backprop baseline script (`backprop_preset.py`), the test split and the
+  ledger of Boost and Cut runs.
 - **H1–H8 and E1–E16:** the plan's infrastructure pieces (its section 3) and experiments (section 5).
+- **P0–P3:** the plan's priorities (section 4). P0 is the infrastructure and verifications, P1 the baselines and first
+  experiments, P2 the second set, P3 work that runs only if earlier results call for it (E9, E5's implementation,
+  E12).
 - **Verification 1–3:** the plan's three checks before any experiment (section 2).
 
 ## Status
@@ -32,7 +44,7 @@ cluster, sharing one volume).
 | H5 identity path, PR #26 on one GPU (`loud/identity.py`) | done; CPU tests: one update equals PR #26's own |
 | H5 Cut chain, PR #40 on one GPU (`loud/cut.py`), with v2's `rows`, `row_assign`, `prior` and E13's `row_budget` hook | done; CPU tests: 4 updates equal PR #40's own loop on 8 processes |
 | H6 diagnostic toolkit (`loud/diagnostics.py`, task `diagnose`): v2's tools on H8's cut graph and reforward | done; CPU tests on tiny models |
-| H7 runner, results table, per-experiment plots and tables (`run.py`, `collect.py`, `python3 -m loud.plots <exp>`) | done |
+| H7 runner, results table, per-experiment plots and tables (`run.py`, `collect.py`, `loud.plots`) | done |
 | H8 (`loud/h8.py`): cut, synthesis and Boost modes, probing schemes, `reforward`; the track-3 model (`loud/arch.py`) | done; CPU tests: synthesis matches PR #40's Cut (cosine ≥ 0.996 per matrix), Boost matches PR #40's |
 | E1 to E16 | configs in `configs/e<N>/`; see What runs |
 | Port checks against their sources (`compare` task) | done |
@@ -62,14 +74,31 @@ shared volume has 15 GB left; it had 38 GB free on 2026-10-29. The first runs me
 ## Running on GPUs
 
 Workers are Kubernetes Jobs, launched from the root node as in stylo. Each worker runs queued jobs one at a time on
-one GPU, from `artifacts/queue/` on the shared volume. A worker exits after 20 idle minutes; EIDF reclaims idle GPUs
-after about 30.
+one GPU, from `artifacts/queue/` on the shared volume. With one GPU, launch one worker; with two, launch the two-GPU
+pod instead:
 
 ```bash
-kubectl -n eidf107ns create -f worker/gpu_worker.yaml       # one H100 (comparable wall-clocks); start several
-kubectl -n eidf107ns create -f worker/gpu_worker_any.yaml   # one H100 or H200 (jobs without a gpu: requirement)
+kubectl -n eidf107ns create -f worker/gpu_worker.yaml       # one H100 worker (comparable wall-clocks)
 kubectl -n eidf107ns create -f worker/gpu_worker_2.yaml     # a two-H100 pod: two workers, one per GPU
+kubectl -n eidf107ns create -f worker/gpu_worker_any.yaml   # one H100 or H200 (jobs without a gpu: requirement)
 ```
+
+Nothing restarts a worker, so relaunch it with the same command whenever it stops:
+- A worker exits after 20 idle minutes, with no ready job or with the disk below its floor (EIDF reclaims idle GPUs
+  after about 30). `loud.status` shows it as `exited: idle (…)`.
+- A pod that dies (preempted, crashed or deleted) is not restarted (`backoffLimit: 0`, `restartPolicy: Never`).
+  `loud.status` shows its worker as `LOST`.
+- A dead worker's job stays `running` until its 5-minute lease expires, and it is queued again only when a worker
+  next claims (`LEASE EXPIRED` in `loud.status`). With no worker running, nothing claims, so relaunching a worker is
+  what moves the job.
+
+**Disk.** Workers pause when the shared volume has less than `LOUD_MIN_FREE_GB` free (default 15 GB, headroom for the
+other projects on the volume), then exit after 20 idle minutes. `loud.status` shows the free space, and a paused
+worker as `waiting: shared disk nearly full`. To change the floor, edit `LOUD_MIN_FREE_GB` in the
+`worker/gpu_worker*.yaml` you launch. If the volume runs low, free what no job reads: superseded runs
+(`artifacts/runs/<experiment>/<variant>/s<seed>.superseded<k>/`, left by `--rerun`) and failed or abandoned attempts
+(`s<seed>.attempt<k>/`, kept only for their logs). Never remove a running job's attempt (`loud.status` lists it) or a
+finished run's `s<seed>/`. `ls -d artifacts/runs/*/*/s*.superseded* artifacts/runs/*/*/s*.attempt*` lists them.
 
 The image is stylo's pinned `vllm/vllm-openai:v0.32.0`, used only for its PyTorch stack (torch 2.13). Nothing is
 installed at startup. Each pod writes its startup phases to `artifacts/queue/bootstrap_logs/<pod>.log`, then checks the
@@ -83,9 +112,17 @@ python3 -m loud.submit configs                  # queue every seed of every conf
 python3 -m loud.submit configs/e1 --dry-run     # what each job would do, checked against the queue
 python3 -m loud.status                          # workers, running, queued (and why), failed, done
 python3 collect.py                              # the results table (also artifacts/results/table.md)
-python3 -m loud.plots e4                        # an experiment's plots and tables, in artifacts/plots/e4/
 python3 -m loud.board                           # the experiment board's data, in artifacts/board/
+/opt/loud-cpu-venv/bin/python -m loud.plots e4  # an experiment's plots and tables, in artifacts/plots/e4/
 ```
+
+The plots need matplotlib, which plain `python3` on this pod lacks, so they run under the CPU venv (below).
+
+**The first v2 submission.** The queue on the shared volume still holds v1's jobs, all cancelled, and submitting
+leaves a cancelled job cancelled unless you pass `--rerun`. Without it, the verifications and many other jobs stay
+cancelled and everything else waits on them. So the first v2 submission is `python3 -m loud.submit configs --rerun`.
+Nothing has finished, so `--rerun` supersedes nothing. Submit without `--rerun` after that. Both a submission and a
+dry run give the reason for each job they leave as it is, e.g. `unchanged (cancelled; resubmit with --rerun)`.
 
 **The experiment board** ([claude.ai link](https://claude.ai/artifact/YFQSqsRQV7HzjqfjMgSRtf), private to its
 owner until shared) shows every experiment's question, setup, success test, gate, job progress and verdict, each
@@ -163,26 +200,30 @@ gives a first read of every arm early. The bands, in order (`priority:` in each 
   - a job that has not started takes the newer code, priority, `after` and `gpu`;
   - a crashed (failed) job is queued again;
   - a done job (including one that failed its check) and a cancelled job change only with `--rerun`, which keeps the
-    old run as `s<seed>.superseded<k>`.
+    old run as `s<seed>.superseded<k>`. The submission says so: `unchanged (done; resubmit with --rerun)`.
 
-  A submission is checked in full first: duplicate ids, unknown `after` ids and conflicts stop it before anything is
-  written.
-- **Disk.** Workers pause when the shared volume has less than `LOUD_MIN_FREE_GB` free (default 15, headroom for the
-  other projects on the volume), and `loud.status`
-  says so.
-- Nothing is ever deleted: attempts, superseded runs, snapshots and job history all stay.
+  A submission is checked in full first: duplicate ids, unknown `after` ids, conflicts and config errors stop it
+  before anything is written.
+- **Disk.** Workers pause below `LOUD_MIN_FREE_GB` free; see Disk under Running on GPUs.
+- The harness deletes nothing: attempts, superseded runs, snapshots and job history all stay.
 
 ### When a job fails or is blocked
 
-- `loud.status` gives the cause: `blocked: verify.bp_b8.s0 failed its check`, `waiting for …`, or a failed job's last
-  log line and its log path.
+- `loud.status` gives the cause: `blocked: verify.bp_b8.s0 failed its check`, `waiting: …`, or a failed job's last
+  log line and its log path. Blocking passes down the chain: a job whose dependency is queued but blocked is blocked
+  too, and status names the chain (`blocked: h6.h8_validation.s0 <- e1.bp_b8.s0 <- verify.bp_b8.s0 failed its
+  check`). So a failed verification 2 blocks every H8 experiment, through `e1.bp_b8` and `h6.h8_validation`.
 - A crashed job (under `failed`): fix the cause and resubmit its config; it is queued again.
 - A job that ran but failed its check is done, so resubmitting changes nothing: after fixing the cause, resubmit it
   with `--rerun` (for example `python3 -m loud.submit configs/verify/bp_b8.yaml --rerun`). Its dependents become ready
   when it passes.
+- A `gate` job that fails its check (`e7.precondition`, `e13.gate_theta*`) is the plan saying skip, not an error. The
+  arms that wait on it show as `skipped (gate e7.precondition.s0 says skip)` and never run; cancel them.
 - If the gate itself was wrong, edit the dependent configs' `after` and resubmit them: waiting jobs take the new
   dependencies.
-- `python3 -m loud.submit --cancel <job id>` cancels a queued job.
+- `python3 -m loud.submit --cancel <job id or pattern> …` cancels queued jobs, by id or by a quoted glob pattern on
+  job ids (`--cancel 'e7.prior_*' e13.theta2.s1`). With `--dry-run` it lists what it would cancel. An id that is not
+  queued is reported, and the others are still cancelled.
 
 ## Layout
 
@@ -201,8 +242,16 @@ loud/            the harness package (frozen into each job's snapshot)
   reference.py   run a pinned external script unmodified              plots.py     per-experiment plots and tables
   options.py     task registry, option tables and checks (no torch)   run.py       H7 runner
   collect.py     H7 results table                                     refs.py      pinned external imports
+  pergrad.py     H2 per-sequence gradients                            gate.py      the gate task: a plan rule as a check
+  runlog.py      the files every run writes, and its check            noop.py      plumbing task for queue and workers
+  board.py       the experiment board's tables (its page: board.html) paths.py     where shared state lives (LOUD_*)
+  common.py      small shared helpers (stdlib only)
   jobqueue.py, worker.py, submit.py, status.py, snapshot.py            the GPU queue
-configs/         one YAML per variant; seeds listed inside
+configs/         one YAML per variant (configs/<experiment>/<variant>.yaml), its seeds listed inside
+  verify/        the smoke runs and verifications 1-3
+  h6/            H6's diagnostics, h8_validation among them
+  e1/ ... e16/   each experiment's arms, gates and diagnostics
+  followups/     configs the plan runs only after reading earlier results; a directory submission skips them
 review/          the review rubric, lenses, Codex runner, reports and ledger
 worker/          Kubernetes Job YAMLs and the pod bootstrap
 scripts/         fetch_external.sh, prepare_data.sh, prepare_test.py, cpu_env.sh (CPU)
@@ -213,7 +262,7 @@ external/  data/  artifacts/        shared-volume state, gitignored
 
 Recreate `external/` with `scripts/fetch_external.sh` (it clones Noise again at PR #26's commit as
 `external/noise-pr26`), and the data with `scripts/prepare_data.sh`. Run the tests with
-`PYTHONPATH=. /opt/loud-cpu-venv/bin/python -m pytest tests`, 112 tests in about 15 minutes on this pod. The method
+`PYTHONPATH=. /opt/loud-cpu-venv/bin/python -m pytest tests`, 126 tests in about 15 minutes on this pod. The method
 tests use tiny models and short sequences, with dense attention instead of flex attention (which has no CPU
 backward); the Cut chain's checks run it eagerly (no compilation) with a 512-token vocabulary.
 
@@ -223,7 +272,7 @@ backward); the Cut chain's checks run it eagerly (no compilation) with a 512-tok
 experiment: e1
 variant: bp_b4          # one change per variant; the file is configs/<experiment>/<variant>.yaml
 task: proxy             # proxy | h8 | identity | cut | population | score | reference | compare | diagnose | gate | noop
-seeds: [0, 1, 2]
+seeds: [0, 1, 2]        # or seed: 1; with neither, seed 0 only
 priority: 50            # lower runs first
 after: [verify.bp_b8.s0]
 gpu: H100               # optional: only workers whose GPU name contains this take the job
@@ -231,8 +280,12 @@ args: {recipe: boostcut, sequences: 10M, heldout: 32, batch: 4, checkpoints: [0]
 expect: {val_loss: [3.7083, 0.01]}   # optional gate; recorded as pass/fail in result.json
 ```
 
-To add a variant, copy a config, change `variant` and the one option under test, and submit it. Unknown keys and
-options, bad values, an `expect` on a metric the task does not produce and duplicate job ids all fail at submission.
+To add a variant, copy a config, change `variant` and the one option under test, and submit it. A config without
+`seeds` (or `seed`) runs seed 0 only, without a warning. Unknown keys and options, bad values, an `expect` on a metric
+the task does not produce and duplicate job ids all fail at submission, with one line naming the config. So does a
+job id in `args` that the job does not wait for. A diagnostic's `checkpoint: <job id>:<file>` must name a job in its
+`after`. A comparison's `a` and `b` job ids must be in its `after_done`, so that it runs even when a check fails. A
+gate's `values` job ids must be in either list.
 
 Every training run writes:
 - `config.json`: the spec, the code snapshot and its git state, the pinned external commits, torch and the GPU;

@@ -146,9 +146,82 @@ def test_resubmission(q, tmp_path):
 
 
 def test_cancel(q, tmp_path):
+    from loud.submit import described
     q.submit(job('x', tmp_path))
     q.cancel('x')
     assert q.find('x')[0] == 'cancelled' and q.claim('w') is None
     assert q.submit(job('x', tmp_path)) == 'unchanged'
     assert q.submit(job('x', tmp_path, config_hash='changed')) == 'unchanged'  # only --rerun brings it back
+    assert described(q, 'x', 'unchanged') == 'unchanged (cancelled; resubmit with --rerun)'
     assert q.submit(job('x', tmp_path), rerun=True) == 'queued'
+    assert described(q, 'x', q.submit(job('x', tmp_path))) == 'unchanged (queued)'
+
+
+def test_cancel_takes_ids_and_patterns_and_honours_dry_run(q, tmp_path, capsys):
+    from loud.submit import cancel
+    q.submit(job('d', tmp_path))
+    done(q, 'd')
+    for jid in ('e13.theta2.s0', 'e13.theta3.s0', 'e6.time_k4.s0'):
+        q.submit(job(jid, tmp_path))
+    assert not cancel(q, ['e13.theta*', 'nope.s0', 'd', 'e9.*'], dry_run=True)
+    assert capsys.readouterr().out.splitlines() == [
+        'would cancel e13.theta2.s0', 'would cancel e13.theta3.s0', 'nope.s0: not in the queue',
+        'd: done; only queued jobs can be cancelled', 'e9.*: no queued job matches']
+    assert not q.jobs('cancelled')
+    assert cancel(q, ['e13.theta*', 'e13.theta2.s0'], dry_run=False)
+    assert capsys.readouterr().out.splitlines() == ['cancelled e13.theta2.s0', 'cancelled e13.theta3.s0']
+    assert [q.find(j)[0] for j in ('e13.theta2.s0', 'e13.theta3.s0', 'e6.time_k4.s0')] == ['cancelled'] * 2 + ['queued']
+
+
+def test_blocking_is_transitive_and_a_failed_gate_skips(q, tmp_path):
+    q.submit(job('verify', tmp_path, priority=1))
+    q.submit(dict(job('e7.precondition', tmp_path, priority=1), spec=dict(task='gate')))
+    for jid, after in (('e1', ['verify']), ('h6', ['e1']), ('e6', ['h6']), ('e7.arm', ['e7.precondition']),
+                       ('e7.next', ['e7.arm']), ('both', ['h6', 'e7.precondition'])):
+        q.submit(job(jid, tmp_path, priority=2, after=after))
+    assert q.dependency_state(q.find('e6')[1]) == ('waiting', 'h6')
+    done(q, 'verify', check='fail')
+    done(q, 'e7.precondition', check='fail')
+    finished = q.finished()  # one read of the queue for every call below
+    state = lambda jid: q.dependency_state(finished[2][jid], finished)
+    assert state('e1') == ('blocked', 'verify failed its check')
+    assert state('e6') == ('blocked', 'h6 <- e1 <- verify failed its check')
+    assert state('e7.arm') == ('skipped', 'gate e7.precondition says skip')
+    assert state('e7.next') == ('skipped', 'e7.arm <- gate e7.precondition says skip')
+    assert state('both') == ('skipped', 'gate e7.precondition says skip')  # a skip is final; a block may be fixed
+    assert q.claim('w') is None
+    q.submit(job('x', tmp_path, after=['y']))
+    q.submit(job('y', tmp_path, after=['x']))  # loud.submit rejects a cycle; the queue still must not hang on one
+    assert q.dependency_state(q.find('x')[1]) == ('blocked', 'y <- x <- y <- a cycle of dependencies')
+
+
+def test_dry_run_against_a_queue_not_made_yet(tmp_path):
+    from loud.submit import check_dependencies
+    q = JobQueue(tmp_path / 'none', create=False)
+    check_dependencies([job('x', tmp_path)], q)
+    assert q.submit(job('x', tmp_path), dry_run=True) == 'queued' and not (tmp_path / 'none').exists()
+
+
+def test_status_names_its_queue_and_each_state(q, tmp_path, capsys, monkeypatch):
+    import sys
+    from loud import status
+    q.submit(job('verify', tmp_path, priority=1))
+    q.submit(dict(job('e7.precondition', tmp_path, priority=1), spec=dict(task='gate')))
+    for jid, after in (('e1', ['verify']), ('h6', ['e1']), ('e7.arm', ['e7.precondition']), ('later', ['e1'])):
+        q.submit(job(jid, tmp_path, priority=2, after=after))
+    done(q, 'verify', check='fail')
+    done(q, 'e7.precondition', check='fail')
+    for k in range(12):
+        q.submit(job(f'c{k:02d}', tmp_path))
+        q.cancel(f'c{k:02d}')
+    monkeypatch.setattr(sys, 'argv', ['status', '--queue', str(q.root)])
+    status.main()
+    out = capsys.readouterr().out
+    assert out.startswith(f'queue: {q.root}\n')
+    assert 'queued (4: 0 ready, 0 waiting, 3 blocked, 1 skipped):' in out
+    assert 'blocked: e1 <- verify failed its check' in out and 'skipped (gate e7.precondition says skip)' in out
+    listed = ', '.join(f'c{k:02d}' for k in range(10))
+    assert f'cancelled (12): {listed}, and 2 more (ls {q.root}/cancelled)' in out
+    monkeypatch.setattr(sys, 'argv', ['status', '--queue', str(tmp_path / 'typo')])
+    status.main()
+    assert 'typo  (MISSING' in capsys.readouterr().out

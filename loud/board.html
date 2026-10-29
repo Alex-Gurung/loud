@@ -344,7 +344,7 @@
       const bar = el('div', 'lb-bar');
       bar.dataset.source = 'experiments';
       bar.setAttribute('role', 'img');
-      const parts = [['done', e.done], ['running', e.running], ['queued', e.ready + e.waiting], ['problem', e.blocked + e.failed], ['idle', e.not_submitted + e.follow_up + e.cancelled]];
+      const parts = [['done', e.done], ['running', e.running], ['queued', e.ready + e.waiting], ['problem', e.blocked + e.failed], ['idle', e.not_submitted + e.follow_up + e.cancelled + (e.skipped || 0)]];
       bar.setAttribute('aria-label', parts.map(([g, n]) => `${g} ${n}`).join(', '));
       for (const [g, n] of parts) {
         if (!n) continue;

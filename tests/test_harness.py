@@ -94,6 +94,64 @@ def test_bad_cut_options_fail_at_submission(tmp_path, args, error):
         specs_from_config(path)
 
 
+CHECKPOINT = 'args: {tool: credit_dump, checkpoint: "e1.h8_synth.s0:ckpt_20.pt"}'
+
+
+@pytest.mark.parametrize('text, error', [
+    (f'task: diagnose\n{CHECKPOINT}', 'e1.h8_synth.s0.s files, so it must be done first: list it in after$'),
+    (f'task: diagnose\nafter_done: [e1.h8_synth.s0]\n{CHECKPOINT}', 'e1.h8_synth.s0.s files.*in after$'),
+    ('task: compare\nafter: [verify.a.s0]\nargs: {a: verify.a.s0, b: [noise, log.jsonl]}', 'in after_done$'),
+    ('task: gate\nafter_done: [h6.x.s0]\nargs: {values: {v: [h6.y.s0, f.json, median]}}\nexpect: {v: {min: 0}}',
+     'h6.y.s0.s files.*in after or after_done$'),
+    (f'task: diagnose\nafter: [e1.h8_synth.s0]\n{CHECKPOINT}', None),
+    ('task: diagnose\nargs: {tool: credit_dump, checkpoint: artifacts/reference/x.pt}', None),
+    ('task: compare\nafter_done: [verify.a.s0]\nargs: {a: verify.a.s0, b: [noise, log.jsonl]}', None),
+    ('task: gate\nafter: [h6.y.s0]\nargs: {values: {v: [h6.y.s0, f.json, median]}}\nexpect: {v: {min: 0}}', None),
+])
+def test_job_ids_in_args_must_be_dependencies(tmp_path, text, error):
+    path = tmp_path / 'c.yaml'
+    path.write_text(f'experiment: e\nvariant: v\n{text}\n')
+    if error is None:
+        specs_from_config(path)
+        return
+    with pytest.raises(ValueError, match=error) as caught:
+        specs_from_config(path)
+    assert str(caught.value).startswith(f'{path}: args read ')
+
+
+def test_submit_prints_a_config_error_in_one_line(tmp_path, monkeypatch):
+    import sys
+    from loud import submit
+    path = tmp_path / 'c.yaml'
+    path.write_text('experiment: e\nvariant: v\ntask: proxy\nargs: {bacth: 4}\n')
+    monkeypatch.setattr(sys, 'argv', ['submit', str(path), '--dry-run', '--queue', str(tmp_path / 'queue')])
+    with pytest.raises(SystemExit) as caught:
+        submit.main()
+    assert caught.value.code == f"{path}: unknown proxy options: ['bacth']"
+
+
+def test_plots_reject_unknown_experiments_and_name_the_python_with_matplotlib(tmp_path, monkeypatch, capsys):
+    import sys
+    from loud import plots
+    monkeypatch.setattr(plots, 'RUNS', tmp_path / 'runs')
+    monkeypatch.setattr(plots, 'ARTIFACTS', tmp_path)
+    monkeypatch.setattr(plots, 'REPO', paths.SOURCE)
+    names = plots.known(set())
+    assert names[:3] == ['verify', 'h6', 'e1'] and {'e8', 'e12', 'e16'} <= set(names) and 'followups' not in names
+    monkeypatch.setattr(sys, 'argv', ['plots', 'E4'])
+    with pytest.raises(SystemExit):
+        plots.main()
+    assert 'invalid choice' in capsys.readouterr().err and not (tmp_path / 'plots').exists()
+
+    def no_matplotlib():
+        raise ModuleNotFoundError("No module named 'matplotlib'", name='matplotlib')
+    monkeypatch.setattr(plots, 'pyplot', no_matplotlib)
+    fake_run(tmp_path, 'e4', 'adapt', 0, 3.70)
+    monkeypatch.setattr(sys, 'argv', ['plots', 'e4'])
+    with pytest.raises(SystemExit, match='plots need matplotlib; run /opt/loud-cpu-venv/bin/python -m loud.plots'):
+        plots.main()
+
+
 def test_turns_sum_the_parts_as_an_all_reduce():
     from loud.cut import Turns
     turns = Turns(2)
