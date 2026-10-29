@@ -310,3 +310,67 @@ wrong or not worth it) or **deferred** (why, and what it waits on). "Same as" po
 | 6 | minor | E8's Cut pair runs compiled and eager optimizer code | rejected | Same as 20261029T000503Z-code-codex.md #2: rounding-level differences in a step well under 1% of a Cut update |
 | 7 | minor | E7's self-check is queued unconditionally | fixed | Same as 20261029T002425Z-research-codex.md #3 |
 | nits | nit | `heldout_min` counts merge candidates; `merge_loss` duplicates `mean_loss`; garbled docstring; E6's warmup repeats an update; NaN weights after the last update | fixed (partly) | `own_score` skips reason `merge`; docstring rewritten; the shared loop raises on non-finite final weights. The duplicate scorer and the repeated warmup update stay (the record's rank-by-rank layout differs from `mean_loss`; one extra untimed update) |
+
+## Round 7: the v2 update (frozen copy of commit a387d8d; Codex's of 3ef4441 and 81e66e0)
+
+### 20261029T125008Z-research-codex.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | major | E13's diagnostic crashes: `tiers_tool`'s tuple lands in `summary` | fixed | Unpacked; `run_task` writes both files |
+| 2 | major | E10's "70% agreement" keeps entries with 40% when contributions are zero | fixed | Kept where (N + \|S\|) / 2 ≥ 0.7 × tokens, N the nonzero counts; the check has the reviewer's 4-of-10 case |
+| 3 | major | E1's H8 cells do not wait for `h6.h8_validation` | fixed | All three wait for it |
+| 4 | major | E15's baseline never logs the handoff cosine | fixed | Every Boost run logs it; the E15 table has the column |
+
+### 20261029T125003Z-code-codex.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | major | E13's diagnostic cannot serialize its result | fixed | Same as research-codex #1 |
+| 2 | major | Population runs can finish with NaN weights | fixed | The shared loop's finite-weights guard before `final.pt` |
+| 3 | major | E6's clock includes its logging | fixed | `h8.Untimed`: the cosine, stable ranks and E14's gradient cosine are timed apart and taken off the clock (reset before it starts) |
+
+### 20261029T125003Z-research-claude.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | blocker | E8's SNR directions come from the update holding the batch's gradient (pure noise: mean r 0.85 against 0.18) | fixed | Every arm, both settings, takes U and V from the momentum before the batch (passed by `ShapedAnvil` and `ShapedBatchedAnvil`); zero rails fall back to the update's own; `snr_scaling` checks the basis and that the step passes the pre-batch blend |
+| 2 | major | E16's n-gram tables train at the base Adam rate | fixed | `arch.embedding_rates` puts them in wte's group (300×), record #5's own rule; `h8_arch` checks the groups |
+| 3 | major | E15's and E14's baselines lack the handoff cosine and effective ranks | fixed | Logged for every run |
+| 4 | major | E14's gap mixes the estimator with a recipe change (`e1.bp_b4` is boost-cut's) | fixed | `e1.bp_b4_pr40` (PR #40's recipe at batch 4, three seeds, priority 50) is the gap's end and E16's fixed-model arm; `e16.bp_fixed` removed |
+| 5 | minor | P1's bands delay seed 0 of E2/E3/E4; real-chain checks run before E1 | fixed | One P1 band (55); the chain's checks and the track-3 smoke at 66 |
+| 6 | minor | E7: H8 applies a guess at S0 the chain does not; the gate's `S` prefix includes S0 | fixed | The prior acts at the mid sites only; gates take glob patterns, `e7.precondition` reads `S[1-8]` |
+| 7 | minor | The own-query key cap (256) is on in `h8_validation` and `synth_vs_real` | fixed | `query_keys: 0` there (and in synth_vs_real's all-units variant) |
+| 8 | minor | Signs per sequence: E6's rank-m mechanism holds per sequence only | fixed (doc) | README, Differences; the stable-rank log shows what survives |
+| 9 | minor | `cos_to_autograd` has no estimator or per-site output | fixed | `estimator: identity, h8, cut`; h8 adds per-site credit cosines; four configs |
+| 10 | minor | Tables miss E7's no-prior arms, E15's arm (d), E14's top cosine; stable ranks mix Boost updates | fixed | All in the tables; stable rank over Cut updates only |
+| 11 | nit | Job count; a stale Differences bullet | fixed | |
+
+### 20261029T125003Z-code-claude.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | major | E16's n-gram tables at Adam ×1 | fixed | Same as research-claude #2 |
+| 2 | major | H8's E7 prior adds an S0 guess the chain lacks | fixed | Same as research-claude #6 |
+| 3 | minor | Logging inside H8's timed update | fixed | Same as code-codex #3 |
+| 4 | minor | E7's gate prefix matches S0 | fixed | Same as research-claude #6 |
+| 5 | minor | E13's n-gram model runs on the CPU in the clock | rejected | It is the method's own cost (the chain's arm pays it too); about a minute per run; E13 is judged on loss at fewer rows |
+| 6 | minor | `row_budget` is a dead option | fixed | E13's rule on the chain: `row_budget: ngram` with `budget_theta` (`cut.NGramBudget`); the table learns every update's batch; `cut_budget` checks it |
+| 7 | minor | H8 accepts a full-cycle prior and `checkpoint_optimizer` | fixed | Both refused |
+| 8 | minor | Dead code | fixed | `after_step` hooks, `FisherFactor.close`, `SequenceGrads.__len__`, the one-element loop |
+| 9 | minor | E8's plots mix the two settings | fixed | The H8 arms get `final_h8.png` against `e8.h8_exact_control` |
+| nits | nit | Claim docstring, job count, gate docstring, dense `diag_embed` | fixed | The diagonal is added in place |
+
+### 20261029T125003Z-usability-claude.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | major | The first submission queues nothing runnable (cancelled v1 jobs) | fixed | Submissions give each unchanged job's reason; README: the first v2 submission is `--rerun` (done) |
+| 2 | major | Jobs blocked two levels up show "waiting" | fixed | Transitive blocking names the chain |
+| 3 | major | The one-GPU order contradicts the README | fixed | One P1 band (research-claude #5) |
+| 4 | major | The disk budget does not fit | fixed | Finals in bf16 after scoring (~19 GB); README on the floor and what to free |
+| 5 | major | Plots fail under plain python3 | fixed | README uses the venv; a one-line hint without matplotlib |
+| 6 | major | Four H6 diagnostics have no reader | fixed | `plots h6` tables |
+| 7–14 | minor | Dry run on a missing queue; `--cancel` with `--dry-run`, lists and patterns; arg job ids unchecked; `after_done` hidden; stale help; no one-GPU guidance; gate skips read as errors; jargon | fixed | Gates' ids may sit in `after` or `after_done`; `skipped (gate … says skip)` |
+| 15 | minor | `followups/e8` queues the H8 arms with a placeholder assignment | deferred | Their comments say to set E6's winner first; E8 waits on its diagnostic anyway |
+| nits | nit | Missing seeds, tracebacks, status lines, layout | fixed | |
