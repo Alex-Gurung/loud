@@ -1,0 +1,12 @@
+# E1: H8 cut mode from the first update, no Boost: how much the Boost warm start buys (E15's arm d).
+experiment: e1
+variant: h8_cut_noboost
+task: h8
+seeds: [0, 1, 2]
+priority: 50
+after: [verify.score_record.s0, verify.h8_smoke.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  mode: cut
+  boost: false

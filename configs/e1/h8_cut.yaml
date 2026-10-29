@@ -1,0 +1,12 @@
+# E1: H8 Boost -> Cut in cut mode: one backward of the cut graph (block i's MLP also gets the own-query path through
+# block i + 1, which PR #40 leaves out). The reference for the objective experiments (E14, E15, E16).
+experiment: e1
+variant: h8_cut
+task: h8
+seeds: [0, 1, 2]
+priority: 50
+after: [verify.score_record.s0, verify.h8_smoke.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  mode: cut

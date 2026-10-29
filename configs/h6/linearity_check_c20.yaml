@@ -1,11 +1,12 @@
-# H6 on e1.bp_b4.s0's 20% checkpoint. E5's (and E9's) probe-size diagnostic: how far the loss response to +v and -v is from linear, per
-# site and probe size.
+# H6 item 5 on e1.h8_synth.s0's 20% checkpoint: each token's loss under +v and -v at every site (through reforward),
+# its distance from linear, float32 and bf16; it says how far the chain's 1% probe is from the nonlinear regime
+# (run before trusting E5's deep readout or E9's curvature term).
 experiment: h6
 variant: linearity_check_c20
 task: diagnose
 seeds: [0]
-priority: 70
-after: [e1.bp_b4.s0]
+priority: 30
+after: [e1.h8_synth.s0]
 args:
   tool: linearity_check
-  checkpoint: e1.bp_b4.s0:ckpt_20.pt
+  checkpoint: e1.h8_synth.s0:ckpt_20.pt

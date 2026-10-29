@@ -1,0 +1,18 @@
+# E6 (H8 synthesis): 32 of the 512 rows per token per site in the Cut phase (K = 16), assigned by token (token t
+# reads the rows offset by (t mod K) m, so every update covers the basis across tokens), each estimate scaled by K.
+# Baseline: e1.h8_synth (K = 1). Logs every update the cosine of the summed weight gradient to the identity scheme's,
+# and every 10 the stable rank of ANVIL II's orthogonalization input. Success: an arm at K = 4 within 0.02 of K = 1,
+# and at K = 16 within 0.05; time the winner on the real chain.
+experiment: e6
+variant: token_k16
+task: h8
+seeds: [0, 1, 2]
+priority: 60
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  rows: 32
+  row_assign: token
+  compare_every: 1
+  rank_every: 10

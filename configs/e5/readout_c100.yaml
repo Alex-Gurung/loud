@@ -1,0 +1,15 @@
+# E5's diagnostic (H6 item 3) on e1.h8_synth.s0's 100% checkpoint: per token, one 512-probe cycle launched at S1
+# through reforward (bf16 forward differences at chain_sigma), read at S2..S8; per site the median condition number
+# and the median cosine of the solved credit to the exact credit. With readout_c20, the decision: all sites at 0.95 or
+# above -> ask the maintainers, then implement; failures only at the top two or three sites -> a hybrid with direct
+# cycles there; most sites failing at 100% -> drop. S0 keeps its own cycle (its probes move x0, which enters every
+# block). The implementation waits for the maintainers' answer (plan section 7).
+experiment: e5
+variant: readout_c100
+task: diagnose
+seeds: [0]
+priority: 70
+after: [e1.h8_synth.s0]
+args:
+  tool: deep_readout_check
+  checkpoint: e1.h8_synth.s0:ckpt_100.pt

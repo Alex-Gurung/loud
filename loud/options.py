@@ -33,7 +33,7 @@ RESULTS = {'proxy': TRAINING_RESULTS, 'identity': TRAINING_RESULTS, 'h8': TRAINI
            'score': ('val_loss', 'test_loss'),
            'reference': ('val_loss', 'test_loss', 'train_seconds'),
            'compare': ('train_loss_max_diff', 'train_loss_mean_diff', 'train_loss_max_diff_all', 'val_loss_diff'),
-           'diagnose': (),
+           'diagnose': ('min_cosine',),  # h8_validation's
            'gate': (),  # its args name its values
            'noop': ('val_loss',)}
 
@@ -177,13 +177,11 @@ ROW_QUANTUM = 64                # E7's ramp moves in steps of 64 rows, so only a
 SCORE = dict(checkpoint=None, splits=['val'])
 
 DIAGNOSE = dict(
-    tool=None,                  # cos_to_autograd | credit_dump | token_map_svd | direction_stats | linearity_check |
-                                # credit_recovery
-    checkpoint=None,            # '<job id>:<file>' (e.g. e1.bp_b4.s0:ckpt_20.pt) or a path relative to the repo
+    tool=None,                  # one of TOOLS (loud/diagnostics.py)
+    checkpoint=None,            # '<job id>:<file>' (e.g. e1.h8_synth.s0:ckpt_20.pt) or a path relative to the repo
     row=0,                      # the held-out sequence (0-31 of the 10M order's last 32) measured
-    batch=8,                    # direction_stats: sequences for the gradient, its curvature and its spread
 )
-TOOLS = ('cos_to_autograd', 'credit_dump', 'token_map_svd', 'direction_stats', 'linearity_check', 'credit_recovery')
+TOOLS = ('cos_to_autograd', 'credit_dump', 'deep_readout_check', 'linearity_check', 'h8_validation')
 
 
 def positive(o, *keys):
@@ -468,11 +466,8 @@ def diagnose_options(args):
     if not isinstance(o['checkpoint'], str) or not o['checkpoint']:
         raise ValueError('checkpoint: give <job id>:<file> or a path')
     check_types(o, DIAGNOSE)
-    positive(o, 'batch')
-    if o['tool'] == 'direction_stats' and o['batch'] < 2:
-        raise ValueError('direction_stats needs batch >= 2 (the noise is a variance across sequences)')
-    if o['row'] + (o['batch'] if o['tool'] == 'direction_stats' else 1) > 32:
-        raise ValueError('the sequences must be among the 32 held-out ones')
+    if o['row'] >= 32:
+        raise ValueError('row must be one of the 32 held-out sequences (0-31)')
     return o
 
 

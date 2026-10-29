@@ -1,0 +1,13 @@
+# E1: H8 Boost -> Cut in synthesis mode with the identity scheme, PR #40's core estimate (no cross-token patches,
+# every MLP unit): the reference for every probing-scheme experiment. Expected between record #10's 3.896 and record
+# #11's 3.777. Its H4 checkpoints (seed 0) are the diagnostic source for H6, E5, E7 and E13.
+experiment: e1
+variant: h8_synth
+task: h8
+seeds: [0, 1, 2]
+priority: 50
+after: [verify.score_record.s0, verify.h8_smoke.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  checkpoints: true

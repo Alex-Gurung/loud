@@ -1,0 +1,15 @@
+# E7 (H8 synthesis): the identity-path control variate, estimate = p + (1/m) sum_j (v_j . (g - p)) v_j with p the
+# top-stream credit carried down the residual scalars (computed, not measured), at m = 64 token-assigned rows. The
+# matching no-prior arm is e6.token_k8. Success: the prior at m = 64 within 0.02 of the full cycle (e1.h8_synth).
+experiment: e7
+variant: prior_m64
+task: h8
+seeds: [0, 1, 2]
+priority: 60
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0, e7.precondition.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  rows: 64
+  row_assign: token
+  prior: identity

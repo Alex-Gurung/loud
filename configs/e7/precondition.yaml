@@ -1,17 +1,16 @@
-# E7's precondition (plan E7): H6's credit_dump on e1.bp_b4.s0 must show the identity-path guess good early and poor
-# late, "median cosine above 0.9 at 20% and below 0.7 at 100%", read here as the median over the eight mid sites (where
-# E7's chain uses the guess; the embedding keeps its own cycle) of each site's per-token median. The E7 ramps wait for this gate: if it fails, there is no saving to take and they stay
-# blocked (loud.status says why); resubmit them without it to run them anyway.
+# E7's diagnostic rule (plan v2): skip the runs if the variance ratio |g - p|^2 / |g|^2 of the identity path's guess
+# is above 0.5 from 50% on. Read here as the median over the nine sites of each site's energy ratio, at the 50% and
+# 100% checkpoints of e1.h8_synth.s0 (h6.credit_dump). The E7 arms wait for this gate.
 experiment: e7
 variant: precondition
 task: gate
 seeds: [0]
-priority: 70
-after_done: [h6.credit_dump_c20.s0, h6.credit_dump_c100.s0]
+priority: 30
+after_done: [h6.credit_dump_c50.s0, h6.credit_dump_c100.s0]
 args:
   values:
-    early: [h6.credit_dump_c20.s0, credit_dump.json, median, mid]
-    late: [h6.credit_dump_c100.s0, credit_dump.json, median, mid]
+    c50: [h6.credit_dump_c50.s0, credit_dump.json, variance_ratio, S]
+    c100: [h6.credit_dump_c100.s0, credit_dump.json, variance_ratio, S]
 expect:
-  early: {min: 0.9}
-  late: {max: 0.7}
+  c50: {max: 0.5}
+  c100: {max: 0.5}

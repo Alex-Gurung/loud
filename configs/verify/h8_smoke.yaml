@@ -1,0 +1,17 @@
+# H8's smoke run: a complete 1M-slice run through Boost, synthesis mode with a partial-row scheme and the identity
+# prior, both E6 logs and H4, before any H8 cell. Its numbers are not a result.
+experiment: verify
+variant: h8_smoke
+task: h8
+seeds: [0]
+priority: 3
+after: [verify.smoke.s0]
+args:
+  sequences: 1M
+  heldout: 32
+  rows: 64
+  prior: identity
+  compare_every: 5
+  rank_every: 10
+  checkpoints: true
+notes: Pipeline check only; its numbers are not a result.

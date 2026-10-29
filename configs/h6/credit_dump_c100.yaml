@@ -1,11 +1,11 @@
-# H6 on e1.bp_b4.s0's 100% checkpoint. E7's diagnostic: per site, the per-token cosine between the identity-path credit guess and the true
-# credit. E7 has a saving to take if the median is above 0.9 at 20% and below 0.7 at 100%.
+# H6 item 2 on e1.h8_synth.s0's 100% checkpoint: per site, the exact credit (H8's cut graph), the identity path's guess,
+# their per-token cosine and E7's variance ratio |g - p|^2 / |g|^2 (E7 skips its runs if it is above 0.5 from 50% on).
 experiment: h6
 variant: credit_dump_c100
 task: diagnose
 seeds: [0]
-priority: 70
-after: [e1.bp_b4.s0]
+priority: 30
+after: [e1.h8_synth.s0]
 args:
   tool: credit_dump
-  checkpoint: e1.bp_b4.s0:ckpt_100.pt
+  checkpoint: e1.h8_synth.s0:ckpt_100.pt

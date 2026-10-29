@@ -148,6 +148,7 @@ class Replay:
 
         replay = Replay(model, idx, targets)
         losses, at = replay(site, delta, sites=True)   # delta [B, T, D, W]: D moves per token at site (0..L)
+        losses = replay(site, delta[:, :16], start=32)  # or tokens 32..47 only
 
     losses [B, T, D]; with sites, also each later mid stream's change [B, T, D, W] per site index (E5's readings)."""
 
@@ -198,15 +199,16 @@ class Replay:
         return attn.c_proj(out.reshape(B, C, D, -1))
 
     @torch.no_grad()
-    def __call__(self, site, delta, sites=False):
+    def __call__(self, site, delta, sites=False, start=0):
+        """delta [B, C, D, W]: D moves of tokens start..start + C at the site."""
         m, model = um(), self.model
         L = model.config.n_layer
-        B, T, D, W = delta.shape
-        losses = torch.empty(B, T, D, device=delta.device)
+        B, C, D, W = delta.shape
+        losses = torch.empty(B, C, D, device=delta.device)
         at = {k: torch.empty_like(delta) for k in range(site + 1, L + 1)} if sites else None
-        for t0 in range(0, T, self.chunk):
-            sl = slice(t0, t0 + self.chunk)
-            dl = delta[:, sl]
+        for c0 in range(0, C, self.chunk):
+            dl = delta[:, c0:c0 + self.chunk]
+            local, sl = slice(c0, c0 + dl.shape[1]), slice(start + c0, start + c0 + dl.shape[1])
             x0 = self.x0[:, sl, None]
             if site == 0:
                 x0 = m.norm(self.sites[0][:, sl, None] + dl)
@@ -216,12 +218,12 @@ class Replay:
                 x, first = mid + model.transformer.h[site - 1].mlp(m.norm(mid)), site
             for i in range(first, L):
                 xin = model.resid_lambdas[i] * x + model.x0_lambdas[i] * x0
-                mid = xin + self.held_attention(i, xin, t0)
+                mid = xin + self.held_attention(i, xin, sl.start)
                 if sites:
-                    at[i + 1][:, sl] = mid - self.sites[i + 1][:, sl, None]
+                    at[i + 1][:, local] = mid - self.sites[i + 1][:, sl, None]
                 x = mid + model.transformer.h[i].mlp(m.norm(mid))
             y = self.targets[:, sl, None].expand(-1, -1, D)
-            losses[:, sl] = token_losses(model, x.flatten(1, 2), y.flatten(1, 2)).view(B, -1, D)
+            losses[:, local] = token_losses(model, x.flatten(1, 2), y.flatten(1, 2)).view(B, -1, D)
         return (losses, at) if sites else losses
 
 

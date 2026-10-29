@@ -1,0 +1,13 @@
+# H8's validation before use (plan v2, H8): on a fixed checkpoint (e1.bp_b8.s0 halfway), H8's synthesis mode with the
+# identity scheme against PR #40's Cut estimate with its cross-token patches off, no future draws and every MLP unit
+# routed: a per-matrix cosine of at least 0.99. Every H8 experiment waits for it.
+experiment: h6
+variant: h8_validation
+task: diagnose
+seeds: [0]
+priority: 20
+after: [e1.bp_b8.s0]
+args:
+  tool: h8_validation
+  checkpoint: e1.bp_b8.s0:ckpt_50.pt
+expect: {min_cosine: {min: 0.99}}

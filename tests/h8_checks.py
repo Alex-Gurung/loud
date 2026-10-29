@@ -130,6 +130,37 @@ def h8_reforward(scratch):
     assert all(v.abs().max() < 1e-5 for v in at.values())
 
 
+def h6_tools(scratch):
+    """H6 on a tiny model. With every writer zeroed the identity path is exact, so credit_dump's guess matches the
+    exact credit (cosine 1, variance ratio 0); on a live model, E5's deep readout from S1 recovers the later sites'
+    credit up to the model's nonlinearity (a small probe keeps it small: the trained record's is far more linear);
+    linearity_check reports its quantiles; h8_validation is H8 against PR #40's Cut, as h8_gradients."""
+    from loud.diagnostics import Toolkit, site_names
+    m, s, model, x, y = record_setup()
+    x, y = x[:1], y[:1]
+    zero = __import__('copy').deepcopy(model)
+    with torch.no_grad():
+        for block in zero.transformer.h:
+            block.attn.c_proj.weight.zero_()
+            block.mlp.c_proj.weight.zero_()
+    summary, tensors = Toolkit(m, zero, x, y).credit_dump()
+    names = site_names(s.model.n_layer)
+    for name in names:
+        assert summary[name]['cosine']['p10'] > 0.999 and summary[name]['variance_ratio'] < 1e-4, (name, summary[name])
+    assert tensors['S1']['exact'].shape == (x.shape[1], s.model.n_embd)
+    tools = Toolkit(m, model, x, y)
+    deep, _ = tools.deep_readout_check(sigma=1e-3, chunk=8)
+    for name in names[2:]:
+        assert deep[name]['cosine ridge 0.0']['median'] > 0.95, (name, deep[name])
+        assert deep[name]['condition']['median'] >= 1
+    linear, _ = tools.linearity_check(sigmas=(1e-3, 1e-1), draws=1)
+    assert set(linear) == set(names)
+    assert all(linear[n]['float32 0.001']['nonlinearity']['median'] < linear[n]['float32 0.1']['nonlinearity']['median']
+               for n in names)
+    valid, _ = tools.h8_validation()
+    assert not valid['below_099'], valid
+
+
 def h8_run(scratch):
     """Complete H8 runs through loud/train.py: synthesis with a partial-row scheme, prior and both logs; cut mode
     without Boost."""
