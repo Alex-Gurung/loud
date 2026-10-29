@@ -9,7 +9,8 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 CHECKS = ('proxy_gradient', 'proxy_run', 'proxy_merge', 'identity_step', 'identity_run',
           'variants_blur', 'variants_control', 'variants_control_pr40', 'variants_run',
-          'anvil_hook', 'snr_scaling', 'snr_diagnostic', 'fisher_factor', 'population_rules', 'population_run',
+          'anvil_hook', 'batched_anvil_hook', 'snr_scaling', 'snr_diagnostic', 'fisher_factor', 'population_rules',
+          'population_run',
           'cut_ranks', 'cut_windows', 'cut_run', 'cut_budget', 'cut_compile_plan')
 
 

@@ -6,7 +6,8 @@ polar() before the per-lane gain, the decay and the step. ShapedAnvil.step is th
 orthogonalized update is `shaper.direction(p, pending)`; a shaper with lane_gain False also skips the per-lane gain and
 its Frobenius renormalization (E8, whose per-direction scaling they would undo). The proxy keeps the unchanged Anvil
 unless E8 or E9 is on; tests/method_checks.py (anvil_hook) checks that ShapedAnvil reproduces Anvil bit for bit when the
-shaper returns polar(pending).
+shaper returns polar(pending). ShapedBatchedAnvil is the same hook on PR #40's BatchedAnvil, for E8's H8 setting
+(batched_anvil_hook: bit for bit when the shaper returns polar_batch's update).
 """
 import torch
 
@@ -49,12 +50,64 @@ def shaped_anvil_class(m):
     return ShapedAnvil
 
 
-def shaped_optimizer(m, model, recipe, steps, shaper):
-    """m.make_optimizer(model, recipe, steps) with ShapedAnvil in place of Anvil (same groups, rates and state)."""
-    original, m.Anvil = m.Anvil, shaped_anvil_class(m)
+def shaped_batched_anvil_class(m):
+    """PR #40's BatchedAnvil (H8's optimizer) with the same hook: each matrix's orthogonalized update is
+    `shaper.direction(p, pending)` in place of polar_batch's, and a shaper with lane_gain False skips the per-lane gain
+    and its renormalization. The rest is anvil_update's lines, run eagerly."""
+
+    class ShapedBatchedAnvil(m.BatchedAnvil):
+        shaper = None
+
+        @torch.no_grad()
+        def step(self):
+            beta, engaged = self.rail_beta(), self.t >= self.engage
+            fast_beta, weight = (self.fast_beta, self.fast_weight) if engaged else (beta, 1.0)
+            device = self.param_groups[0]['params'][0].device
+            value = lambda v: torch.tensor(float(v), device=device)  # as BatchedAnvil hands them to anvil_update
+            beta, fast_beta, slow_beta, weight = value(beta), value(fast_beta), value(self.slow_beta), value(weight)
+            for group in self.param_groups:
+                lr, wd = value(group['lr']), value(group['weight_decay'])
+                by_shape = {}
+                for p in group['params']:
+                    by_shape.setdefault(tuple(p.shape), []).append(p)
+                for shape, params in by_shape.items():
+                    stack = self.stacked_state(shape, params)
+                    g, w = torch.stack([p.grad.float() for p in params]), torch.stack([p.float() for p in params])
+                    fast, slow, energy = stack['fast'], stack['slow'], stack['energy']
+                    fast.lerp_(g, 1 - fast_beta)
+                    slow.lerp_(g, 1 - slow_beta)
+                    pending = g.lerp(weight * fast + (1 - weight) * slow, beta)
+                    # laid out as polar_batch returns it (a transposed view for tall stacks), so the reductions
+                    # below run in the same order
+                    update = (pending.new_empty(len(params), shape[1], shape[0]).transpose(1, 2)
+                              if shape[0] > shape[1] else torch.empty_like(pending))
+                    for i, p in enumerate(params):
+                        update[i] = self.shaper.direction(p, pending[i])
+                    if self.shaper.lane_gain:
+                        lanes = 1 if shape[0] >= shape[1] else 0
+                        energy.lerp_(update.square().mean(lanes + 1, keepdim=True), 1 - value(self.lane_beta))
+                        gained = update * energy.clamp_min(1e-10).rsqrt()
+                        update = gained * (update.norm(dim=(1, 2), keepdim=True)
+                                           / gained.norm(dim=(1, 2), keepdim=True).clamp_min(1e-10))
+                    decay = (slow * w >= 0) * w * (wd * lr)
+                    new = w - lr * max(1, shape[0] / shape[1]) ** 0.5 * (update + decay)
+                    torch._foreach_copy_(params, list(new.to(params[0].dtype).unbind(0)))
+            self.t += 1
+
+    return ShapedBatchedAnvil
+
+
+SHAPED = {'Anvil': shaped_anvil_class, 'BatchedAnvil': shaped_batched_anvil_class}
+
+
+def shaped_optimizer(m, model, recipe, steps, shaper, name='Anvil'):
+    """m.make_optimizer(model, recipe, steps) with m.<name> (boost-cut's Anvil, or PR #40's BatchedAnvil for H8)
+    replaced by its shaped class: the same groups, rates and state."""
+    original = getattr(m, name)
+    setattr(m, name, SHAPED[name](m))
     try:
         optimizer = m.make_optimizer(model, recipe, steps)
     finally:
-        m.Anvil = original
+        setattr(m, name, original)
     optimizer.optimizers[0].shaper = shaper
     return optimizer

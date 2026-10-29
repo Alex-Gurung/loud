@@ -210,7 +210,8 @@ def h8_latent(scratch):
     assert torch.allclose(latent.nextlat_loss(dynamics, h, e, idx, target), direct, atol=1e-6)
     moved = target.clone()
     moved[0, 3] += 10
-    assert torch.equal(latent.nextlat_loss(dynamics, h, e, idx, moved), latent.nextlat_loss(dynamics, h, e, idx, target))
+    assert torch.equal(latent.nextlat_loss(dynamics, h, e, idx, moved),
+                       latent.nextlat_loss(dynamics, h, e, idx, target))
     assert fc.shape == (latent.HIDDEN, 2 * W) and proj.shape == (W, latent.HIDDEN)
 
     targets = latent.LatentTargets(2, W, lens=True, weight=0.5)
@@ -526,6 +527,56 @@ def h8_arch(scratch):
                 raise AssertionError(f'{check.__name__} accepted {bad} with the official score on')
 
 
+def h6_synth_vs_real(scratch):
+    """H6 item 6 on a tiny model: the real chain's partial-row credit (PR #40's Cut through cut.py's row flags) and
+    H8's exact credit read through the same rows and signs agree token by token when every MLP unit is routed (only
+    finite differences separate them); the partial rows themselves are far from the exact credit."""
+    from loud.diagnostics import Toolkit, site_names
+    m, s, model, x, y = record_setup()
+    summary, _ = Toolkit(m, model, x[:1], y[:1]).synth_vs_real(rows=32)
+    names = site_names(s.model.n_layer)
+    for key in ('token rows, all routes', 'time rows, all routes', 'token rows, record routes'):
+        assert set(summary[key]) == set(names), summary[key]
+    for key in ('token rows, all routes', 'time rows, all routes'):
+        for name in names:
+            row = summary[key][name]
+            assert row['real_vs_synth']['p10'] > 0.99, (key, name, row)
+            assert row['synth_vs_exact']['median'] < 0.9, (key, name, row)
+
+
+def h8_snr(scratch):
+    """E8's H8 setting: each sequence's synthesized weight gradient (G_b^T X_b) sums to synthesis's block-local one,
+    with every other gradient unchanged; a complete run with SNR scaling on a partial-row scheme steps with the shaped
+    optimizer in the Cut phase only, and logs its ratios there."""
+    from loud import h8
+    from loud.options import H8
+    m, s, model, x, y = record_setup()
+    model.requires_grad_(True)
+    scheme = lambda: h8.Scheme(dict(H8, rows=32), s.model.n_embd, torch.device('cpu'), 0)  # the same draws each time
+    plain, _, _ = h8.synthesis_gradients(model, x, y, scheme(), 1)
+    each = {}
+    summed, _, _ = h8.synthesis_gradients(model, x, y, scheme(), 1, each=each)
+    linears = {id(mod.weight) for mod in model.transformer.h.modules() if isinstance(mod, torch.nn.Linear)}
+    assert set(each) == linears and all(g.shape[0] == len(x) for g in each.values())
+    for k, g in plain.items():
+        if k in each:
+            scale = g.float().abs().max()
+            assert torch.allclose(each[k].sum(0), g.float(), atol=1e-5 * scale, rtol=1e-4)
+            assert torch.allclose(summed[k].float(), g.float(), atol=1e-5 * scale, rtol=1e-4)
+        else:
+            assert torch.equal(summed[k], g)
+    patch_sequences(length=CUT_SEQ, vocab=512)
+    out = Path(scratch) / 'snr'
+    spec = dict(experiment='cpu', variant='snr', seed=0, task='h8', args=dict(
+        preset='2m', sequences=72, heldout=32, batch=4, rows=32, snr_scaling='snr', official_eval=False))
+    result = h8.run(spec, out)
+    records = [json.loads(line) for line in (out / 'metrics.jsonl').read_text().splitlines()]
+    assert result['complete'] and {r['phase'] for r in records} == {'boost', 'cut'}
+    assert all(('snr_ratios' in r) == (r['phase'] == 'cut') for r in records), records
+    ratios = [v for r in records if 'snr_ratios' in r for v in r['snr_ratios'].values()]
+    assert all(0 <= v['r_mean'] <= 1 and 0 <= v['frobenius'] <= 1 for v in ratios), ratios
+
+
 def h6_snr(scratch):
     """E8's snr_spectrum tool: H8's per-sequence synthesized gradients at K = 4 average, over draws, to the exact
     credits' (the scheme is unbiased), one draw being far noisier; the tool measures the training sequences after the
@@ -548,8 +599,9 @@ def h6_snr(scratch):
     names = [n for n, p in model.named_parameters() if is_anvil_matrix(n, p)]
     shapes = dict((n, p.shape) for n, p in model.named_parameters())
     generator = torch.Generator().manual_seed(3)
-    saved = dict(step=1, fast_weight=0.5, state={n: dict(fast=torch.randn(shapes[n], generator=generator),
-                                                         slow=torch.randn(shapes[n], generator=generator)) for n in names})
+    rails = lambda n: dict(fast=torch.randn(shapes[n], generator=generator),
+                           slow=torch.randn(shapes[n], generator=generator))
+    saved = dict(step=1, fast_weight=0.5, state={n: rails(n) for n in names})
     checkpoint = Path(scratch) / 'ckpt_20.pt'
     torch.save(saved, checkpoint.with_suffix('.optim.pt'))
     o = diagnose_options(dict(tool='snr_spectrum', checkpoint='x', sequences=4, batch=2))

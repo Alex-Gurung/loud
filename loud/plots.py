@@ -262,6 +262,15 @@ def e8_table(out):
                                      for key in ('r_mean', 'frobenius')])
     if rows:
         texts.append(markdown(['variant', 'matrix', 'mean r', 'Frobenius ratio'], rows))
+    cells = counted('e8')
+    means = {v: val_stats(cells[v])[0] for v in ('h8_exact_control', 'h8_control', 'h8_snr', 'h8_rate') if v in cells}
+    if {'h8_exact_control', 'h8_control', 'h8_snr'} <= set(means) and means['h8_control'] != means['h8_exact_control']:
+        cost = means['h8_control'] - means['h8_exact_control']
+        recovered = (means['h8_control'] - means['h8_snr']) / cost
+        beats = f', rate control {means["h8_rate"]:.4f} (SNR beats it: ' + \
+            f'{"yes" if means["h8_snr"] < means["h8_rate"] else "no"})' if 'h8_rate' in means else ''
+        texts.append(f'H8 setting: partial rows cost {cost:+.4f}; SNR scaling recovers {recovered:.0%} of it '
+                     f'(success: at least half, and beating the rate control){beats}.\n')
     if not texts:
         return None
     text = '\n'.join(texts)
@@ -369,7 +378,8 @@ def e7_tables(out):
 
 
 def e13_tables(out):
-    """E13: the diagnostic (H6's tiers on e1.h8_synth's 20% and 100% checkpoints) and the arms against the full cycle."""
+    """E13: the diagnostic (H6's tiers on e1.h8_synth's 20% and 100% checkpoints) and the arms against the full
+    cycle."""
     return '\n'.join(t for t in (tiers_table(out), delta_table('e13', out, FULL_CYCLE,
                                                                 [('low tier share', logged_mean('low_tier'))])) if t) \
         or None

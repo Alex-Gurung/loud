@@ -1,0 +1,15 @@
+# Before E8's H8 arms (submitted with them): a complete short H8 run on the 1M range through the SNR scaling (each
+# sequence's synthesized gradient, one SVD per block matrix per Cut update, the shaped batched ANVIL II).
+experiment: verify
+variant: h8_snr_smoke
+task: h8
+seeds: [0]
+priority: 3
+after: [verify.smoke.s0]
+args:
+  sequences: 1M
+  heldout: 32
+  batch: 8
+  rows: 128
+  snr_scaling: snr
+notes: Pipeline check only; its numbers are not a result.

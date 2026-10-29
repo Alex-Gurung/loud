@@ -1,0 +1,13 @@
+# H6 item 6 on e1.h8_synth.s0's 100% checkpoint, one held-out sequence: H8 synthesis against the real chain's (H5's)
+# partial-row estimate with the same rows and signs, per site: the per-token cosine of the two (their difference is
+# finite differences, bf16 and the record's MLP routes) and of each to the exact credit, at 128 rows by token and by
+# time, with the record's routes and with every unit. It says how far H8's ranking of probing schemes carries over.
+experiment: h6
+variant: synth_vs_real_c100
+task: diagnose
+seeds: [0]
+priority: 30
+after: [e1.h8_synth.s0]
+args:
+  tool: synth_vs_real
+  checkpoint: e1.h8_synth.s0:ckpt_100.pt

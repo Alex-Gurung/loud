@@ -14,9 +14,10 @@ Modes of the Cut phase (option mode):
   synthesis  the exact credits at the nine sites and the top stream (one autograd.grad on the cut graph), transformed
              by a probing scheme (Scheme: partial rows, a control variate, ...), then parameter gradients block-locally,
              one autograd.grad per sublayer whose inputs are only that sublayer's parameters, so transformed credit
-             never leaks between blocks (nor from a block's MLP into its attention): block i's attention and value_embeds[i] from the credit at S(i+1); block i's MLP
-             from resid_lambdas[i+1] times the credit at S(i+2) (block 7's from the top-stream credit); wte from S0;
-             the head and the mixing scalars from the cut graph. With the identity scheme this is PR #40's core estimate.
+             never leaks between blocks (nor from a block's MLP into its attention): block i's attention and
+             value_embeds[i] from the credit at S(i+1); block i's MLP from resid_lambdas[i+1] times the credit at
+             S(i+2) (block 7's from the top-stream credit); wte from S0; the head and the mixing scalars from the cut
+             graph. With the identity scheme this is PR #40's core estimate.
 The Boost phase (the first 20% of updates as PR #40 schedules it; boost: false starts Cut at update 1) is
 boost_loss: PR #40's Boost, each sublayer against the shared head's readout of the stream right after it.
 
@@ -35,6 +36,9 @@ Synthesis-mode experiments, one per run, each a fixed rule (no knob but E13's th
                         -g/|g| (runway_weights, through Replay).
   E13     budget_theta  LOW_ROWS rows per site for tokens whose n-gram and model losses are both at most theta
                         (loud/ngram.py), the full cycle for the rest (Scheme.read_tiers).
+  E8      snr_scaling   in the Cut phase, ANVIL II's polar factor replaced by U diag(r) V^T from each sequence's
+                        synthesized gradient (sequence_gradients; loud/snr.py), on a partial-row scheme, every arm
+                        (control, snr, rate) without the lane gain (ShapedBatchedAnvil, loud/anvil.py).
 
 H8 has neither the record's cross-token patches (value path, input-key and gate probes, path scalars, future-token
 probes) nor its top-512 MLP routes (it uses every unit), so H8 and backprop bracket the cross-token credit.
@@ -48,9 +52,11 @@ from torch import nn
 import torch.nn.functional as F
 
 from . import arch, latent, refs
+from .anvil import shaped_optimizer
 from .ema import EMAWeights
 from .ngram import NGram, low_tier
 from .options import h8_options
+from .snr import SNRScaling
 from .train import current_rates, rate_labels, train
 
 SOFTCAP = 15
@@ -154,7 +160,8 @@ def boost_loss(model, idx, targets, side=None, keep=None):
     embedding by block 0's attention readout along each token's own path (embedding_block0). Returns (loss, the
     model's own token losses).
     side (E15, loud.latent.LatentTargets): every sublayer's stream but the last's also, or instead of its readout
-    (side.lens), predicts the teacher's latent. keep: a dict that receives the top stream and the raw embedding (E14)."""
+    (side.lens), predicts the teacher's latent. keep: a dict that receives the top stream and the raw embedding
+    (E14)."""
     m = um()
     L, head = model.config.n_layer, model.lm_head.weight
     count = (targets != -1).sum()
@@ -164,7 +171,8 @@ def boost_loss(model, idx, targets, side=None, keep=None):
     ngram = arch.ngram_features(model, idx)
 
     def sublayer(k, stream, live, own=False):
-        """Sublayer k's terms on its stream (k = 2i: block i's attention, 2i + 1: its MLP); own: the embedding's path."""
+        """Sublayer k's terms on its stream (k = 2i: block i's attention, 2i + 1: its MLP); own: the embedding's
+        path."""
         if side is not None and not side.lens:
             if side.logging and not own:
                 with torch.no_grad():
@@ -435,6 +443,37 @@ def agreed_gradients(module, params, out, credit, io, tokens, kept):
     return found
 
 
+def sequence_gradients(module, params, out, credit, io, each):
+    """E8's H8 setting: a sublayer's block-local gradients, each nn.Linear weight's from G_b^T X_b per sequence b (G
+    its output's credit from this sublayer's credit alone, X its input), summed over b for the step and kept per
+    sequence in `each` [B, out, in] for the SNR shaper. Other parameters (the value-embedding table) as autograd's."""
+    linears = [m for m in module.modules() if isinstance(m, nn.Linear)]
+    weights = {id(m.weight) for m in linears}
+    others = [p for p in params if id(p) not in weights]
+    grads = torch.autograd.grad(out, [io[m][1] for m in linears] + others, grad_outputs=credit.to(out.dtype),
+                                retain_graph=True)
+    found = dict(zip(map(id, others), grads[len(linears):]))
+    with torch.autocast(out.device.type, enabled=False):
+        for m, G in zip(linears, grads):
+            per = torch.einsum('bto,bti->boi', G.float(), io[m][0].float())
+            each[id(m.weight)] = per
+            found[id(m.weight)] = per.sum(0).to(m.weight.dtype)
+    return found
+
+
+class SequenceGrads:
+    """The per-sequence gradients synthesis_gradients kept, by parameter name: SNRScaling's view of H2."""
+
+    def __init__(self, model, each):
+        self.by_name = {n: each[id(p)] for n, p in model.named_parameters() if id(p) in each}
+
+    def stack(self, name):
+        return self.by_name[name]
+
+    def __len__(self):
+        return len(next(iter(self.by_name.values()), []))
+
+
 def runway_weights(model, idx, targets, sites, credits):
     """E11: per site and token, the move along -g/|g| of d x RMS(h) per coordinate (length d x RMS(h) x sqrt(W)), d in
     RUNWAY, with the lowest loss (Replay, on the cut graph's terms; the clean loss from the same replay, so both share
@@ -467,14 +506,15 @@ def hadamard(d, device):
 
 
 def synthesis_gradients(model, idx, targets, scheme, step, freeze_queries=False, compare=False, agree=False,
-                        runway=False, tiers=None, log=False):
+                        runway=False, tiers=None, log=False, each=None):
     """Synthesis mode's parameter gradients (module docstring), the model's token losses and metrics fields: with
     `compare`, the cosine of the summed block-local weight gradient to the identity's (E6's log); E10 (b) `agree`
     (the share of entries kept logged when `log`); E11 `runway` (its distribution logged when `log`); E13 `tiers`, a
-    function of the token losses giving the low tier (its share logged)."""
+    function of the token losses giving the low tier (its share logged); E8 `each`, a dict that receives every block
+    weight's per-sequence gradient (sequence_gradients)."""
     L = model.config.n_layer
     io = {}
-    with capture_linears(model, io) if agree else nullcontext():
+    with capture_linears(model, io) if agree or each is not None else nullcontext():
         losses, sites, top, attn_out, mlp_out = cut_forward(model, idx, targets, True, freeze_queries)
     loss = losses.sum() / (targets != -1).sum()
     shared = [model.lm_head.weight, model.resid_lambdas, model.x0_lambdas]
@@ -495,7 +535,7 @@ def synthesis_gradients(model, idx, targets, scheme, step, freeze_queries=False,
     tokens = int((targets != -1).sum()) if agree else None
     kept = []
 
-    def block_local(credit, masked):
+    def block_local(credit, masked, kept_each=None):
         """Each sublayer's parameters from its own output's credit alone: the attention's call stops at its
         parameters, and so does the MLP's (one call for both would carry the MLP's credit back through its input,
         the mid stream, into the attention)."""
@@ -507,6 +547,8 @@ def synthesis_gradients(model, idx, targets, scheme, step, freeze_queries=False,
                                             lam[i + 1] * credit[i + 2] if i < L - 1 else g_top)):
                 if masked:
                     found.update(agreed_gradients(module, params, out, g, io, tokens, kept))
+                elif kept_each is not None:
+                    found.update(sequence_gradients(module, params, out, g, io, kept_each))
                 else:
                     found.update(zip(map(id, params), torch.autograd.grad(out, params, grad_outputs=g.to(out.dtype),
                                                                           retain_graph=True)))
@@ -514,7 +556,7 @@ def synthesis_gradients(model, idx, targets, scheme, step, freeze_queries=False,
             sites[0], model.transformer.wte.weight, grad_outputs=credit[0].to(sites[0].dtype), retain_graph=True)[0]
         return found
 
-    grads = block_local(shaped, agree)
+    grads = block_local(shaped, agree, each)
     grads.update(zip(map(id, shared), (g_head, g_lr, g_l0)))
     if agree and log:
         fields['agree_kept'] = round(torch.stack(kept).mean().item(), 6)  # entries kept, mean over block weights
@@ -556,11 +598,20 @@ class H8:
             self.model = m.make_model(self.device, self.seed, s.model, s.projection_std, s.head_std)
         self.model.requires_grad_(True)
         self.params = list(self.model.parameters())
-        self.optimizer = m.make_optimizer(self.model, s, self.horizons[self.phase])
+        # E8: one shaper for the run, acting in the Cut phase (every arm, control included, without the lane gain)
+        self.shaper = SNRScaling(self.o['snr_scaling'], self.model) if self.o['snr_scaling'] != 'none' else None
+        self.optimizer = self.make_optimizer(self.phase, self.horizons[self.phase])
         self.labels = rate_labels(self.optimizer, s.lr)
         self.scheme = Scheme(self.o, s.model.n_embd, self.device, self.seed)
         self.ngram = NGram(s.model.vocab_size) if self.o['budget_theta'] else None  # E13: the stream so far
         self.reset_latent()
+
+    def make_optimizer(self, phase, horizon):
+        """PR #40's optimizers; with E8 on, ANVIL II's Cut-phase stack is ShapedBatchedAnvil with the SNR shaper
+        (Boost keeps the record's, since partial-row noise exists only in the Cut phase)."""
+        if self.shaper is not None and phase == 'cut':
+            return shaped_optimizer(self.m, self.model, self.settings, horizon, self.shaper, 'BatchedAnvil')
+        return self.m.make_optimizer(self.model, self.settings, horizon)
 
     def reset_latent(self):
         """E14's dynamics model, E15's predictors, the EMA teacher either reads (H4), and one Adam for the two at the
@@ -591,7 +642,7 @@ class H8:
         m, o = self.m, self.o
         phase, phase_step, _, _, horizon = self.schedule[step - 1]
         if phase != self.phase:
-            optimizer = m.make_optimizer(self.model, self.settings, horizon)
+            optimizer = self.make_optimizer(phase, horizon)
             m.handoff_optimizer(self.optimizer, optimizer, phase_step)
             self.optimizer, self.phase = optimizer, phase
             self.labels = rate_labels(optimizer, self.settings.lr)
@@ -624,10 +675,13 @@ class H8:
                 losses, sites, top, _, _ = cut_forward(self.model, x, y, True, o['freeze_queries'])
                 loss, embedding = losses.sum() / (y != -1).sum(), sites[0]
             else:
+                each = {} if self.shaper is not None else None
                 grads, losses, extra = synthesis_gradients(self.model, x, y, self.scheme, step, o['freeze_queries'],
                                                            compare, o['agree'], o['runway'], tiers,
-                                                           log=step % RUNWAY_EVERY == 0)
+                                                           log=step % RUNWAY_EVERY == 0, each=each)
                 fields.update(extra)
+                if each is not None:
+                    self.shaper.before_step(step, SequenceGrads(self.model, each))
             if phase == 'boost' or o['mode'] == 'cut':
                 if nextlat:
                     h = um().norm(top)
@@ -649,6 +703,9 @@ class H8:
             fields['stable_rank'] = stable_ranks(self.model, self.optimizer)
         self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
+        if self.shaper is not None and phase == 'cut':
+            fields.update(self.shaper.report(step))
+            self.shaper.pergrad = None  # the batch's gradients, freed
         if aux_params:  # only while its modules act: Adam's momentum would move them on zero gradients
             group = self.optimizer.param_groups[0]
             for aux_group in self.aux_optimizer.param_groups:  # the record's schedule on the base rate

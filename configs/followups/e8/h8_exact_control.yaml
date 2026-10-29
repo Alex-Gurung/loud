@@ -1,0 +1,14 @@
+# E8, the H8 setting's exact-credit reference: H8 synthesis at 8 sequences per update with every row (the exact
+# credits) and the control arm's ANVIL II (polar factor U V^T, no lane gain). The loss partial rows cost is
+# e8.h8_control minus this.
+experiment: e8
+variant: h8_exact_control
+task: h8
+seeds: [0, 1, 2]
+priority: 62
+after: [verify.score_record.s0, verify.h8_smoke.s0, verify.h8_snr_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 8
+  snr_scaling: control

@@ -707,6 +707,39 @@ def anvil_hook(scratch):
         assert torch.equal(a, b), f'{name}: ShapedAnvil does not reproduce Anvil'
 
 
+def batched_anvil_hook(scratch):
+    """PR #40's BatchedAnvil and ShapedBatchedAnvil (E8's hook in H8) with a shaper that returns polar_batch's update
+    and keeps the lane gain: bit-identical weights and state over 3 steps through ANVIL II's engagement."""
+    m = cut_module()
+    from loud.anvil import shaped_optimizer
+    from loud.cut import record_settings
+    s = record_settings(m, '2m', 4)
+
+    class Unchanged:
+        lane_gain = True
+
+        @staticmethod
+        def direction(p, pending):
+            return m.polar_batch(pending[None], s.polar_margin)[0]
+
+    model = m.make_model(torch.device('cpu'), 0, s.model, s.projection_std, s.head_std)
+    twin = copy.deepcopy(model)
+    plain, shaped = m.make_optimizer(model, s, 6), shaped_optimizer(m, twin, s, 6, Unchanged(), 'BatchedAnvil')
+    assert type(shaped.optimizers[0]).__name__ == 'ShapedBatchedAnvil' and m.BatchedAnvil.__name__ == 'BatchedAnvil'
+    generator = torch.Generator().manual_seed(8)
+    for step in range(1, 4):
+        for p, q in zip(model.parameters(), twin.parameters()):
+            p.grad = torch.randn(p.shape, generator=generator).to(p.dtype)
+            q.grad = p.grad.clone()
+        for optimizer in (plain, shaped):
+            m.set_rate(optimizer, step, 6, s.warmdown, s.final)
+            optimizer.step()
+        for (name, p), q in zip(model.named_parameters(), twin.parameters()):
+            assert torch.equal(p, q), f'{name} differs after step {step}'
+    for p, q in zip(plain.optimizers[0].param_groups[0]['params'], shaped.optimizers[0].param_groups[0]['params']):
+        assert all(torch.equal(plain.optimizers[0].state[p][k], shaped.optimizers[0].state[q][k])
+                   for k in ('fast', 'slow', 'energy'))
+
 def snr_scaling(scratch):
     """E8's intervention: r from the update's per-sequence projections (computed here one direction at a time), the
     control arm's polar factor from the SVD, the rate arm's uniform Frobenius ratio, and ANVIL II's step without its

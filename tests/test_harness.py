@@ -204,6 +204,8 @@ def test_plots_read_only_the_run_files(tmp_path, monkeypatch):
         fake_run(tmp_path, 'e8', 'snr', seed, 3.70, lambda s: dict(snr_ratios={'mlp.c_fc': dict(
             r_mean=0.5, frobenius=0.6)}))
         fake_run(tmp_path, 'e3', 'avg10', seed, 3.72)
+        for arm, val in (('h8_exact_control', 4.10), ('h8_control', 4.20), ('h8_snr', 4.14), ('h8_rate', 4.18)):
+            fake_run(tmp_path, 'e8', arm, seed, val)
         (tmp_path / 'runs' / 'e3' / 'avg10' / f's{seed}' / 'population.jsonl').write_text(''.join(
             json.dumps(dict(round=r, step=242 + 4 * r, barriers={'0-1': 0.01 * r, '0-2': -0.01})) + '\n'
             for r in (10, 20)))
@@ -223,6 +225,7 @@ def test_plots_read_only_the_run_files(tmp_path, monkeypatch):
     assert '| baseline e1.bp_b8 | 2 | 3.7100 |' in (tmp_path / 'plots' / 'e2' / 'gap.md').read_text()
     snr = (tmp_path / 'plots' / 'e8' / 'snr.md').read_text()
     assert '| snr | mlp.c_fc | 0.5000 | 0.6000 |' in snr and '| attn.c_q | 0.250 | 0.600 |' in snr
+    assert 'partial rows cost +0.1000; SNR scaling recovers 60% of it' in snr and 'beats it: yes' in snr, snr
     timed = lambda s: dict(train_seconds=s * 6.0, val_loss=5 - s / 40) if s % 25 == 0 else {}
     fake_run(tmp_path, 'e12', 'bp_pr46', 0, 3.34, timed)
     fake_run(tmp_path, 'e1', 'h8_cut', 2, 3.10)  # E16 reads seeds 0-1 of e1.h8_cut only
@@ -239,7 +242,8 @@ def test_plots_read_only_the_run_files(tmp_path, monkeypatch):
     e13 = (tmp_path / 'plots' / 'e13').iterdir()
     assert {'tiers.md', 'delta.md'} <= {p.name for p in e13}
     assert '| theta2 | 0.050 | 0.450 |' in (tmp_path / 'plots' / 'e13' / 'tiers.md').read_text()
-    assert '| theta2 | 2 | 4.2000 ± 0.0000 | +0.0200 | 0.4000 |' in (tmp_path / 'plots' / 'e13' / 'delta.md').read_text()
+    e13 = (tmp_path / 'plots' / 'e13' / 'delta.md').read_text()
+    assert '| theta2 | 2 | 4.2000 ± 0.0000 | +0.0200 | 0.4000 |' in e13, e13
     ranking = (tmp_path / 'plots' / 'e16' / 'ranking.md').read_text()
     assert '| H8 | fixed | 2 | 3.8000 |' in ranking and 'backprop +0.2000, H8 -0.0500' in ranking, ranking
     assert 'reproduces the order: no' in ranking

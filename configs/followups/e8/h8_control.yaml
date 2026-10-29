@@ -1,0 +1,19 @@
+# E8, the H8 setting (v2): H8 synthesis at 8 sequences per update on a partial-row scheme, K = 4 (128 rows per token
+# per site; set row_assign to E6's better assignment before submitting). In the Cut phase every arm replaces ANVIL
+# II's polar factor with U diag(r) V^T, without the per-lane gain or renormalization, from each sequence's synthesized
+# gradient. This arm: control, r = 1.
+# Success: with partial rows, SNR scaling recovers at least half the loss the partial rows cost (h8_control minus
+# h8_exact_control) and beats the rate control. Build condition: as snr.yaml.
+experiment: e8
+variant: h8_control
+task: h8
+seeds: [0, 1, 2]
+priority: 62
+after: [verify.score_record.s0, verify.h8_smoke.s0, verify.h8_snr_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 8
+  rows: 128
+  row_assign: token
+  snr_scaling: control

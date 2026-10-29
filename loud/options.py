@@ -25,7 +25,8 @@ CHECKPOINT_DTYPES = ('bfloat16', 'float32')
 
 # What each task's result.json holds that `expect` may check.
 TRAINING_RESULTS = ('val_loss', 'test_loss', 'heldout_loss', 'train_seconds', 'train_loss_last', 'peak_cuda_gb')
-RESULTS = {'proxy': TRAINING_RESULTS, 'identity': TRAINING_RESULTS, 'h8': TRAINING_RESULTS, 'population': TRAINING_RESULTS,
+RESULTS = {'proxy': TRAINING_RESULTS, 'identity': TRAINING_RESULTS, 'h8': TRAINING_RESULTS,
+           'population': TRAINING_RESULTS,
            'cut': TRAINING_RESULTS + ('val_loss_plain', 'test_loss_plain', 'holdout_plain', 'holdout_merged',
                                       'merge_seconds'),
            'score': ('val_loss', 'test_loss'),
@@ -138,7 +139,7 @@ H8 = dict(
     prior='none',               # 'identity': read only the residual from the identity path's guess (E7)
     compare_every=0,            # every N updates, the cosine of the block-local gradient to the identity scheme's (E6)
     rank_every=0,               # every N updates, the stable rank of ANVIL II's orthogonalization input (E6)
-    arch='fixed',               # 'ngram' (E16): track-3 record #5's design, hashed n-gram value embeddings on every block
+    arch='fixed',               # 'ngram' (E16): track-3 record #5's design (hashed n-gram value embeddings)
     ngram_rows=TRACK3_ROWS,     # E16: rows of each hashed n-gram table (the record's)
     # latent objectives (loud/latent.py), cut mode, one per run:
     nextlat=0.0,                # E14: lambda of NextLat's latent-consistency loss (0: off)
@@ -151,6 +152,8 @@ H8 = dict(
     agree=False,                # E10 (b): block weight-update entries kept where >= 70% of the tokens agree in sign
     runway=False,               # E11: each token's credit at a site weighted by how far its loss keeps falling
     budget_theta=0.0,           # E13: 64 rows per site where max(n-gram loss, model loss) <= theta nats (0: off)
+    snr_scaling='none',         # E8's H8 setting: 'control', 'snr' or 'rate' in place of ANVIL II's polar factor in the
+                                # Cut phase, from each sequence's synthesized gradients (loud/snr.py)
 )
 
 IDENTITY = dict(TRAINING)
@@ -182,7 +185,7 @@ DIAGNOSE = dict(
     estimators=['backprop', 'synthesis', 'time_k4', 'token_k4'],  # snr_spectrum: per-sequence gradients (ESTIMATORS)
 )
 TOOLS = ('cos_to_autograd', 'credit_dump', 'deep_readout_check', 'linearity_check', 'h8_validation', 'ngram_tiers',
-         'snr_spectrum')
+         'snr_spectrum', 'synth_vs_real')
 # snr_spectrum's per-sequence gradients: autograd through the whole model, or H8 synthesis reading width / K rows
 # per token, assigned by time or by token (K = 1: the exact credits; E6's two assignments at E8's K = 4).
 ESTIMATORS = {'backprop': None, 'synthesis': (1, 'time'), 'time_k4': (4, 'time'), 'token_k4': (4, 'token')}
@@ -355,9 +358,15 @@ def h8_options(args):
     scheme = o['rows'] not in (None, width) or o['prior'] != 'none'
     changes = [key for key, on in (('rows/prior', scheme), ('clip_credit', o['clip_credit']), ('agree', o['agree']),
                                    ('runway', o['runway']), ('budget_theta', o['budget_theta'] != 0)) if on]
+    if o['snr_scaling'] not in SNR_ARMS:
+        raise ValueError(f'snr_scaling must be one of {SNR_ARMS}')
+    if o['snr_scaling'] != 'none':  # E8: its arms run on a partial-row scheme (E6's best at K = 4), the setting
+        if o['mode'] != 'synthesis' or o['batch'] < 2 or o['prior'] != 'none':
+            raise ValueError('snr_scaling (E8) runs in synthesis mode at a batch of at least 2, without a prior')
+        changes = [c for c in changes if c != 'rows/prior'] + ['snr_scaling']
     if o['mode'] == 'cut' and (changes or o['compare_every']):
-        raise ValueError('rows, prior, clip_credit, agree, runway, budget_theta and compare_every are synthesis-mode '
-                         'options')
+        raise ValueError('rows, prior, clip_credit, agree, runway, budget_theta, snr_scaling and compare_every are '
+                         'synthesis-mode options')
     if len(changes) > 1:
         raise ValueError(f'one change per arm: {changes} are separate experiments')
     if o['budget_theta'] < 0:
@@ -469,7 +478,8 @@ def diagnose_options(args):
     if snr and o['tool'] != 'snr_spectrum':
         raise ValueError(f'{snr} apply to snr_spectrum only')
     positive(o, 'sequences', 'batch')
-    if not o['estimators'] or set(o['estimators']) - set(ESTIMATORS) or len(set(o['estimators'])) < len(o['estimators']):
+    names = o['estimators']
+    if not names or set(names) - set(ESTIMATORS) or len(set(names)) < len(names):
         raise ValueError(f'estimators: distinct names from {sorted(ESTIMATORS)}')
     if o['sequences'] < 2 * o['batch']:
         raise ValueError('sequences must be at least twice batch (the SNR needs the variance over sequences)')

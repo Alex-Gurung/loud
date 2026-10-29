@@ -43,9 +43,9 @@ Waiting, on purpose:
 - **E5's implementation in the chain.** The plan builds it only after the maintainers answer its rules question
   (section 7; post it as an issue on qlabs-eng/noise, together with E14's and E15's auxiliary-state question). The
   diagnostic runs regardless.
-- **E8's intervention and E9** wait in `configs/followups/`, which a directory submission skips: E8's only if its
-  diagnostic shows partial rows pushing a large share of the momentum's energy below SNR 1, E9 (P3) only if E8 shows
-  per-direction scaling matters with exact gradients. E9's kernel version follows only if it beats `e1.bp_b8` by 0.02.
+- **E8's intervention and E9** wait in `configs/followups/`, which a directory submission skips: E8's (both settings,
+  proxy and H8, with their smoke runs) only if its diagnostic shows partial rows pushing a large share of the
+  momentum's energy below SNR 1, E9 (P3) only if E8 shows per-direction scaling matters with exact gradients. E9's kernel version follows only if it beats `e1.bp_b8` by 0.02.
 - **E14's and E15's follow-ups** (the teacher and onset variants) wait in `configs/followups/` for the first arms.
 - **E12** (30M, P3, rented 8×H100): there is no 8-GPU path; its one-GPU backprop run waits in `configs/followups/e12/`.
 - **Confirming a winner on the real chain** (the Cut chain on the 1M slice): its configs are written once H8 names
@@ -123,8 +123,8 @@ gives a first read of every arm early. The bands, in order (`priority:` in each 
    waits for it.
 4. **H6 diagnostics (30–40)** on `e1.h8_synth.s0`'s checkpoints, each on held-out sequences: `credit_dump` at 0, 10,
    20, 50 and 100% (E7's precondition: `e7.precondition` passes only if the variance ratio is at most 0.5 at 50% and
-   100%), `cos_to_autograd` and `linearity_check` at 20% and 100%; `snr_spectrum` (E8's diagnostic) on
-   `e1.bp_b8.s0`'s.
+   100%), `cos_to_autograd`, `linearity_check` and `synth_vs_real` at 20% and 100%; `snr_spectrum` (E8's diagnostic)
+   on `e1.bp_b8.s0`'s.
 5. **E1, the baselines (50)**, three seeds: backprop at batch 8 and 4 (`bp_b8` seed 0 keeps the H4 checkpoints with
    ANVIL II's state), H8 synthesis with the identity scheme (`h8_synth`, seed 0's checkpoints feed H6, E5 and E13),
    H8 cut mode with and without Boost; `e1.identity`, one seed.
@@ -205,7 +205,7 @@ external/  data/  artifacts/        shared-volume state, gitignored
 
 Recreate `external/` with `scripts/fetch_external.sh` (it clones Noise again at PR #26's commit as
 `external/noise-pr26`), and the data with `scripts/prepare_data.sh`. Run the tests with
-`PYTHONPATH=. /opt/loud-cpu-venv/bin/python -m pytest tests`, about 13 minutes on this pod. The method tests use
+`PYTHONPATH=. /opt/loud-cpu-venv/bin/python -m pytest tests`, 110 tests in about 15 minutes on this pod. The method tests use
 tiny models and short sequences, with dense attention instead of flex attention (which has no CPU backward); the
 Cut chain's checks run it eagerly (no compilation) with a 512-token vocabulary.
 
@@ -293,10 +293,10 @@ the worse end). Forward and backward cost one run; optimizer compute and state a
 
 **E8 and E9** change ANVIL II's orthogonalization through one hook (`loud/anvil.py`); a CPU test checks the hooked
 optimizer reproduces boost-cut's ANVIL II bit for bit, and with both off the proxy uses the original.
-- **E8** (`loud/snr.py`). The diagnostic is H6's `snr_spectrum` (above). The intervention (`snr_scaling`:
+- **E8** (`loud/snr.py`). The diagnostic is H6's `snr_spectrum` (below). The intervention (`snr_scaling`:
   `control`, `snr`, `rate`; in `configs/followups/e8/`): polar's U Vᵀ becomes U diag(r) Vᵀ with r from the update's 8
   per-sequence projections, ANVIL II's lane gain and renormalization off in every arm. One SVD per block matrix per
-  update.
+  update. Its second setting is H8's (below).
 - **E9** (`fisher`, `loud/fisher.py`; P3, in `configs/followups/e9/`): the momentum is left-preconditioned by
   (F + δI)^(−1/2), F the output-side Fisher from a backward with labels sampled from the model and δ = 1e-3 × its mean
   eigenvalue, before ANVIL II's unchanged orthogonalization. The control is `e1.bp_b8`. Run only if E8 shows that
@@ -387,6 +387,12 @@ cross-token patches nor its top-512 MLP routes, so H8 and backprop bracket the c
   logit-lens readouts (`plus`) or instead of them (`only`; the head then learns from the final readout alone);
   logged: per-sublayer readout and latent losses, and the cut gradient's cosine to backprop's at the handoff. The EMA
   teacher's decay rises linearly from 0.996 to 0.9995 (ProteinJEPA's end points; it does not publish the curve).
+- **E8's H8 setting** (`snr_scaling` in synthesis mode, `configs/followups/e8/h8_*`): at 8 sequences per update on
+  128 token rows (E6's best assignment at K = 4, to set before submitting), the Cut phase's ANVIL II becomes
+  `ShapedBatchedAnvil` (PR #40's batched ANVIL II with the same hook; a CPU test checks it reproduces the original
+  bit for bit), with r from each sequence's synthesized gradient Gᵦᵀ Xᵦ. Boost keeps the record's optimizer: partial
+  rows exist only in the Cut phase. `h8_exact_control` (every row, the control arm's optimizer) measures what the
+  partial rows cost; the plots give the share SNR scaling recovers.
 - **E16** (`arch: ngram`, `loud/arch.py`): track-3 record #5's design, the pinned `train/arch/model.py` (12 × 1,024,
   value embeddings on every block plus per-block projections of hashed bigram, trigram and skip-bigram tables, 614M
   parameters), built with PR #40's init, under H8 cut mode (its n-gram embeddings flow through the cut graph, Boost and
@@ -404,6 +410,10 @@ chain does.
   512 × 512 system's median condition number and the median cosine of its solution to the exact credit (plain, and
   with the ridge 1e-3 × mean diag toward the guess). S0 keeps its own cycle in E5, since its probes also move x0.
 - `h8_validation`: H8 synthesis against PR #40's Cut estimate, per matrix.
+- `synth_vs_real`: H8 synthesis against the real chain's partial-row estimate (PR #40's Cut through `loud/cut.py`'s
+  row flags) with the same rows and signs: per site, the per-token cosine of the two and of each to the exact credit,
+  at 128 rows by token and by time, with the record's MLP routes and with every unit (to separate route truncation
+  from finite-difference and bf16 error).
 - `snr_spectrum` (E8): per block matrix, the SNR at batch 8 along each singular direction of the checkpoint's ANVIL
   II momentum, over the 64 training sequences the run reads next, and the share of the momentum's energy below SNR 1,
   for four estimators of the per-sequence gradients: backprop, H8 synthesis with exact credits, and partial rows at

@@ -21,6 +21,9 @@ query live. Probes run through H8's reforward (Replay), as the chain runs them.
     ngram_tiers         E13: the credit energy and token share of the low tier (max(n-gram loss, model loss) <= theta)
                         on the held-out sequences, the n-gram table built from the training stream up to the checkpoint
                         (loud/ngram.py)
+    synth_vs_real       H6 item 6: H8 synthesis against the real chain's (H5's) partial-row estimate with the same rows
+                        and signs: per site, the per-token cosine of the two, and of each to the exact credit, at 128
+                        rows by token and by time, with the record's MLP routes and with every unit
     snr_spectrum        E8 (H6 item 4; loud/snr.py): per block matrix, the SNR at the update batch along each singular
                         direction of the checkpoint's ANVIL II momentum, and the share of its energy below SNR 1, per
                         estimator of the per-sequence gradients (backprop; H8 synthesis with exact credits; partial
@@ -229,6 +232,55 @@ class Toolkit:
         found = {n: cosine(synth[id(p)], record[n]) for n, p in params.items() if record[n].any()}
         return dict(cosines=found, below_099=sorted(n for n, c in found.items() if c < 0.99)), {}
 
+    def synth_vs_real(self, rows=128):
+        """H6 item 6: H8 synthesis against the real chain's partial-row estimate with the same rows and signs. PR #40's
+        Cut (cut.py's, with `rows` rows per token, both assignments) runs on the checkpoint and its decoded credit at
+        each site is kept with the site's signed basis and each token's rows; H8's synthesized credit is the exact
+        credit read through those same rows, (1/m) sum_j (v_j . g) v_j. Per site, quantiles over tokens of the cosine
+        of the two (they differ by finite differences, bf16 and route truncation), and of each to the exact credit;
+        with the record's routes and with every MLP unit routed, to separate the truncation."""
+        from .cut import estimator_classes, record_settings
+        from .options import PRESETS
+        m, config = self.m, self.model.config
+        preset = next(p for p, shape in PRESETS.items() if shape == (config.n_layer, config.n_embd))
+        _, Cut = estimator_classes(m)
+        seen = {}
+
+        class Kept(Cut):
+            def basis(self):
+                H = super().basis()
+                seen.setdefault('bases', []).append(H)
+                return H
+
+            def partial_chain_credits(self, e, *rest):
+                seen['bases'] = []
+                credits = super().partial_chain_credits(e, *rest)
+                seen.update(credits=credits, index=self.row_index(e.shape[0]))
+                return credits
+
+        _, _, exact_credits, _ = self.exact_credits()
+        exact_credits = [g[0].float() for g in exact_credits]
+        names = site_names(self.n_layer)
+        summary = dict(settings=dict(rows=rows, tokens=self.x.shape[1]))
+        for assign in ('token', 'time'):
+            for routes in ('record', 'all'):
+                s = record_settings(m, preset, 4)
+                if routes == 'all':
+                    s.route_k = 4 * config.n_embd
+                estimator = Kept(self.model, s, 0, 0, 1, 1, None)
+                estimator.rows, estimator.start = rows, (0 if assign == 'time' else None)
+                estimator.estimate(self.x, self.y)
+                index = seen['index']
+                row = summary.setdefault(f'{assign} rows, {routes} routes', {})
+                for k, (name, g, H) in enumerate(zip(names, exact_credits, seen['bases'])):
+                    real = seen['credits']['emb' if k == 0 else k - 1].float()
+                    with exact():
+                        directions = H[index].float()  # [tokens, rows, width]
+                        synth = torch.einsum('tp,tpw->tw', torch.einsum('tw,tpw->tp', g, directions), directions) / rows
+                    row[name] = dict(real_vs_synth=quantiles(per_token_cosine(real, synth)),
+                                     synth_vs_exact=quantiles(per_token_cosine(synth, g)),
+                                     real_vs_exact=quantiles(per_token_cosine(real, g)))
+        return summary, {}
 
 TOOL_MODULES = {'cos_to_autograd': 'pr26'}  # the reference trainer a tool needs (default PR #40's); both import the
 # fixed utils/model.py, and one process may load only one
