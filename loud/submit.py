@@ -1,6 +1,6 @@
 """Queue runs for the GPU workers (CPU only; stdlib + PyYAML). Run from the repo root.
 
-    python3 -m loud.submit configs/verify                 # every *.yaml under it, every listed seed
+    python3 -m loud.submit configs/verify                 # every *.yaml under it (but followups/), every listed seed
     python3 -m loud.submit configs/e1/bp_b8.yaml --seeds 0
     python3 -m loud.submit configs/e1 --dry-run           # what each job would do, checked against the queue
     python3 -m loud.submit configs/e1/bp_b8.yaml --rerun  # supersede finished runs (their directories are kept)
@@ -19,10 +19,19 @@ from .run import config_hash, specs_from_config
 from .snapshot import snapshot, verify
 
 
+FOLLOWUPS = 'followups'  # configs the plan runs only after reading earlier results: submitted only when named
+
+
 def config_files(paths):
+    """The configs under each path. A directory leaves out its followups/ subdirectories; name one (or a file in
+    it) to submit it."""
     out = []
     for p in map(Path, paths):
-        out += sorted(f for f in p.rglob('*') if f.suffix in ('.yaml', '.yml')) if p.is_dir() else [p]
+        if not p.is_dir():
+            out.append(p)
+            continue
+        out += sorted(f for f in p.rglob('*') if f.suffix in ('.yaml', '.yml')
+                      and FOLLOWUPS not in f.relative_to(p).parts[:-1])
     return out
 
 

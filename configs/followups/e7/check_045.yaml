@@ -1,0 +1,26 @@
+# E7's self-check, the plan's follow-up: the plan runs it only if the best ramp differs between seeds. So it is not
+# submitted with the rest (configs/followups/): read the ramps (python3 -m loud.plots e7), put the best one's
+# rows_start and rows_full_at here, then submit this file. As written, on ramp64_f60's ramp, part 0 also measures 8
+# rows past each token's window at every mid site. The estimate predicts them by the identity-path guess alone (they
+# are orthogonal to the window); when the batch's relative error there exceeds rows_check, the rows rise by 64 for the
+# rest of the run. The one knob, here 0.45: the error of a guess at cosine 0.9 with the true credit (sqrt(2 - 2 cos)
+# at equal norms), the plan's "good guess" mark; check_077 uses 0.77, cosine 0.7, its "poor" mark. Swap in the best
+# ramp once it is known.
+experiment: e7
+variant: check_045
+task: cut
+seeds: [0, 1]
+priority: 65
+gpu: H100  # wall-clocks compared across experiments (E7 against e6.cut_k1)
+after: [verify.score_record.s0, verify.cut_prefix.s0, verify.cut_prefix_match.s0,
+        verify.cut_variants_smoke.s0, e7.precondition.s0]
+args:
+  merge_batch: true  # the merge scores each candidate in one batch: bf16 rounding of close calls only
+  sequences: 1M
+  heldout: 32
+  batch: 4
+  rows_start: 64
+  rows_full_at: 0.6
+  rows_check: 0.45
+  heldout_every: 10
+  checkpoints: true

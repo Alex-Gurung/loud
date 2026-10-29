@@ -48,7 +48,7 @@ class FractionCheckpoints:
     def save(self, model, step, optimizer=None, copy=None):
         """Save the checkpoint(s) due at this step; coinciding fractions link to the first file. With `optimizer`
         (the records' Optimizers(ANVIL II, Adam)), also <name>.optim.pt; with `copy` (E3), ckpt_<f>.c<copy>.pt: ANVIL II's per-matrix state in float32 and
-        the beta and fast weight of its next step, which H6's direction_stats needs to rebuild the pending update."""
+        the betas and fast weight of its next step, which H6's direction_stats needs to rebuild the pending update."""
         first, *rest = self.at[step]
         path = self.dir / self.name(first, copy)
         torch.save(state_dict_cpu(model, self.dtype), path)
@@ -58,9 +58,10 @@ class FractionCheckpoints:
             names = {id(p): n for n, p in model.named_parameters()}
             state = {names[id(p)]: {k: v.detach().float().cpu() for k, v in anvil.state[p].items() if torch.is_tensor(v)}
                      for group in anvil.param_groups for p in group['params'] if p in anvil.state}
-            engaged = anvil.t >= anvil.engage
-            torch.save(dict(step=step, state=state, beta=anvil.rail_beta(),
-                            fast_weight=anvil.fast_weight if engaged else 1.0), path.with_suffix('.optim.pt'))
+            beta, engaged = anvil.rail_beta(), anvil.t >= anvil.engage  # as its next step reads them
+            torch.save(dict(step=step, state=state, beta=beta, fast_beta=anvil.fast_beta if engaged else beta,
+                            slow_beta=anvil.slow_beta, fast_weight=anvil.fast_weight if engaged else 1.0),
+                       path.with_suffix('.optim.pt'))
         for f in rest:
             link = self.dir / self.name(f, copy)
             if not link.exists():

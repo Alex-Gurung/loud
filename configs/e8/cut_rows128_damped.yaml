@@ -3,6 +3,9 @@
 # curvature along each (float32 central differences on 2 sequences, autograd allowed in development); the noise along
 # them from the 4 sequences' estimates; each step along a direction scaled by 1 / (1 + c / (B h^2 lambda)) right after
 # ANVIL II's orthogonalization. curvature_damping 30 is the proxy sweep's middle (e8.lambda_3e1). Boost is unchanged.
+# A hybrid: the chain's forward-only gradient with an autograd curvature (the development stand-in the plan allows for
+# step-control ideas). The plan's forward-only curvature (a +- probe pair per direction per token) is built only if
+# this damping recovers most of what the partial cycle gave up.
 experiment: e8
 variant: cut_rows128_damped
 task: cut

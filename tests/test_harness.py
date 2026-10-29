@@ -300,3 +300,13 @@ def test_gate_reduces_a_diagnostic_and_checks_min_max(tmp_path, monkeypatch):
                     'expect: {b: {min: 1}}\n')
     with pytest.raises(ValueError, match="no 'b'"):
         specs_from_config(path)
+
+
+def test_followups_are_submitted_only_when_named(tmp_path):
+    from loud.submit import config_files
+    for rel in ('e1/a.yaml', 'followups/e7/b.yaml', 'e2/followups/c.yaml'):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text('')
+    assert [f.name for f in config_files([tmp_path])] == ['a.yaml']
+    assert [f.name for f in config_files([tmp_path / 'followups'])] == ['b.yaml']
+    assert [f.name for f in config_files([tmp_path / 'e2' / 'followups' / 'c.yaml'])] == ['c.yaml']

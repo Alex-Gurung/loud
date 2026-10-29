@@ -279,3 +279,21 @@ wrong or not worth it) or **deferred** (why, and what it waits on). "Same as" po
 | 11 | nit | `per_sequence_grads` with E9 is rejected though E9 keeps the plain gradient | fixed | Allowed |
 | 12 | nit | Fisher token count syncs per micro-batch | fixed | Same as 20261028T225506Z-code-codex.md #3 |
 | 13 | nit | The ensemble rescores the copies at the end, inside the clock | fixed | The last checkpoint's scores are the decision's, timed |
+
+## Round 6: round 5's fixes and the Cut-chain additions (frozen copy of commit 6daad47)
+
+### 20261029T000503Z-code-codex.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | major | `direction_stats` mixes a token-summed gradient with token-mean rails (2,048x apart) and skips the rails' own step | fixed | Gradients of the token-mean loss, as training; `diagnostics.pending_update` steps the fast and slow rails with g at the betas the checkpoint now saves (`fast_beta`, `slow_beta`) before blending; the method check compares it with the tensor the optimizer's next step hands `polar()` |
+| 2 | minor | E8's ShapedBatchedAnvil runs PR #40's compiled update eagerly | rejected | The optimizer step is well under 1% of a Cut update (~16 s), and E8 on the chain is judged on loss, not time |
+
+### 20261029T002425Z-research-codex.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | major | E8's "real test" uses autograd curvature, where the plan's forward-only version uses +- probes | fixed (scope) | The plan allows autograd as a stand-in for step-control ideas in development and describes the probes as the forward-only version; the cell is labelled a hybrid, and the probe version is listed as built only if the hybrid recovers the loss (README, "Not built, on purpose") |
+| 2 | major | H6's pending update mixes gradient scales | fixed | Same as 20261029T000503Z-code-codex.md #1 |
+| 3 | minor | E7's self-check runs without its cross-seed condition and on a fixed ramp | fixed | Moved to `configs/followups/e7/`, which a directory submission skips (`loud.submit`, tested); their queued jobs cancelled; the README says when and how to submit them |
+| 4 | minor | E10's literal reading lacks 0.6 and 0.8 | fixed | `agree_all_t60`, `agree_all_t80` |

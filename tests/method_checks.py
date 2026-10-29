@@ -291,14 +291,14 @@ def diagnostics(scratch):
             grads.append(torch.autograd.grad(out, weight)[0])
         u, _, vh = torch.linalg.svd(sum(grads) / 2, full_matrices=False)
         d = torch.outer(u[:, 0], vh[0])
-        total = exact_model(row[:, :-1].contiguous(), row[:, 1:].contiguous(), loss_reduction='sum') / 2
+        total = exact_model(row[:, :-1].contiguous(), row[:, 1:].contiguous())  # the mean loss, as training's
         g = torch.autograd.grad(total, weight, create_graph=True)[0]
         hvp = torch.autograd.grad((g * d).sum(), weight)[0]
     assert abs(stats[name][0]['curvature'] - (hvp * d).sum().item()) < 2e-2 * abs((hvp * d).sum().item()) + 1e-6
     names = [n for n in stats if n.startswith('transformer.')]
     fake = dict(state={n: dict(fast=torch.randn_like(dict(model.named_parameters())[n]),
                                slow=torch.randn_like(dict(model.named_parameters())[n])) for n in names},
-                beta=0.9, fast_weight=0.5)
+                beta=0.9, fast_beta=0.9, slow_beta=0.98, fast_weight=0.5)
     pending, _ = tools.direction_stats(row, fake, directions=1)
     assert pending['directions_from'] == 'pending update'
     assert all(len(pending[n]) == 1 and pending[n][0]['noise'] >= 0 for n in names)
@@ -312,6 +312,20 @@ def diagnostics(scratch):
     state = torch.load(saved.with_suffix('.optim.pt'), weights_only=True)
     real, _ = tools.direction_stats(row, state, directions=1)
     assert real['directions_from'] == 'pending update', 'the saved state does not cover direction_stats matrices'
+    # the rebuilt pending update is the tensor the optimizer's next step hands polar()
+    from loud.diagnostics import pending_update
+    seen, polar = [], m.polar
+    m.polar = lambda x: seen.append(x.clone()) or polar(x)
+    try:
+        grads = {n: torch.randn_like(p) for n, p in model.named_parameters()}
+        for n, p in model.named_parameters():
+            p.grad = grads[n]
+        optimizer.step()
+    finally:
+        m.polar = polar
+    first = next(n for n, p in model.named_parameters() if p in optimizer.optimizers[0].state)
+    rebuilt = pending_update(grads[first].float(), state['state'][first], state)
+    assert torch.allclose(seen[0], rebuilt, atol=1e-6), 'direction_stats does not rebuild the pending update'
 
 
 CUT_SEQ, CUT_VOCAB = 65, 512  # the Cut checks: 64 predictions per sequence, a 512-token vocabulary

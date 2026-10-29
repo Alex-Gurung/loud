@@ -39,6 +39,11 @@ Not built, on purpose:
   in its section 6 (post it as an issue on qlabs-eng/noise). The diagnostic runs regardless.
 - **E9's kernel version** (the curvature term and sampled-label loss from the chain's probes). The plan builds it only
   if the proxy test (`configs/e9/`) beats the batch-4 baseline by 0.02.
+- **E8's forward-only curvature** (a ± probe pair per direction per token in the chain). `configs/e8/cut_rows128_damped`
+  tests the damping on the chain with an autograd curvature first; the probes are worth building only if it recovers
+  most of the loss the partial cycle gave up.
+- **E7's self-check cells** are built and configured but kept in `configs/followups/e7/`, which a directory
+  submission skips: the plan runs them only if the best ramp differs between seeds, and then on that ramp.
 
 Nothing has run on a GPU yet. Every config together is 184 one-GPU jobs, roughly 55 GPU-hours by the estimates in
 the configs (most of it the Cut chain, about 35 minutes per 1M-slice run; a 10M proxy run is about 8 minutes), so
@@ -122,15 +127,17 @@ is when they are needed to tell a port error from an environment difference.
    9 × 2 table.
 9. **Proxy experiments**, three seeds each, against their E1 baseline: E2 (`smooth_tau` 1, 3, 10) and E4 (`reject`,
    `adapt`, `adapt_t60`, and both without the warmdown at seed 0) and E10 (`cap`, `agree` at 0.6, 0.7, 0.8) at batch 8;
-   E3 (five population rules), E8 (three dampings and the literal placement) and E9 (three dampings) at batch 4. E8 also
+   E3 (five population rules, and `bp_b16`, the single batch-16 run averaging should land near) and E8 (three
+   dampings and the literal placement) and E9 (three dampings) at batch 4; E10 also counts agreement over all tokens
+   (`agree_all_t60/70/80`), the plan's literal reading. E8 also
    waits for H6's `direction_stats`, which the plan runs first and which says where its knob should sit.
 10. **Cut-chain experiments** on the 1M slice (about 35 minutes each; every cell pins `gpu: H100`, since E6, E7 and
     E11 compare wall-clocks, and scores its end merge in one batch, `merge_batch`): E6's `cut_k1`, `cut_k4`,
     `cut_k16` and the control `cut_k4_fresh` (three seeds, drift check every 10 updates); E7's four ramps (two seeds)
     against `e6.cut_k1`, gated by `e7.precondition`, the plan's rule on H6's `credit_dump` (the identity-path guess's
-    median cosine above 0.9 at 20% and below 0.7 at 100%); E7's two self-check cells (`check_045`, `check_077`; the
-    plan runs them only if the best ramp differs between seeds); E11 (three dampings, three seeds); E8's real test
-    (`configs/e8/cut_rows128*`: 128 tiled rows with and without the damping, three seeds).
+    median cosine above 0.9 at 20% and below 0.7 at 100%; E7's self-check waits in `configs/followups/`); E11 (three
+    dampings, three seeds); E8's real test (`configs/e8/cut_rows128*`: 128 tiled rows with and without the damping,
+    three seeds; a hybrid with an autograd curvature).
 11. **E6 on the identity path**: K = 1, 4, 16 (512, 128, 32 probe rows per update) and the control
     `identity_k4_fresh` (128 rows of a fresh basis each update, so E6 can say whether stitching a cycle over K
     updates matters or only the row count does), three seeds each, drift check every 50 updates.

@@ -130,6 +130,16 @@ def norm_difference(x, delta):
     return delta * inv + x * (inv - inv0)
 
 
+def pending_update(g, rails, saved):
+    """The tensor ANVIL II's next step orthogonalizes, for gradient g: its rails stepped with g (fast at the saved
+    fast_beta, slow at slow_beta), blended by the fast weight and mixed with g at the rail beta, as Anvil.step does.
+    `saved` is a checkpoint's .optim.pt (loud/checkpoints.py), `rails` its state for this matrix."""
+    fast = rails['fast'].to(g).lerp(g, 1 - saved['fast_beta'])
+    slow = rails['slow'].to(g).lerp(g, 1 - saved['slow_beta'])
+    weight = saved['fast_weight']
+    return g.lerp(weight * fast + (1 - weight) * slow, saved['beta'])
+
+
 def per_token_cosine(a, b):
     return F.cosine_similarity(a.float(), b.float(), dim=-1)
 
@@ -247,37 +257,33 @@ class Toolkit:
         return summary, dict(singular_values=s.half().cpu())
 
     def direction_stats(self, rows, optimizer_state=None, directions=16, step=1e-3):
-        """rows: [B >= 2, SEQ] sequences. Per block matrix, the top singular directions D (unit Frobenius norm) of the
-        pending update before ANVIL II orthogonalizes it, g.lerp(w * fast + (1 - w) * slow, beta) with g the batch
-        gradient, when the checkpoint saved the optimizer state; else of g alone. For each D: sigma (its singular
-        value), curvature h = <D, (g(W + eD) - g(W - eD)) / 2e>, noise c = var_i <g_i, D> over the B sequences, and
-        h^2 / c. The curvature is a central difference of autograd gradients: flex attention has no double backward."""
+        """rows: [B >= 2, SEQ] sequences. Per ANVIL II matrix, the top singular directions D (unit Frobenius norm) of
+        the update ANVIL II would orthogonalize next (pending_update: its rails stepped with g, then blended), g the
+        batch gradient of the mean loss as training forms it, when the checkpoint saved the optimizer state; else of g
+        alone. For each D: sigma (its singular value), curvature h = <D, (g(W + eD) - g(W - eD)) / 2e>, noise
+        c = var_i <g_i, D> over the B sequences' gradients, and h^2 / c (free of the loss's scale). The curvature is a
+        central difference of autograd gradients: flex attention has no double backward."""
         if len(rows) < 2:
             raise ValueError('direction_stats needs at least two sequences for the noise')
         model = copy.deepcopy(self.model).float().requires_grad_(True)
         params = dict(model.named_parameters())
         names = [n for n, p in params.items() if is_anvil_matrix(n, p)]  # the matrices whose state is saved
 
-        def loss(batch):
+        def loss(batch):  # the token mean, as training differentiates it
             with exact():
-                return model(batch[:, :-1].contiguous(), batch[:, 1:].contiguous(), loss_reduction='sum')
+                return model(batch[:, :-1].contiguous(), batch[:, 1:].contiguous())
 
         per_sequence = []
         for i in range(len(rows)):
             grads = torch.autograd.grad(loss(rows[i:i + 1]), [params[n] for n in names])
             per_sequence.append(dict(zip(names, grads)))
         mean = {n: sum(g[n] for g in per_sequence) / len(rows) for n in names}
-        source = 'gradient'
-        if optimizer_state is not None:
-            state, (beta, weight) = optimizer_state['state'], (optimizer_state['beta'], optimizer_state['fast_weight'])
-            if all(n in state and {'fast', 'slow'} <= set(state[n]) for n in names):
-                source = 'pending update'
+        state = (optimizer_state or {}).get('state', {})
+        source = 'pending update' if all(n in state and {'fast', 'slow'} <= set(state[n]) for n in names) and \
+            {'beta', 'fast_beta', 'slow_beta', 'fast_weight'} <= set(optimizer_state or {}) else 'gradient'
         summary = dict(directions_from=source, sequences=len(rows), step_relative=step)
         for n in names:
-            target = mean[n]
-            if source == 'pending update':
-                fast, slow = (state[n][k].to(target) for k in ('fast', 'slow'))
-                target = target.lerp(weight * fast + (1 - weight) * slow, beta)
+            target = mean[n] if source == 'gradient' else pending_update(mean[n], state[n], optimizer_state)
             u, sv, vh = torch.linalg.svd(target, full_matrices=False)
             w, e = params[n].detach().clone(), step * max(params[n].detach().norm().item(), 1.0)  # a zero matrix too
             out = []
@@ -287,7 +293,7 @@ class Toolkit:
                 for sign in (1, -1):
                     with torch.no_grad():
                         params[n].copy_(w + sign * e * d)
-                    sides.append(torch.autograd.grad(loss(rows), params[n])[0] / len(rows))
+                    sides.append(torch.autograd.grad(loss(rows), params[n])[0])
                 with torch.no_grad():
                     params[n].copy_(w)
                 h = ((sides[0] - sides[1]) * d).sum().item() / (2 * e)
