@@ -5,7 +5,7 @@ experiment: h6
 variant: h8_validation_fp32
 task: diagnose
 seeds: [0]
-priority: 21  # after h6.h8_validation, the gate: this one takes the GPU to itself
+priority: 99  # last: it takes the GPU to itself, and only explains a gate that has passed
 gpu_memory_gb: 72  # float32 doubles the record's activations: the GPU to itself
 after: [e1.bp_b8.s0]
 args:
