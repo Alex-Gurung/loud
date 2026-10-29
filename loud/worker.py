@@ -19,6 +19,7 @@ import sys
 import time
 
 from .common import read_json, utc_now, write_json
+from .drain import is_on
 from .jobqueue import JobQueue, LostLease
 from .paths import QUEUE, REPO
 from .snapshot import verify
@@ -56,6 +57,21 @@ def progress_of(run_dir):
     return {k: record[k] for k in ('step', 'train_loss', 'train_seconds') if k in record}
 
 
+def gpu_memory_gb():
+    """The total memory of the GPU this worker is pinned to (nvidia-smi), or None."""
+    try:
+        out = subprocess.run(['nvidia-smi', '--query-gpu=index,uuid,memory.total', '--format=csv,noheader,nounits'],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    visible = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')[0].strip()
+    for line in out.stdout.splitlines():
+        index, uuid, total = (x.strip() for x in line.split(',')[:3]) if line.count(',') >= 2 else ('', '', '')
+        if total and visible in ('', index, uuid):
+            return float(total) / 1024
+    return None
+
+
 def gpu_name():
     """The name of the GPU this worker's jobs run on: the first nvidia-smi lists, or the first of
     CUDA_VISIBLE_DEVICES (indices or UUIDs) when that pins the worker to some of the pod's GPUs (gpu_worker_2.yaml);
@@ -80,6 +96,8 @@ class Worker:
         self.stopping = None
         self.child = None
         self.gpu = gpu_name()
+        # workers sharing one GPU (LOUD_JOBS_PER_GPU) name it alike and keep their jobs' memory within it
+        self.slot, self.capacity_gb = os.environ.get('LOUD_GPU_SLOT'), gpu_memory_gb()
         self.completed = 0
 
     def report(self, state, **fields):
@@ -97,9 +115,14 @@ class Worker:
     def loop(self):
         idle_since = time.time()
         while not self.stopping:
+            if is_on(self.queue.root):
+                self.report('exited: drained')
+                print(f'{utc_now()} the queue is drained (python3 -m loud.drain off to resume); exiting', flush=True)
+                return 0
             free = self.free_gb()
             disk_full = free < self.min_free_gb
-            job = None if disk_full else self.queue.claim(self.worker_id, self.gpu)
+            job = None if disk_full else self.queue.claim(self.worker_id, self.gpu, self.slot,
+                                                         self.capacity_gb and 0.95 * self.capacity_gb)
             if job is None:
                 why = f'shared disk nearly full ({free:.1f} GB free)' if disk_full else 'no ready job'
                 idle = round(time.time() - idle_since)

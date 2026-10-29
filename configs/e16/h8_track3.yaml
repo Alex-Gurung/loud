@@ -10,6 +10,7 @@ variant: h8_track3
 task: h8
 seeds: [0, 1]
 priority: 75
+gpu_memory_gb: 48  # the 614M-parameter track-3 model: room for one beside two small jobs on a shared H100
 after: [verify.score_record.s0, verify.h8_smoke.s0, verify.track3_smoke.s0, h6.h8_validation.s0]
 args:
   sequences: 10M

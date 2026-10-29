@@ -11,6 +11,7 @@ metadata:
   generateName: alexgurung-loud-worker2-
   labels:
     eidf/user: alexgurung
+    loud/role: worker  # kubectl -n eidf107ns delete job -l loud/role=worker stops every loud worker, nothing else
     kueue.x-k8s.io/queue-name: eidf107ns-user-queue
     kueue.x-k8s.io/priority-class: batch-workload-priority
 spec:

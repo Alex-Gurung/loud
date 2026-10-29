@@ -90,3 +90,13 @@ def test_gpu_name_follows_cuda_visible_devices(monkeypatch):
     assert worker.gpu_name() == 'NVIDIA H200'
     monkeypatch.setenv('CUDA_VISIBLE_DEVICES', 'GPU-b')
     assert worker.gpu_name() == 'NVIDIA H200'
+
+
+def test_a_drained_queue_sends_idle_workers_home(tmp_path):
+    from loud.drain import FILE
+    from loud.jobqueue import JobQueue
+    from loud.worker import Worker
+    queue = JobQueue(tmp_path / 'queue')
+    (tmp_path / 'queue' / FILE).write_text('on\n')
+    worker = Worker(queue, 'w', idle_exit=600, poll=0.01, min_free_gb=0, python=sys.executable)
+    assert worker.loop() == 0  # exits at once instead of waiting out the idle time

@@ -6,6 +6,7 @@ variant: track3_smoke
 task: h8
 seeds: [0]
 priority: 66
+gpu_memory_gb: 48  # the 614M-parameter track-3 model: room for one beside two small jobs on a shared H100
 after: [verify.smoke.s0]
 args:
   sequences: 1M

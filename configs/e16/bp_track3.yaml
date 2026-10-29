@@ -6,6 +6,7 @@ variant: bp_track3
 task: proxy
 seeds: [0, 1]
 priority: 75
+gpu_memory_gb: 48  # the 614M-parameter track-3 model: room for one beside two small jobs on a shared H100
 after: [verify.score_record.s0, verify.bp_b8_match.s0, verify.track3_smoke.s0]
 args:
   recipe: pr40

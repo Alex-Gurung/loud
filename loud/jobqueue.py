@@ -27,7 +27,8 @@ STATES = ('queued', 'running', 'done', 'failed', 'cancelled')
 LEASE_SECONDS = 300
 MAX_ATTEMPTS = 3
 # May change while a job waits (with an equal config hash, the spec differs only in its config_path and notes).
-SCHEDULING = ('priority', 'after', 'after_done', 'gpu', 'config_path', 'spec')
+SCHEDULING = ('priority', 'after', 'after_done', 'gpu', 'gpu_memory_gb', 'config_path', 'spec')
+GPU_MEMORY_GB = 16  # what a job reserves on a shared GPU unless its config says (gpu_memory_gb)
 
 
 class LostLease(RuntimeError):
@@ -209,23 +210,29 @@ class JobQueue:
         else:
             self._move(job, 'running', 'queued')
 
-    def claim(self, worker_id, gpu=None):
-        """The first ready job (by priority, then submission) whose `gpu` requirement, if any, names this worker's GPU."""
+    def claim(self, worker_id, gpu=None, slot=None, capacity_gb=None):
+        """The first ready job (by priority, seed, then submission) whose `gpu` requirement, if any, names this worker's
+        GPU. Workers sharing a GPU name it by `slot`: a job is claimed only if its gpu_memory_gb (default GPU_MEMORY_GB)
+        fits in capacity_gb beside what the slot's running jobs reserve."""
         with self.locked():
             now = time.time()
             for job in self.jobs('running'):
                 if now - job.get('heartbeat', 0) > self.lease_seconds:
                     self._requeue(job, 'lease expired', 'no heartbeat for the lease time')
             finished = self.finished()
+            reserved = sum(j.get('gpu_memory_gb') or GPU_MEMORY_GB for j in self.jobs('running')
+                           if slot and j.get('slot') == slot)
             for job in sorted(finished[2].values(), key=queue_order):
                 if self.dependency_state(job, finished)[0] != 'ready':
                     continue
                 if job.get('gpu') and job['gpu'] not in (gpu or ''):
                     continue
+                if slot and capacity_gb and reserved + (job.get('gpu_memory_gb') or GPU_MEMORY_GB) > capacity_gb:
+                    continue
                 attempt_dir = free_name(Path(job['run_dir']), 'attempt')
                 attempt_dir.mkdir(parents=True)
-                job.update(worker=worker_id, claimed_at=utc_now(), heartbeat=now, attempts=job['attempts'] + 1,
-                           attempt_dir=str(attempt_dir))
+                job.update(worker=worker_id, slot=slot, claimed_at=utc_now(), heartbeat=now,
+                           attempts=job['attempts'] + 1, attempt_dir=str(attempt_dir))
                 job['history'].append(dict(event='claimed', at=job['claimed_at'], worker=worker_id,
                                            attempt=job['attempts'], attempt_dir=job['attempt_dir']))
                 self._move(job, 'queued', 'running')

@@ -52,7 +52,8 @@ def plan(paths, seeds, priority):
             jobs.append(dict(id=jid, spec=dict(spec, config_path=meta['config_path'], notes=meta['notes']),
                              priority=meta['priority'] if priority is None else priority, after=meta['after'],
                              after_done=meta['after_done'],
-                             gpu=meta['gpu'], config_path=meta['config_path'], config_hash=config_hash(spec),
+                             gpu=meta['gpu'], gpu_memory_gb=meta['gpu_memory_gb'], config_path=meta['config_path'],
+                             config_hash=config_hash(spec),
                              run_dir=str(run_dir(spec['experiment'], spec['variant'], spec['seed']))))
     if not jobs:
         raise SystemExit('no configs found')

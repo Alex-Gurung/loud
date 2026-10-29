@@ -229,6 +229,8 @@ def run(spec, run_dir):
     elapsed = clock.elapsed()
     events.close()
 
+    if not all(bool(torch.isfinite(p).all()) for p in model.parameters()):  # the last update's and the rule's too
+        raise FloatingPointError('non-finite weights after the last update')
     final = checkpoints.save_final(model)
     run.update_config(checkpoints=checkpoints.saved)
     result = dict(steps=steps, updates=steps, complete=True, train_seconds=round(elapsed, 2),

@@ -63,25 +63,40 @@ Waiting, on purpose:
 - **Confirming a winner on the real chain** (the Cut chain on the 1M slice): its configs are written once H8 names
   the winners, with the H5 flags (`rows`, `row_assign`, `prior`, `row_budget`).
 
-Nothing has run on a GPU yet. The 156 jobs are about 21 GPU-hours on one H100 by v2's single-GPU estimates (10M
-backprop about 5 minutes, H8 cut mode about 6, H8 synthesis about 10; the track-3 model about 5 times that), so a
-day on one worker or about 11 hours on two. P1 is about 14 of those hours, and it runs first. They write about 19 GB:
+Nothing has run on a GPU yet. The 161 jobs are about 21 GPU-hours on one H100 by v2's single-GPU estimates (10M
+backprop about 5 minutes, H8 cut mode about 6, H8 synthesis about 10; the track-3 model about 5 times that). Run
+one after another that is a day; four at a time on one GPU (`LOUD_JOBS_PER_GPU`), likely 7 to 8 hours, and half that
+on two GPUs. P1 is about two thirds of it and runs first. The first runs measure the times. They write about 19 GB:
 each run's `final.pt` is scored exact, then keeps its matrices in bf16 (`final_dtype`; 75 MB, against 130 MB exact;
 the verifications and E1 keep theirs exact), the track-3 model's is about 1.2 GB, and H4 checkpoints exist only where
 a diagnostic reads them (`e1.bp_b8.s0` with ANVIL II's state, `e1.h8_synth.s0`), in bf16. Workers pause when the
-shared volume has 15 GB left; it had 38 GB free on 2026-10-29. The first runs measure the times.
+shared volume has 15 GB left; it had 38 GB free on 2026-10-29.
 
 ## Running on GPUs
 
-Workers are Kubernetes Jobs, launched from the root node as in stylo. Each worker runs queued jobs one at a time on
-one GPU, from `artifacts/queue/` on the shared volume. With one GPU, launch one worker; with two, launch the two-GPU
-pod instead:
+Workers are Kubernetes Jobs, launched from the root node as in stylo. A worker pod pulls jobs from
+`artifacts/queue/` on the shared volume. Every job is one run (one arm, one seed), so work is sharded by run: pods can
+come and go at any time, each claims whatever is next, and more pods simply finish the queue sooner. The jobs are
+small (a 38M-parameter model at 4 to 8 sequences per update leaves an H100 mostly idle), so each pod runs
+`LOUD_JOBS_PER_GPU` of them side by side (4 in the YAMLs); a job reserves 16 GB of the GPU unless its config says
+(`gpu_memory_gb`, 48 for the track-3 model), and a worker claims only what fits beside its GPU's other jobs. Set
+`LOUD_JOBS_PER_GPU` to 1 for runs whose wall-clock is the result.
+
+**Start, add, stop** (from the root node):
 
 ```bash
-kubectl -n eidf107ns create -f worker/gpu_worker.yaml       # one H100 worker (comparable wall-clocks)
-kubectl -n eidf107ns create -f worker/gpu_worker_2.yaml     # a two-H100 pod: two workers, one per GPU
-kubectl -n eidf107ns create -f worker/gpu_worker_any.yaml   # one H100 or H200 (jobs without a gpu: requirement)
+kubectl -n eidf107ns create -f worker/gpu_worker.yaml       # start: one H100, 4 jobs at a time; again to add GPUs
+kubectl -n eidf107ns create -f worker/gpu_worker_2.yaml     # or a two-H100 pod (8 jobs at a time)
+kubectl -n eidf107ns create -f worker/gpu_worker_any.yaml   # or one H100 or H200, for jobs without a gpu: pin
+kubectl -n eidf107ns get jobs -l loud/role=worker           # what is running
+kubectl -n eidf107ns delete job -l loud/role=worker         # stop now: each running job goes back to the queue
 ```
+
+To stop without losing the runs in flight, drain instead: `python3 -m loud.drain on` (from the CPU pod) lets every
+worker finish its current job and exit; `python3 -m loud.drain off` before launching again. A job stopped mid-run
+(pod deleted, preempted) starts again from its first update on the next worker, with its earlier attempt kept for its
+log; runs are minutes long, so nothing larger is lost. To send compute to one experiment first, resubmit its configs
+with a lower priority (`python3 -m loud.submit configs/e6 --priority 20`): queued jobs take the new priority.
 
 Nothing restarts a worker, so relaunch it with the same command whenever it stops:
 - A worker exits after 20 idle minutes, with no ready job or with the disk below its floor (EIDF reclaims idle GPUs
@@ -148,8 +163,8 @@ gives a first read of every arm early. The bands, in order (`priority:` in each 
 
 1. **Smoke runs (1–4).** `verify.smoke`: a complete 57-update proxy run on the 1M range through every H1–H4 path and
    official scoring; every other job waits for it. Each method has its own short complete run before its cells:
-   `h8_smoke`, `nextlat_smoke`, `latent_boost_smoke`, `track3_smoke` (the track-3 model at full size, scored with its
-   own model file), `identity_smoke`, `cut_smoke`, `population_smoke`, `blur_smoke`, `step_control_smoke`.
+   `h8_smoke`, `nextlat_smoke`, `latent_boost_smoke`, `identity_smoke`, `population_smoke`, `blur_smoke`,
+   `step_control_smoke`.
 2. **Verifications (5–11).**
    - `verify.score_record` (verification 1): the record checkpoint must rescore to 3.94481 (val) and 3.93696 (test),
      within 1e-5.
@@ -160,9 +175,7 @@ gives a first read of every arm early. The bands, in order (`priority:` in each 
      updates and 0.01 at the end (`verify.bp_b8_match`).
    - `verify.identity` (verification 3): the identity path for a full 10M epoch, within 0.02 of PR #26's 4.1772;
      `verify.identity_match` compares its first 20 updates with PR #26's published 8-GPU log.
-   - `verify.cut_prefix`: the real Cut chain for 262 updates of the 10M schedule (242 Boost, 20 Cut), held to PR #40's
-     published 8-GPU log within 0.003 over 20 updates and 0.01 over all 262; `verify.cut_prefix_reversed` measures how
-     far float rounding alone moves them.
+
 3. **H8's validation (20).** `h6.h8_validation` on `e1.bp_b8.s0`'s 50% checkpoint: H8 synthesis against PR #40's Cut
    estimate (cross-token patches off, every MLP unit routed), every matrix's cosine at least 0.99. Every H8 experiment
    waits for it.
@@ -171,18 +184,22 @@ gives a first read of every arm early. The bands, in order (`priority:` in each 
    100%), `cos_to_autograd`, `linearity_check` and `synth_vs_real` at 20% and 100%; `snr_spectrum` (E8's diagnostic)
    on `e1.bp_b8.s0`'s.
 5. **E1, the baselines (50)**, three seeds: backprop at batch 8 and 4 (`bp_b8` seed 0 keeps the H4 checkpoints with
-   ANVIL II's state), H8 synthesis with the identity scheme (`h8_synth`, seed 0's checkpoints feed H6, E5 and E13),
-   H8 cut mode with and without Boost; `e1.identity`, one seed.
-6. **P1 experiments (55–64)**, three seeds each:
-   - 55: E6 (`time` and `token` row assignment at K = 4, 8, 16) and E7 (the identity prior at m = 64, 128; gated by
-     `e7.precondition`), against `e1.h8_synth`;
-   - 60: E14 (NextLat at λ = 0.3, 1, 3) and E15 (latent target beside or instead of the lens), against `e1.h8_cut`;
-   - 62: E2 (`blur` 0.03, 0.1, 0.3) and E4 (`reject`, `adapt`, `adapt_nowd`), against `e1.bp_b8`;
-   - 64: E3 (local SGD: `avg1`, `avg10`, `avg50`, `select50`, `ensemble`), against `e1.bp_b8`.
-7. **P2 (68–75)**: E5's diagnostic and E13's tiers diagnostic (68); E10 (`clip`, `agree`), E11 (`runway`) and E13
+   ANVIL II's state), backprop at batch 4 on PR #40's recipe (`bp_b4_pr40`, the H8 experiments' backprop end), H8
+   synthesis with the identity scheme (`h8_synth`, seed 0's checkpoints feed H6, E5 and E13), H8 cut mode with and
+   without Boost; `e1.identity`, one seed.
+6. **P1 experiments (55)**, three seeds each, one band, so every arm's seed 0 runs before any seed 1: E6 (`time` and
+   `token` row assignment at K = 4, 8, 16) and E7 (the identity prior at m = 64, 128; gated by `e7.precondition`)
+   against `e1.h8_synth`; E14 (NextLat at λ = 0.3, 1, 3) and E15 (latent target beside or instead of the lens)
+   against `e1.h8_cut`; E2 (`blur` 0.03, 0.1, 0.3), E4 (`reject`, `adapt`, `adapt_nowd`) and E3 (local SGD: `avg1`,
+   `avg10`, `avg50`, `select50`, `ensemble`) against `e1.bp_b8`.
+7. **The real chain's checks (66)**, which only P2's confirmations need: `verify.cut_smoke`; `verify.cut_prefix`, the
+   real Cut chain for 262 updates of the 10M schedule (242 Boost, 20 Cut), held to PR #40's published 8-GPU log within
+   0.003 over 20 updates and 0.01 over all 262 (`verify.cut_prefix_reversed` measures how far float rounding alone
+   moves them); and `verify.track3_smoke` (the track-3 model at full size, scored with its own model file).
+8. **P2 (68–75)**: E5's diagnostic and E13's tiers diagnostic (68); E10 (`clip`, `agree`), E11 (`runway`) and E13
    (θ = 2, 3, 4, each gated on the tiers: the low tier under 10% of the credit energy with over 40% of the tokens) at
-   70; E16 (75): the track-3 model under backprop and under H8 cut mode, and the fixed model under backprop with the
-   same recipe, two seeds each (`e1.h8_cut` seeds 0–1 is the fourth arm).
+   70; E16 (75): the track-3 model under backprop and under H8 cut mode, two seeds each (`e1.bp_b4_pr40` and
+   `e1.h8_cut` seeds 0–1 are the fixed model's arms).
 
 ### How the queue works
 
@@ -245,6 +262,7 @@ loud/            the harness package (frozen into each job's snapshot)
   pergrad.py     H2 per-sequence gradients                            gate.py      the gate task: a plan rule as a check
   runlog.py      the files every run writes, and its check            noop.py      plumbing task for queue and workers
   board.py       the experiment board's tables (its page: board.html) paths.py     where shared state lives (LOUD_*)
+  drain.py       wind workers down after their current jobs
   common.py      small shared helpers (stdlib only)
   jobqueue.py, worker.py, submit.py, status.py, snapshot.py            the GPU queue
 configs/         one YAML per variant (configs/<experiment>/<variant>.yaml), its seeds listed inside

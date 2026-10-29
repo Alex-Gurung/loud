@@ -30,8 +30,8 @@ from .jobqueue import JobQueue, free_name, job_id
 from .options import TASKS, VALIDATE, check_expect, jobs_read
 from .paths import QUEUE, REPO, run_dir as default_run_dir
 
-KEYS = {'experiment', 'variant', 'task', 'seed', 'seeds', 'priority', 'after', 'after_done', 'gpu', 'args', 'expect',
-        'notes'}
+KEYS = {'experiment', 'variant', 'task', 'seed', 'seeds', 'priority', 'after', 'after_done', 'gpu', 'gpu_memory_gb',
+        'args', 'expect', 'notes'}
 
 
 def specs_from_config(path, seeds=None):
@@ -75,6 +75,9 @@ def _specs(config, path, seeds):
         raise ValueError('priority must be an integer')
     if gpu is not None and (not isinstance(gpu, str) or not gpu):
         raise ValueError('gpu must be part of a GPU name, e.g. H100')
+    memory = config.get('gpu_memory_gb')
+    if memory is not None and (isinstance(memory, bool) or not isinstance(memory, (int, float)) or memory <= 0):
+        raise ValueError('gpu_memory_gb must be a positive number of GB')
     try:
         rel = str(Path(path).resolve().relative_to(REPO.resolve()))
     except ValueError:
@@ -85,7 +88,7 @@ def _specs(config, path, seeds):
                     expect=config.get('expect'))
         meta = dict(config_path=rel, notes=config.get('notes'), priority=priority,
                     after=[a.format(seed=seed) for a in after], after_done=[a.format(seed=seed) for a in after_done],
-                    gpu=gpu)
+                    gpu=gpu, gpu_memory_gb=memory)
         for jid, lists in jobs_read(task, args):
             if not any(jid in meta[key] for key in lists):
                 raise ValueError(f'args read {jid}\'s files, so it must be done first: list it in {" or ".join(lists)}')

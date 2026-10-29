@@ -35,6 +35,19 @@ def test_priority_then_seed_then_submission_order(q, tmp_path):
     assert q.claim('w') is None
 
 
+def test_workers_sharing_a_gpu_claim_only_what_fits_beside_the_others(q, tmp_path):
+    q.submit(dict(job('big', tmp_path, priority=1), gpu_memory_gb=48))
+    q.submit(dict(job('big2', tmp_path, priority=2), gpu_memory_gb=48))
+    for k in range(4):
+        q.submit(job(f'small{k}', tmp_path, priority=3))
+    slot = dict(slot='node-gpu0', capacity_gb=76)
+    assert q.claim('w0', **slot)['id'] == 'big'
+    assert q.claim('w1', **slot)['id'] == 'small0'  # big2 would not fit beside big: 48 + 48 > 76
+    assert q.claim('w2', **slot) is None  # 48 + 16 + 16 > 76
+    assert q.claim('w3', slot='node-gpu1', capacity_gb=76)['id'] == 'big2'  # another GPU has room
+    assert q.claim('w4')['id'] == 'small1'  # a worker that does not share its GPU claims as before
+
+
 def test_dependencies_wait_and_block_on_failed_check(q, tmp_path):
     q.submit(job('verify', tmp_path, priority=1))
     q.submit(job('e1', tmp_path, priority=1, after=['verify']))
