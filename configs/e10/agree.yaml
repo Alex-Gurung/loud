@@ -1,0 +1,18 @@
+# E10 (b), sign agreement in H8 synthesis mode: each block nn.Linear's weight-update entry is kept only where at least
+# 70% of the update's tokens agree in the sign of their contribution, |sign(G)^T sign(X)| >= 0.4 x tokens in one
+# matrix multiply (a token whose contribution is zero votes for neither sign); otherwise E1's synthesis run. A fixed
+# rule, no sweep. metrics.jsonl logs the share of entries kept (agree_kept, every 10 updates): over 8,192 tokens 70%
+# agreement is a strong filter, so read that share beside the loss. Against e1.h8_synth: success is beating it by 0.02.
+experiment: e10
+variant: agree
+task: h8
+seeds: [0, 1, 2]
+priority: 70
+after: [verify.score_record.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  mode: synthesis
+  agree: true
+  compare_every: 50
+  heldout_every: 100

@@ -7,7 +7,8 @@ import sys
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-CHECKS = ('h8_gradients', 'h8_boost', 'h8_schemes', 'h8_reforward', 'h8_run')
+CHECKS = ('h8_gradients', 'h8_boost', 'h8_schemes', 'h8_reforward', 'h8_run', 'h8_shaping', 'h8_runway',
+          'h8_ngram', 'h8_variants_run')
 
 
 @pytest.mark.parametrize('check', CHECKS)

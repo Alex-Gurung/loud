@@ -142,6 +142,11 @@ H8 = dict(
     prior='none',               # 'identity': read only the residual from the identity path's guess (E7)
     compare_every=0,            # every N updates, the cosine of the block-local gradient to the identity scheme's (E6)
     rank_every=0,               # every N updates, the stable rank of ANVIL II's orthogonalization input (E6)
+    # synthesis-mode experiments (loud/h8.py), at most one per run, each a fixed rule:
+    clip_credit=False,          # E10 (a): each token's credit norm at a site capped at 3x the site's batch median
+    agree=False,                # E10 (b): block weight-update entries kept where >= 70% of the tokens agree in sign
+    runway=False,               # E11: each token's credit at a site weighted by how far its loss keeps falling
+    budget_theta=0.0,           # E13: 64 rows per site where max(n-gram loss, model loss) <= theta nats (0: off)
 )
 
 IDENTITY = dict(
@@ -183,7 +188,8 @@ DIAGNOSE = dict(
     row=0,                      # the held-out sequence (0-31 of the 10M order's last 32) measured
     batch=8,                    # direction_stats: sequences for the gradient, its curvature and its spread
 )
-TOOLS = ('cos_to_autograd', 'credit_dump', 'token_map_svd', 'direction_stats', 'linearity_check', 'credit_recovery')
+TOOLS = ('cos_to_autograd', 'credit_dump', 'token_map_svd', 'direction_stats', 'linearity_check', 'credit_recovery',
+         'ngram_tiers')
 
 
 def positive(o, *keys):
@@ -341,8 +347,15 @@ def h8_options(args):
         if o['rows'] & (o['rows'] - 1) or o['rows'] > width:
             raise ValueError(f'rows must be a power of two up to the width ({width})')
     scheme = o['rows'] not in (None, width) or o['prior'] != 'none'
-    if o['mode'] == 'cut' and (scheme or o['compare_every']):
-        raise ValueError('rows, prior and compare_every are synthesis-mode options')
+    changes = [key for key, on in (('rows/prior', scheme), ('clip_credit', o['clip_credit']), ('agree', o['agree']),
+                                   ('runway', o['runway']), ('budget_theta', o['budget_theta'] != 0)) if on]
+    if o['mode'] == 'cut' and (changes or o['compare_every']):
+        raise ValueError('rows, prior, clip_credit, agree, runway, budget_theta and compare_every are synthesis-mode '
+                         'options')
+    if len(changes) > 1:
+        raise ValueError(f'one change per arm: {changes} are separate experiments')
+    if o['budget_theta'] < 0:
+        raise ValueError('budget_theta must be >= 0 nats (0: off)')
     for key in ('row_assign',):
         if key in args and o['rows'] in (None, width):
             raise ValueError(f'{key} needs rows below the width')
