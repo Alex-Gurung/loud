@@ -6,6 +6,7 @@ variant: cos_to_autograd_cut_c20
 task: diagnose
 seeds: [0]
 priority: 30
+gpu_memory_gb: 32  # the record's Cut at its own settings
 after: [e1.h8_synth.s0]
 args:
   tool: cos_to_autograd

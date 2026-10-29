@@ -129,6 +129,19 @@ def direct(config, seed, out):
     return result
 
 
+def share_gpu(job):
+    """On a GPU shared by several workers (the job has a slot), hold this process to the memory the job reserved
+    (gpu_memory_gb): PyTorch's allocator then returns its cache before it would crowd the other jobs."""
+    if not job.get('slot'):
+        return
+    os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')  # less fragmentation under the cap
+    import torch
+    from .jobqueue import GPU_MEMORY_GB
+    if torch.cuda.is_available():
+        total = torch.cuda.get_device_properties(0).total_memory / 2 ** 30
+        torch.cuda.set_per_process_memory_fraction(min(1.0, (job.get('gpu_memory_gb') or GPU_MEMORY_GB) / total))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--config', type=Path)
@@ -138,6 +151,7 @@ def main():
     args = parser.parse_args()
     if args.job:
         job = read_json(args.job)
+        share_gpu(job)
         result = execute(job['spec'], job['attempt_dir'])
     elif args.config:
         result = direct(args.config, args.seed, args.out)

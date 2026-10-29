@@ -5,6 +5,7 @@ variant: h8_snr_smoke
 task: h8
 seeds: [0]
 priority: 3
+gpu_memory_gb: 24  # each sequence's weight gradients at batch 8
 after: [verify.smoke.s0]
 args:
   sequences: 1M

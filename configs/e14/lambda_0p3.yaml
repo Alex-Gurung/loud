@@ -10,6 +10,7 @@ variant: lambda_0p3
 task: h8
 seeds: [0, 1, 2]
 priority: 55
+gpu_memory_gb: 20  # the latent objectives and their EMA teacher: 12 GB at the smoke run's peak
 after: [verify.score_record.s0, verify.nextlat_smoke.s0, h6.h8_validation.s0]
 args:
   sequences: 10M

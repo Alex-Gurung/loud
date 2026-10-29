@@ -6,6 +6,7 @@ variant: h8_exact_control
 task: h8
 seeds: [0, 1, 2]
 priority: 62
+gpu_memory_gb: 24  # each sequence's weight gradients at batch 8
 after: [verify.score_record.s0, verify.h8_smoke.s0, verify.h8_snr_smoke.s0, h6.h8_validation.s0]
 args:
   sequences: 10M

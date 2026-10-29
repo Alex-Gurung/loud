@@ -7,6 +7,7 @@ variant: cut_smoke
 task: cut
 seeds: [0]
 priority: 66
+gpu_memory_gb: 24  # the Cut chain: 18 GB at its peak
 after: [verify.smoke.s0]
 args:
   sequences: 96

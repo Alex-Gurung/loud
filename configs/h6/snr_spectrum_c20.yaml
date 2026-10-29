@@ -10,6 +10,7 @@ variant: snr_spectrum_c20
 task: diagnose
 seeds: [0]
 priority: 40
+gpu_memory_gb: 24  # 64 sequences' gradients per estimator
 after: [e1.bp_b8.s0]
 args:
   tool: snr_spectrum

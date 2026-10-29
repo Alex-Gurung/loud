@@ -9,6 +9,7 @@ variant: readout_c20
 task: diagnose
 seeds: [0]
 priority: 68
+gpu_memory_gb: 32  # a 512-probe cycle per token chunk through reforward
 after: [e1.h8_synth.s0]
 args:
   tool: deep_readout_check

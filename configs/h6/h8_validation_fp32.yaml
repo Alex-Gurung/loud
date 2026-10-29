@@ -6,7 +6,7 @@ variant: h8_validation_fp32
 task: diagnose
 seeds: [0]
 priority: 20
-gpu_memory_gb: 60  # float32 doubles the record's activations
+gpu_memory_gb: 72  # float32 doubles the record's activations: the GPU to itself
 after: [e1.bp_b8.s0]
 args:
   tool: h8_validation

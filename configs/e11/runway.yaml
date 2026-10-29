@@ -10,6 +10,7 @@ variant: runway
 task: h8
 seeds: [0, 1, 2]
 priority: 70
+gpu_memory_gb: 24  # the runway's replays beside the synthesis gradients
 after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
 args:
   sequences: 10M

@@ -6,6 +6,7 @@ variant: nextlat_smoke
 task: h8
 seeds: [0]
 priority: 3
+gpu_memory_gb: 20  # the latent objectives and their EMA teacher: 12 GB at the smoke run's peak
 after: [verify.smoke.s0]
 args:
   sequences: 1M

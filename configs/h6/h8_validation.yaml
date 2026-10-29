@@ -11,7 +11,7 @@ variant: h8_validation
 task: diagnose
 seeds: [0]
 priority: 20
-gpu_memory_gb: 40  # the record's Cut with every unit routed and every key logit: tens of GB
+gpu_memory_gb: 56  # the record's Cut with every unit routed and every key logit (over 40 GB)
 after: [e1.bp_b8.s0]
 args:
   tool: h8_validation
