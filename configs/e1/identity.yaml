@@ -1,5 +1,6 @@
-# E1: the identity-path forward-only estimator (PR #26, unchanged) for a full 10M epoch, seed 0. Like every
-# experiment cell it holds out the last 32 sequences; verify.identity is the published layout (no held-out split).
+# E1: the identity-path forward-only estimator (PR #26, unchanged) for a full 10M epoch, seed 0 (expected about 4.18).
+# Like every experiment cell it holds out the last 32 sequences; verify.identity is the published layout (no held-out
+# split).
 experiment: e1
 variant: identity
 task: identity
@@ -11,5 +12,3 @@ args:
   heldout: 32
   batch: 8
   heldout_every: 50
-  checkpoints: true
-  means: true

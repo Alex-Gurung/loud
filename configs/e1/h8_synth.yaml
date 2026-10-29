@@ -10,4 +10,4 @@ after: [verify.score_record.s0, verify.h8_smoke.s0]
 args:
   sequences: 10M
   heldout: 32
-  checkpoints: true
+  checkpoints: [0]

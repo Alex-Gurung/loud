@@ -50,4 +50,25 @@ export PYTHONPATH="$LOUD_WORKER_CODE" LOUD_CODE_DIR="$LOUD_WORKER_CODE"
 cd "$LOUD_WORKER_CODE"
 
 phase worker
-exec "$LOUD_PYTHON" -u -m loud.worker --queue "$LOUD_QUEUE_DIR"
+LOUD_WORKERS_PER_POD="${LOUD_WORKERS_PER_POD:-1}"
+if [[ $LOUD_WORKERS_PER_POD == 1 ]]; then
+  exec "$LOUD_PYTHON" -u -m loud.worker --queue "$LOUD_QUEUE_DIR"
+fi
+# One worker per GPU (gpu_worker_2.yaml), each pinned to its own and claiming one-GPU jobs. A pod deletion's SIGTERM
+# is passed to every worker, which gives its job back; the pod ends when all have exited.
+trap - EXIT
+pids=()
+for ((gpu = 0; gpu < LOUD_WORKERS_PER_POD; gpu++)); do
+  CUDA_VISIBLE_DEVICES=$gpu "$LOUD_PYTHON" -u -m loud.worker --queue "$LOUD_QUEUE_DIR" \
+    --worker-id "$(hostname)-gpu$gpu" &
+  pids+=($!)
+done
+trap 'kill -TERM "${pids[@]}" 2>/dev/null || true' TERM INT
+status=0
+for pid in "${pids[@]}"; do
+  until wait "$pid"; do  # a trapped signal interrupts the wait while the worker is still releasing its job
+    code=$?
+    kill -0 "$pid" 2>/dev/null || { status=$code; break; }
+  done
+done
+exit "$status"

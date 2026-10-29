@@ -79,13 +79,14 @@ def test_sigterm_gives_the_job_back(tmp_path):
     assert (tmp_path / 'artifacts' / 'runs' / 'test' / 'slow' / 's0.attempt1' / 'metrics.jsonl').exists()
 
 
-def test_gpu_info_follows_cuda_visible_devices(monkeypatch):
+def test_gpu_name_follows_cuda_visible_devices(monkeypatch):
+    """A worker pinned to one of the pod's GPUs (gpu_worker_2.yaml) reports that GPU's name."""
     from loud import worker
-    listing = ''.join(f'{i}, NVIDIA H100 80GB HBM3\n' for i in range(8))
+    listing = '0, GPU-a, NVIDIA H100 80GB HBM3\n1, GPU-b, NVIDIA H200\n'
     monkeypatch.setattr(worker.subprocess, 'run', lambda *a, **k: subprocess.CompletedProcess(a, 0, listing, ''))
     monkeypatch.delenv('CUDA_VISIBLE_DEVICES', raising=False)
-    assert worker.gpu_info() == ('NVIDIA H100 80GB HBM3', 8)
-    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', '3')
-    assert worker.gpu_info() == ('NVIDIA H100 80GB HBM3', 1)
-    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', 'GPU-a,GPU-b')
-    assert worker.gpu_info()[1] == 2
+    assert worker.gpu_name() == 'NVIDIA H100 80GB HBM3'
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', '1')
+    assert worker.gpu_name() == 'NVIDIA H200'
+    monkeypatch.setenv('CUDA_VISIBLE_DEVICES', 'GPU-b')
+    assert worker.gpu_name() == 'NVIDIA H200'

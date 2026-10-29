@@ -56,9 +56,9 @@ def test_means_follow_the_record():
     ('args: {stop_after: wrong}', 'stop_after must be an integer'),
     ('priority: high', 'priority must be an integer'),
     ('gpu: [H100, H200]', 'gpu must be'),
-    ('gpus: 3', 'gpus must be 1, 2, 4 or 8'),
-    ('gpus: 8', 'task proxy uses one GPU'),
-    ('args: {checkpoints: 1}', 'checkpoints must be true or false'),
+    ('gpus: 8', 'unknown keys'),
+    ('args: {checkpoints: 1}', 'checkpoints must be true, false or a list of seeds'),
+    ('args: {checkpoints: [true]}', 'checkpoints must be true, false or a list of seeds'),
     ('expect: {val_loss: 3.5}', r'needs \[target, tolerance'),
     ('expect: {val_los: [3.5, 0.1]}', "no 'val_los'"),
     ('args: {smooth_tau: 1, token_shaping: cap}', 'one change per variant'),
@@ -79,19 +79,14 @@ def test_bad_configs_fail_at_submission(tmp_path, text, error):
 @pytest.mark.parametrize('args, error', [
     ('{batch: 3}', 'does not divide'),
     ('{rows: 96}', 'power of two'),
-    ('{row_offset_per_step: true}', 'needs rows below'),
-    ('{rows_start: 64}', 'both rows_start and rows_full_at'),
-    ('{rows_start: 100, rows_full_at: 0.5}', 'multiple of 64'),
-    ('{rows_start: 64, rows_full_at: 0.1}', r'after the Boost phase'),
-    ('{rows: 128, rows_start: 64, rows_full_at: 0.5}', 'not both'),
+    ('{rows: 1, virtual_gpus: 8, batch: 4}', 'power of two from 2'),
     ('{heldout: 0}', 'end merge needs'),
-    ('{end_merge: false, heldout: 0, drift_every: 10}', 'needs heldout'),
-    ('{rows_tiled: true}', "rows_tiled is E7's partial cycle"),
-    ('{rows: 128, row_offset_per_step: true, rows_tiled: true}', "rows_tiled is E7's partial cycle"),
-    ('{rows: 128, rows_check: 0.5}', 'needs tiled rows'),
-    ('{target_damping: -1.0}', 'must be >= 0'),
-    ('{curvature_damping: 30.0, batch: 1, virtual_gpus: 2}', '2 <= batch'),
-    ('{curvature_damping: 30.0, damp_directions: 1024}', 'at most the width'),
+    ('{rows: 128, row_assign: random}', 'row_assign must be one of'),
+    ('{prior: identity}', 'needs rows below the full cycle'),
+    ('{rows: 512, prior: identity}', 'needs rows below the full cycle'),
+    ('{rows: 128, row_assign: time, row_budget: ngram}', 'needs rows and token windows'),
+    ('{row_budget: ngram}', 'needs rows and token windows'),
+    ('{rows_start: 64}', 'unknown cut options'),
 ])
 def test_bad_cut_options_fail_at_submission(tmp_path, args, error):
     path = tmp_path / 'c.yaml'
@@ -170,35 +165,6 @@ def test_submission_rejects_unknown_and_circular_dependencies(tmp_path):
     check_dependencies([a, dict(id='e.b.s0', after=[])], queue)
 
 
-def test_launch_replaces_settings_and_rows_but_not_the_script(tmp_path):
-    """loud/launch.py runs a record script with some Settings fields replaced and the epoch cut to the first rows."""
-    import subprocess
-    import sys
-    script = tmp_path / 'record.py'
-    script.write_text(
-        'from dataclasses import asdict, dataclass\nimport json, sys\n'
-        'SEED = 0\n@dataclass\nclass Settings:\n    lr: float = 1.0\n    switch: float = 0.2\n'
-        'def load_rows(path, rows):\n    return list(range(rows))\n'
-        'def main():\n'
-        '    print(json.dumps(dict(seed=SEED, settings=asdict(Settings()), rows=len(load_rows("x/train.pt", 10)),'
-        ' val=len(load_rows("x/val.pt", 4)), argv=sys.argv[1:])))\n'
-        "if __name__ == '__main__':\n    main()\n")
-    launch = paths.SOURCE / 'loud' / 'launch.py'  # the code under test, not the live repo's
-    run = lambda *a: subprocess.run([sys.executable, str(launch), str(script), *a], capture_output=True, text=True)
-    out = json.loads(run('{"lr": 0.5}', '6', '2', '--output', 'o').stdout)
-    assert out == dict(seed=2, settings=dict(lr=0.5, switch=0.2), rows=6, val=4, argv=['--output', 'o'])
-    assert json.loads(run('{}', '0', '-').stdout) == dict(seed=0, settings=dict(lr=1.0, switch=0.2), rows=10, val=4,
-                                                         argv=[])
-    bad = run('{"lrr": 0.5}', '0', '-')
-    assert bad.returncode and 'Settings has no' in bad.stderr
-    from loud.launch import settings_fields
-    assert settings_fields(script) == {'lr', 'switch'}
-    record = paths.REPO / 'external' / 'noise' / 'train' / 'val' / 'run.py'
-    if record.exists():  # PR #46's record: boost_hub and mlp_output_credit are init=False
-        fields = settings_fields(record)
-        assert {'lr', 'anvil_lr', 'switch', 'betas'} <= fields and 'boost_hub' not in fields
-
-
 def fake_run(root, experiment, variant, seed, val, extra=None, summary=None):
     run = root / 'runs' / experiment / variant / f's{seed}'
     run.mkdir(parents=True)
@@ -219,11 +185,9 @@ def test_plots_read_only_the_run_files(tmp_path, monkeypatch):
     from loud import plots
     monkeypatch.setattr(plots, 'RUNS', tmp_path / 'runs')
     monkeypatch.setattr(plots, 'ARTIFACTS', tmp_path)
-    drift = lambda s: dict(drift=dict(blend=0.5, fast=0.4, slow=0.3)) if s % 10 == 0 else {}
-    cut_drift = lambda s: dict(drift=dict(fast=0.4, slow=0.3)) if s % 10 == 0 else {}  # the Cut chain logs no blend
     for seed in (0, 1, 2):
-        fake_run(tmp_path, 'e6', 'identity_k1', seed, 4.17 + 0.01 * seed, drift)
-        fake_run(tmp_path, 'e6', 'cut_k4', seed, 4.19 + 0.01 * seed, cut_drift)
+        fake_run(tmp_path, 'e1', 'h8_synth', seed, 4.17 + 0.01 * seed)
+        fake_run(tmp_path, 'e6', 'token_k4', seed, 4.19 + 0.01 * seed)
     site = dict(p10=0.8, median=0.9, p90=0.95)
     recovery = {s: {'guess_vs_direct': site, 'bf16 emb condition without_radial': site, 'bf16 emb ridge 0.0001': site,
                     'bf16 mid0 ridge 0.0': site} for s in plots.SITES}
@@ -248,35 +212,16 @@ def test_plots_read_only_the_run_files(tmp_path, monkeypatch):
     assert '| baseline e1.bp_b8 | 2 | 3.7100 |' in (tmp_path / 'plots' / 'e2' / 'gap.md').read_text()
     assert '| lambda_3e1 | mlp.c_fc | 0.5 | 0.9 | 0.8 |' in (tmp_path / 'plots' / 'e8' / 'damping.md').read_text()
     timed = lambda s: dict(train_seconds=s * 6.0, val_loss=5 - s / 40) if s % 25 == 0 else {}
-    fake_run(tmp_path, 'e12', 'record', 0, 3.34, timed)
+    fake_run(tmp_path, 'e12', 'bp_pr46', 0, 3.34, timed)
     for experiment in ('e6', 'e5', 'e7', 'e8', 'e12'):
         plots.plot(experiment)
     assert (tmp_path / 'plots' / 'e12' / 'val_time.png').exists()
-    assert '| record | 1 | 3.3400 | - | 6.0 min (n=1) |' in (tmp_path / 'plots' / 'e12' / 'summary.md').read_text()
-    assert {p.name for p in (tmp_path / 'plots' / 'e6').iterdir()} == {'final.png', 'curves.png', 'drift.png', 'time.md'}
+    assert '| bp_pr46 | 1 | 3.3400 | - | 6.0 min (n=1) |' in (tmp_path / 'plots' / 'e12' / 'summary.md').read_text()
+    assert {p.name for p in (tmp_path / 'plots' / 'e6').iterdir()} == {'final.png', 'curves.png', 'time.md'}
+    assert '| baseline e1.h8_synth | 3 | 4.1800 |' in (tmp_path / 'plots' / 'e6' / 'time.md').read_text()
     assert '| mid7 | 0.9 | 0.9 | 0.9 | 0.9 |' in (tmp_path / 'plots' / 'e5' / 'recovery.md').read_text()
     assert '| emb | - | - | 0.9 | - | - |' in (tmp_path / 'plots' / 'e7' / 'credit_dump.md').read_text()
     assert (tmp_path / 'plots' / 'e8' / 'h2_over_c.png').exists()
-
-
-def test_one_gpu_jobs_keep_their_config_hash(tmp_path):
-    """gpus enters a job's identity only above 1, so queued one-GPU jobs stay unchanged configs."""
-    from loud.common import digest
-    from loud.run import config_hash
-    path = tmp_path / 'c.yaml'
-    path.write_text('experiment: e\nvariant: v\ntask: proxy\n')
-    spec, _ = specs_from_config(path)[0]
-    assert config_hash(spec) == digest({k: spec[k] for k in ('experiment', 'variant', 'seed', 'task', 'args', 'expect')})
-    assert config_hash(dict(spec, task='reference', gpus=8)) != config_hash(dict(spec, task='reference'))
-
-
-@pytest.mark.skipif(not (paths.REPO / 'external' / 'noise').exists(), reason='needs the pinned Noise checkout')
-def test_reference_settings_are_checked_at_submission(tmp_path):
-    path = tmp_path / 'c.yaml'
-    path.write_text('experiment: e\nvariant: v\ntask: reference\ngpus: 8\n'
-                    'args: {script: [noise, train/val/run.py], settings: {lrr: 0.001}}\n')
-    with pytest.raises(ValueError, match=r"no Settings field \['lrr'\]"):
-        specs_from_config(path)
 
 
 def test_gate_reduces_a_diagnostic_and_checks_min_max(tmp_path, monkeypatch):
@@ -325,3 +270,13 @@ def test_turns_parts_see_the_callers_dynamo_config():
         assert Turns(2).run([lambda: torch._dynamo.config.recompile_limit] * 2) == [123, 123]
     finally:
         torch._dynamo.config.recompile_limit = previous
+
+
+def test_checkpoints_for_some_seeds_only(tmp_path):
+    """`checkpoints: [0]` keeps H4's fraction checkpoints for seed 0 only (final.pt is always kept)."""
+    from loud.options import checkpoints_on
+    path = tmp_path / 'c.yaml'
+    path.write_text('experiment: e\nvariant: v\ntask: proxy\nseeds: [0, 1]\nargs: {checkpoints: [0]}\n')
+    keeps = [checkpoints_on(spec['args'], spec['seed']) for spec, _ in specs_from_config(path)]
+    assert keeps == [True, False]
+    assert checkpoints_on(dict(checkpoints=True), 5) and not checkpoints_on(dict(checkpoints=False), 0)

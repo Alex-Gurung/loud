@@ -56,21 +56,21 @@ def progress_of(run_dir):
     return {k: record[k] for k in ('step', 'train_loss', 'train_seconds') if k in record}
 
 
-def gpu_info():
-    """(name of the first usable GPU, number of usable GPUs): the GPUs nvidia-smi lists, narrowed to
-    CUDA_VISIBLE_DEVICES when that is set (indices); (None, 1) without nvidia-smi (a CPU check of the plumbing)."""
+def gpu_name():
+    """The name of the GPU this worker's jobs run on: the first nvidia-smi lists, or the first of
+    CUDA_VISIBLE_DEVICES (indices or UUIDs) when that pins the worker to some of the pod's GPUs (gpu_worker_2.yaml);
+    None without nvidia-smi (a CPU check of the plumbing)."""
     try:
-        out = subprocess.run(['nvidia-smi', '--query-gpu=index,name', '--format=csv,noheader'], capture_output=True,
-                             text=True, timeout=30)
+        out = subprocess.run(['nvidia-smi', '--query-gpu=index,uuid,name', '--format=csv,noheader'],
+                             capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
-        return None, 1
-    names = dict(line.split(', ', 1) for line in out.stdout.splitlines() if ', ' in line)
-    visible = [v.strip() for v in os.environ.get('CUDA_VISIBLE_DEVICES', ','.join(names)).split(',') if v.strip()]
-    if all(v.isdigit() for v in visible):
-        names = {i: names[i] for i in visible if i in names}
-    else:  # GPU UUIDs: keep their count
-        names = dict(list(names.items())[:len(visible)])
-    return (next(iter(names.values())).strip(), len(names)) if names else (None, 1)
+        return None
+    rows = [line.split(', ', 2) for line in out.stdout.splitlines() if line.count(', ') >= 2]
+    visible = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')[0].strip()
+    for index, uuid, name in rows:
+        if visible in ('', index, uuid):
+            return name.strip()
+    return None
 
 
 class Worker:
@@ -79,11 +79,11 @@ class Worker:
         self.idle_exit, self.poll, self.min_free_gb, self.python = idle_exit, poll, min_free_gb, python
         self.stopping = None
         self.child = None
-        self.gpu, self.gpus = gpu_info()
+        self.gpu = gpu_name()
         self.completed = 0
 
     def report(self, state, **fields):
-        self.queue.worker_report(self.worker_id, state=state, gpu=self.gpu, gpus=self.gpus, pid=os.getpid(),
+        self.queue.worker_report(self.worker_id, state=state, gpu=self.gpu, pid=os.getpid(),
                                  completed=self.completed, code=os.environ.get('LOUD_CODE_DIR'), **fields)
 
     def stop(self, number, frame):
@@ -99,7 +99,7 @@ class Worker:
         while not self.stopping:
             free = self.free_gb()
             disk_full = free < self.min_free_gb
-            job = None if disk_full else self.queue.claim(self.worker_id, self.gpu, self.gpus)
+            job = None if disk_full else self.queue.claim(self.worker_id, self.gpu)
             if job is None:
                 why = f'shared disk nearly full ({free:.1f} GB free)' if disk_full else 'no ready job'
                 idle = round(time.time() - idle_since)
