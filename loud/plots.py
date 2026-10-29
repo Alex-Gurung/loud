@@ -132,7 +132,9 @@ def drift_plot(plt, by_variant, palette, out):
     fig, ax = plt.subplots(figsize=(6.4, 3.8))
     drawn = False
     for v in sorted(by_variant):
-        series = [{m['step']: m['drift']['blend'] for m in metrics(r) if 'drift' in m} for r in by_variant[v]]
+        # the identity path steps along a blend of ANVIL II's momenta; PR #40's chain along the fast one alone
+        series = [{m['step']: m['drift'].get('blend', m['drift'].get('fast')) for m in metrics(r) if 'drift' in m}
+                  for r in by_variant[v]]
         xs, ys = seed_mean([s for s in series if s])
         if xs:
             ax.plot(xs, ys, color=palette[v], marker='o', markersize=3, label=v)
@@ -142,7 +144,8 @@ def drift_plot(plt, by_variant, palette, out):
         return
     ax.set_xlabel('update')
     ax.set_ylabel('cosine')
-    ax.set_title('drift check: full-cycle estimate vs the momentum (mean over seeds)', loc='left', fontsize=9)
+    ax.set_title('drift check: full-cycle estimate vs the momentum ANVIL II steps along (mean over seeds)', loc='left',
+                 fontsize=9)
     ax.legend(fontsize=7.5)
     fig.tight_layout()
     fig.savefig(out / 'drift.png')

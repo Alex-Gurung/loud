@@ -1,6 +1,6 @@
 # E7's precondition (plan E7): H6's credit_dump on e1.bp_b4.s0 must show the identity-path guess good early and poor
-# late, "median cosine above 0.9 at 20% and below 0.7 at 100%", read here as the median over the nine sites of each
-# site's per-token median. The E7 ramps wait for this gate: if it fails, there is no saving to take and they stay
+# late, "median cosine above 0.9 at 20% and below 0.7 at 100%", read here as the median over the eight mid sites (where
+# E7's chain uses the guess; the embedding keeps its own cycle) of each site's per-token median. The E7 ramps wait for this gate: if it fails, there is no saving to take and they stay
 # blocked (loud.status says why); resubmit them without it to run them anyway.
 experiment: e7
 variant: precondition
@@ -10,8 +10,8 @@ priority: 70
 after_done: [h6.credit_dump_c20.s0, h6.credit_dump_c100.s0]
 args:
   values:
-    early: [h6.credit_dump_c20.s0, credit_dump.json, median]
-    late: [h6.credit_dump_c100.s0, credit_dump.json, median]
+    early: [h6.credit_dump_c20.s0, credit_dump.json, median, mid]
+    late: [h6.credit_dump_c100.s0, credit_dump.json, median, mid]
 expect:
   early: {min: 0.9}
   late: {max: 0.7}

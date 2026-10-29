@@ -297,3 +297,16 @@ wrong or not worth it) or **deferred** (why, and what it waits on). "Same as" po
 | 2 | major | H6's pending update mixes gradient scales | fixed | Same as 20261029T000503Z-code-codex.md #1 |
 | 3 | minor | E7's self-check runs without its cross-seed condition and on a fixed ramp | fixed | Moved to `configs/followups/e7/`, which a directory submission skips (`loud.submit`, tested); their queued jobs cancelled; the README says when and how to submit them |
 | 4 | minor | E10's literal reading lacks 0.6 and 0.8 | fixed | `agree_all_t60`, `agree_all_t80` |
+
+### 20261029T010000Z-round6-claude.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | blocker | On torch 2.13 (the GPU image's) Dynamo's config is per context, so Turns' second part compiles under the default limit of 8 and most Cut graphs end up eager | fixed | Each part runs in `contextvars.copy_context()` of the caller; the warmup fails unless every planned graph compiled. Checked on torch 2.13 (a venv on this pod): the parts see the raised limit, and the reviewer's 7m E7 ramp compiles 36 of its 36 planned graphs (8 before), none added during the run; `test_turns_parts_see_the_callers_dynamo_config` |
+| 2 | major | E6's plots crash on Cut runs, which no longer log `blend`, and `plots all` stops there | fixed | The drift plot reads `blend` where there is one, else `fast` (what PR #40 steps along); the plots test has a Cut-style drift record |
+| 3 | minor | E7's control variate has coefficient 1 | rejected | The plan's E7 premise is a good guess (cosine > 0.9 early), where coefficient 1 is the standard choice; a fitted coefficient would be a second knob |
+| 4 | minor | E7's gate takes the median over nine sites including the embedding | fixed | `gate` values take a site prefix; the precondition reads the eight mid sites |
+| 5 | minor | `direction_stats` skips the rails' update with the current gradient; `fast_beta` not saved | fixed | Same as 20261029T000503Z-code-codex.md #1 (after this copy was frozen) |
+| 6 | minor | E8's Cut pair runs compiled and eager optimizer code | rejected | Same as 20261029T000503Z-code-codex.md #2: rounding-level differences in a step well under 1% of a Cut update |
+| 7 | minor | E7's self-check is queued unconditionally | fixed | Same as 20261029T002425Z-research-codex.md #3 |
+| nits | nit | `heldout_min` counts merge candidates; `merge_loss` duplicates `mean_loss`; garbled docstring; E6's warmup repeats an update; NaN weights after the last update | fixed (partly) | `own_score` skips reason `merge`; docstring rewritten; the shared loop raises on non-finite final weights. The duplicate scorer and the repeated warmup update stay (the record's rank-by-rank layout differs from `mean_loss`; one extra untimed update) |

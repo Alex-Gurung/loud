@@ -49,6 +49,7 @@ loop (loud/train.py): H4, untimed diagnostics, official scoring in a fresh proce
 loop's untimed pause instead of the timed region (a 9-way lerp every 5 updates).
 """
 from concurrent.futures import ThreadPoolExecutor
+import contextvars
 from dataclasses import asdict
 from functools import partial
 import threading
@@ -81,7 +82,10 @@ class Turns:
     def run(self, jobs):
         """Run jobs[p]() as part p; returns their results in part order."""
         self.turn, self.arrived, self.done, self.failed = 0, [None] * self.parts, [False] * self.parts, None
-        futures = [self.pool.submit(self._part, p, job) for p, job in enumerate(jobs) if p]
+        # each part runs in a copy of the caller's context: torch >= 2.13 keeps Dynamo's config (the raised recompile
+        # limit) per context, so a bare pool thread would compile under the defaults
+        futures = [self.pool.submit(contextvars.copy_context().run, self._part, p, job)
+                   for p, job in enumerate(jobs) if p]
         try:
             first = self._part(0, jobs[0])
         except BaseException as exc:  # also an interrupt while waiting: wake the other parts so they stop
@@ -672,8 +676,8 @@ class CutChain:
 
     def warmup(self, batch):
         """As the record: one update of each phase on random tokens, each from a fresh model, so every shape compiles
-        before the clock starts; here one at each row count the chain may use, and a drift check. Fails if the
-        chain's kernel hit Dynamo's limit, which would leave shapes to run eagerly."""
+        before the clock starts; here one at each row count the chain may use, and a drift check. Fails unless the
+        chain's kernel compiled every planned graph (below Dynamo's limit): a missing shape would run eagerly."""
         config = torch._dynamo.config
         if compiled_graphs(self.m.chain_chunk_eager) is None and hasattr(config, 'fail_on_recompile_limit_hit'):
             config.fail_on_recompile_limit_hit = True  # this torch cannot count the graphs: fail at the limit instead
@@ -688,11 +692,11 @@ class CutChain:
             self.drift_check()
         compiled = compiled_graphs(self.m.chain_chunk_eager)
         if compiled is not None and not torch._dynamo.config.disable:
-            print(f'chain_chunk: {compiled} graphs compiled; {len(self.graphs)} expected, limit '
+            print(f'chain_chunk: {compiled} graphs compiled; {len(self.graphs)} planned, limit '
                   f'{self.recompile_limit}', flush=True)
-            if compiled >= self.recompile_limit:
-                raise RuntimeError(f'chain_chunk reached the recompile limit ({self.recompile_limit}): shapes would '
-                                   'run eagerly')
+            if compiled < len(self.graphs) or compiled >= self.recompile_limit:
+                raise RuntimeError(f'chain_chunk compiled {compiled} of its {len(self.graphs)} planned graphs (limit '
+                                   f'{self.recompile_limit}): the missing shapes would run eagerly')
 
     @torch.no_grad()
     def diagnose(self, step):

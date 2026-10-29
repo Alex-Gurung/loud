@@ -220,9 +220,10 @@ def test_plots_read_only_the_run_files(tmp_path, monkeypatch):
     monkeypatch.setattr(plots, 'RUNS', tmp_path / 'runs')
     monkeypatch.setattr(plots, 'ARTIFACTS', tmp_path)
     drift = lambda s: dict(drift=dict(blend=0.5, fast=0.4, slow=0.3)) if s % 10 == 0 else {}
+    cut_drift = lambda s: dict(drift=dict(fast=0.4, slow=0.3)) if s % 10 == 0 else {}  # the Cut chain logs no blend
     for seed in (0, 1, 2):
         fake_run(tmp_path, 'e6', 'identity_k1', seed, 4.17 + 0.01 * seed, drift)
-        fake_run(tmp_path, 'e6', 'identity_k4', seed, 4.19 + 0.01 * seed, drift)
+        fake_run(tmp_path, 'e6', 'cut_k4', seed, 4.19 + 0.01 * seed, cut_drift)
     site = dict(p10=0.8, median=0.9, p90=0.95)
     recovery = {s: {'guess_vs_direct': site, 'bf16 emb condition without_radial': site, 'bf16 emb ridge 0.0001': site,
                     'bf16 mid0 ridge 0.0': site} for s in plots.SITES}
@@ -285,12 +286,13 @@ def test_gate_reduces_a_diagnostic_and_checks_min_max(tmp_path, monkeypatch):
     for fraction, medians in (('c20', [0.95, 0.92, 0.5]), ('c100', [0.6, 0.65, 0.9])):
         run = tmp_path / 'runs' / 'h6' / f'credit_dump_{fraction}' / 's0'
         run.mkdir(parents=True)
-        (run / 'credit_dump.json').write_text(json.dumps(
-            {f'mid{i}': dict(p10=0.0, median=m, p90=1.0) for i, m in enumerate(medians)}))
+        (run / 'credit_dump.json').write_text(json.dumps(dict(
+            {f'mid{i}': dict(p10=0.0, median=m, p90=1.0) for i, m in enumerate(medians)},
+            emb=dict(p10=0.0, median=-1.0, p90=0.0))))  # left out by the 'mid' prefix
     spec = dict(experiment='e7', variant='precondition', seed=0, task='gate', expect=dict(
         early=dict(min=0.9), late=dict(max=0.7)), args=dict(values=dict(
-            early=['h6.credit_dump_c20.s0', 'credit_dump.json', 'median'],
-            late=['h6.credit_dump_c100.s0', 'credit_dump.json', 'median'])))
+            early=['h6.credit_dump_c20.s0', 'credit_dump.json', 'median', 'mid'],
+            late=['h6.credit_dump_c100.s0', 'credit_dump.json', 'median', 'mid'])))
     result = gate.run_task(spec, tmp_path / 'gate')
     assert result['early'] == 0.92 and result['late'] == 0.65 and result['check']['status'] == 'pass'
     assert check(dict(x=0.5), dict(x=dict(min=0.6)))['status'] == 'fail'
@@ -310,3 +312,16 @@ def test_followups_are_submitted_only_when_named(tmp_path):
     assert [f.name for f in config_files([tmp_path])] == ['a.yaml']
     assert [f.name for f in config_files([tmp_path / 'followups'])] == ['b.yaml']
     assert [f.name for f in config_files([tmp_path / 'e2' / 'followups' / 'c.yaml'])] == ['c.yaml']
+
+
+def test_turns_parts_see_the_callers_dynamo_config():
+    """torch >= 2.13 keeps Dynamo's config per context: each part runs in a copy of the caller's, so the Cut port's
+    raised recompile limit holds in every part (with torch 2.10 the config is global and this holds anyway)."""
+    import torch._dynamo
+    from loud.cut import Turns
+    previous = torch._dynamo.config.recompile_limit
+    torch._dynamo.config.recompile_limit = 123
+    try:
+        assert Turns(2).run([lambda: torch._dynamo.config.recompile_limit] * 2) == [123, 123]
+    finally:
+        torch._dynamo.config.recompile_limit = previous

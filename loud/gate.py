@@ -5,7 +5,8 @@ median over the sites; `expect` (with {min, max} bounds) passes or fails the gat
 
     args:
       values:
-        early: [h6.credit_dump_c20.s0, credit_dump.json, median]   # job, its summary file, the field per site
+        early: [h6.credit_dump_c20.s0, credit_dump.json, median]        # job, its summary file, the field per site
+        mids: [h6.credit_dump_c20.s0, credit_dump.json, median, mid]    # optional: only the sites named mid*
     expect: {early: {min: 0.9}}
 """
 import statistics
@@ -18,10 +19,11 @@ from .runlog import Run
 def run_task(spec, run_dir):
     run = Run(run_dir, spec)
     result = dict(complete=True)
-    for name, (job, file, field) in spec['args']['values'].items():
+    for name, (job, file, field, *prefix) in spec['args']['values'].items():
         experiment, variant, seed = job.rsplit('.', 2)
         summary = read_json(paths.run_dir(experiment, variant, int(seed[1:])) / file)
-        sites = {site: v[field] for site, v in summary.items() if isinstance(v, dict) and field in v}
+        sites = {site: v[field] for site, v in summary.items()
+                 if isinstance(v, dict) and field in v and site.startswith(prefix[0] if prefix else '')}
         if not sites:
             raise ValueError(f'{job}: {file} has no {field!r} at any site')
         result[name], result[f'{name}_sites'] = statistics.median(sites.values()), sites

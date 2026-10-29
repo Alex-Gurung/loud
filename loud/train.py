@@ -139,6 +139,8 @@ def train(spec, run_dir, o, build, method):
         if dev.type == 'cuda':
             torch.cuda.synchronize()
         elapsed += time.perf_counter() - begin
+    if not all(bool(torch.isfinite(p).all()) for p in trainer.model.parameters()):  # the last update's too
+        raise FloatingPointError('non-finite weights after the last update')
     final = checkpoints.save_final(trainer.model)
     result = dict(steps=steps, updates=last, complete=complete, train_seconds=round(elapsed, 2),
                   update_sequences=last * o['batch'], train_loss_last=loss, **finished)

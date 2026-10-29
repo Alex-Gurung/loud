@@ -30,8 +30,8 @@ OTHER_SCORES = ('mean_decay', 'copy', 'midpoint', 'mean')
 
 
 def own_score(h):
-    """Whether a heldout.jsonl entry scores the run's own weights."""
-    return h.get('heldout_loss') is not None and not any(k in h for k in OTHER_SCORES)
+    """Whether a heldout.jsonl entry scores the run's own weights (not an end-merge candidate either)."""
+    return h.get('heldout_loss') is not None and h.get('reason') != 'merge' and not any(k in h for k in OTHER_SCORES)
 
 
 def runs(root=RUNS, experiment=None, active=()):

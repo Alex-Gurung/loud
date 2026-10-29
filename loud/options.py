@@ -443,8 +443,8 @@ def diagnose_options(args):
 def gate_options(args):
     values = args.get('values')
     if set(args) != {'values'} or not isinstance(values, dict) or not values or not all(
-            isinstance(v, list) and len(v) == 3 and all(isinstance(x, str) for x in v) for v in values.values()):
-        raise ValueError('gate needs values: {name: [job id, summary file, field]}')
+            isinstance(v, list) and len(v) in (3, 4) and all(isinstance(x, str) for x in v) for v in values.values()):
+        raise ValueError('gate needs values: {name: [job id, summary file, field, optional site prefix]}')
     return args
 
 

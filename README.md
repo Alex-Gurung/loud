@@ -32,7 +32,7 @@ EIDF, the GPU cluster, sharing one volume).
 | E7's self-check, E8's real test and E11 on the Cut chain (options of `cut`; `configs/e7/check_*`, `e8/cut_*`, `e11/`) | done; CPU tests: the hooked optimizer is PR #40's to the bit; the fit, runway and control variate |
 | Port checks against their sources (`compare` task) | done |
 | GPU queue and workers, one GPU or eight (`loud/jobqueue.py`, `loud/worker.py`, `worker/`) | done; tested end to end on CPU |
-| Independent review (Codex and Claude reviewers, [review/](review/README.md)) | rounds 1 to 5 triaged in [the ledger](review/LEDGER.md) |
+| Independent review (Codex and Claude reviewers, [review/](review/README.md)) | rounds 1 to 6 triaged in [the ledger](review/LEDGER.md) |
 
 Not built, on purpose:
 - **E5's implementation in the chain.** The plan says not to build it before the maintainers answer the rules question
