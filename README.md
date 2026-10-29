@@ -40,9 +40,8 @@ cluster, sharing one volume).
 | Independent review (Codex and Claude reviewers, [review/](review/README.md)) | triaged in [the ledger](review/LEDGER.md) |
 
 Waiting, on purpose:
-- **E5's implementation in the chain.** The plan builds it only after the maintainers answer its rules question
-  (section 7; post it as an issue on qlabs-eng/noise, together with E14's and E15's auxiliary-state question). The
-  diagnostic runs regardless.
+- **E5's implementation in the chain** (P3): only if its diagnostic passes (all sites at cosine 0.95 or more, or a
+  hybrid). Whether its decoded credit may feed nonlinear consumers is a rules question to settle then.
 - **E8's intervention and E9** wait in `configs/followups/`, which a directory submission skips: E8's (both settings,
   proxy and H8, with their smoke runs) only if its diagnostic shows partial rows pushing a large share of the
   momentum's energy below SNR 1, E9 (P3) only if E8 shows per-direction scaling matters with exact gradients. E9's
@@ -85,7 +84,14 @@ python3 -m loud.submit configs/e1 --dry-run     # what each job would do, checke
 python3 -m loud.status                          # workers, running, queued (and why), failed, done
 python3 collect.py                              # the results table (also artifacts/results/table.md)
 python3 -m loud.plots e4                        # an experiment's plots and tables, in artifacts/plots/e4/
+python3 -m loud.board                           # the experiment board's data, in artifacts/board/
 ```
+
+**The experiment board** ([claude.ai link](https://claude.ai/artifact/YFQSqsRQV7HzjqfjMgSRtf), private to its
+owner until shared) shows every experiment's question, setup, success test, gate, job progress and verdict, each
+arm's final loss against its reference cell, the held-out curves and every job's queue state. `loud.board` writes its
+tables (`experiments`, `arms`, `runs`, `curves`, `jobs`) from the configs, the queue and the run files; the page is
+`loud/board.html`. Uploading new tables refreshes it (Claude does this when runs finish).
 
 The CPU pod loses its pod-local disk on a restart: `scripts/cpu_env.sh` rebuilds the CPU Python for tests and plots
 (`/opt/loud-cpu-venv`) and the reviewer user (`review/codex.sh` runs it itself).
@@ -207,7 +213,7 @@ external/  data/  artifacts/        shared-volume state, gitignored
 
 Recreate `external/` with `scripts/fetch_external.sh` (it clones Noise again at PR #26's commit as
 `external/noise-pr26`), and the data with `scripts/prepare_data.sh`. Run the tests with
-`PYTHONPATH=. /opt/loud-cpu-venv/bin/python -m pytest tests`, 111 tests in about 15 minutes on this pod. The method
+`PYTHONPATH=. /opt/loud-cpu-venv/bin/python -m pytest tests`, 112 tests in about 15 minutes on this pod. The method
 tests use tiny models and short sequences, with dense attention instead of flex attention (which has no CPU
 backward); the Cut chain's checks run it eagerly (no compilation) with a 512-token vocabulary.
 

@@ -327,3 +327,37 @@ def test_scored_finals_shrink_to_bf16_unless_kept_exact(tmp_path):
     assert shrink_final(tmp_path / 'b.pt', torch.bfloat16) > 0
     with pytest.raises(ValueError, match='final_dtype'):
         proxy_options(dict(final_dtype='float16'))
+
+
+def test_board_tables_from_configs_queue_and_runs(tmp_path):
+    from loud import board
+    from loud.jobqueue import JobQueue
+    configs = tmp_path / 'configs'
+    for rel, text in (('e1/h8_synth.yaml', 'experiment: e1\nvariant: h8_synth\ntask: h8\nseeds: [0, 1]\npriority: 50\n'
+                                           'args: {sequences: 1M}\n'),
+                      ('e6/token_k4.yaml', 'experiment: e6\nvariant: token_k4\ntask: h8\nseeds: [0, 1]\npriority: 55\n'
+                                           'after: [e1.h8_synth.s0]\nargs: {sequences: 1M, rows: 128}\n'),
+                      ('followups/e8/snr.yaml', 'experiment: e8\nvariant: snr\ntask: proxy\nseeds: [0]\npriority: 62\n'
+                                                'args: {sequences: 1M, per_sequence_grads: true, snr_scaling: snr}\n')):
+        (configs / rel).parent.mkdir(parents=True, exist_ok=True)
+        (configs / rel).write_text(text)
+    queue = JobQueue(tmp_path / 'queue')
+    jobs = board.plan([configs], None, None)
+    for job in jobs:
+        queue.submit(dict(job, code_dir=None, code_digest=None))
+    for seed, val in ((0, 4.10), (1, 4.12)):
+        fake_run(tmp_path, 'e1', 'h8_synth', seed, val)
+    fake_run(tmp_path, 'e6', 'token_k4', 0, 4.15)
+    counts = board.build(configs, tmp_path / 'queue', tmp_path / 'runs', tmp_path / 'board')
+    assert counts['jobs'] == 5 and counts['runs'] == 3
+    read = lambda name: json.loads((tmp_path / 'board' / f'{name}.json').read_text())
+    arms = {a['key']: a for a in read('arms')}
+    assert arms['e1.h8_synth']['counted'] == 2 and abs(arms['e1.h8_synth']['val_mean'] - 4.11) < 1e-9
+    assert arms['e6.token_k4']['change'] == 'rows=128' and abs(arms['e6.token_k4']['delta'] - 0.04) < 1e-9
+    assert arms['e8.snr']['followup'] and arms['e8.snr']['val_mean'] is None
+    jobs = {j['id']: j for j in read('jobs')}
+    assert jobs['e6.token_k4.s1']['state'] == 'waiting' and jobs['e8.snr.s0']['state'] == 'follow-up'
+    experiments = {e['id']: e for e in read('experiments')}
+    assert experiments['e6']['verdict'] == 'waiting' and experiments['e6']['reference_val'] == arms['e1.h8_synth']['val_mean']
+    assert experiments['e8']['followup'] and not experiments['e6']['followup']
+    assert {c['arm'] for c in read('curves')} == {'e1.h8_synth', 'e6.token_k4'}

@@ -1,0 +1,471 @@
+<meta name="dash-one-writer">
+<style>
+  .lb { display: grid; gap: var(--cds-gap-xl); font-family: var(--font-anthropic-sans); color: var(--color-fg); }
+  .lb-head { display: grid; gap: var(--cds-gap-sm); }
+  .lb-title { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: var(--cds-font-size-title); margin: 0; text-wrap: balance; }
+  .lb-take { margin: 0; color: var(--color-fg-muted); font-size: var(--cds-font-size-body); max-width: 70ch; }
+  .lb-take b, .lb .lb-num { font-weight: 600; color: var(--color-fg); font-variant-numeric: tabular-nums; }
+  .lb-card { background: var(--color-panel); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); display: grid; gap: var(--cds-gap-md); min-width: 0; position: relative; }
+  .lb-h2 { font-size: var(--cds-font-size-heading); font-weight: var(--cds-font-weight-medium); margin: 0; }
+  .lb-note { margin: 0; color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); }
+  .lb-strip { min-height: 3.25rem; }
+  .lb-legend { display: flex; flex-wrap: wrap; gap: var(--cds-gap-sm) var(--cds-gap-md); font-size: var(--cds-font-size-caption); color: var(--color-fg-muted); }
+  .lb-legend span { display: inline-flex; align-items: center; gap: var(--cds-gap-xs); }
+  .lb-sw { width: 0.625rem; height: 0.625rem; border-radius: 2px; display: inline-block; }
+  .lb-next { margin: 0; padding: 0; list-style: none; display: grid; gap: var(--cds-gap-xs); font-size: var(--cds-font-size-caption); font-variant-numeric: tabular-nums; }
+  .lb-next li { display: flex; gap: var(--cds-gap-sm); }
+  .lb-next code { font-size: var(--cds-font-size-caption); }
+  .lb-chips { display: flex; flex-wrap: wrap; gap: var(--cds-gap-sm); }
+  .lb-chip { font: inherit; font-size: var(--cds-font-size-caption); padding: var(--cds-pad-xs) var(--cds-pad-sm); border-radius: 999px; border: 1px solid var(--color-border-line); background: var(--color-bg); color: var(--color-fg); cursor: pointer; }
+  .lb-chip[aria-pressed="true"] { background: var(--color-fg); color: var(--color-bg); border-color: var(--color-fg); }
+  .lb-chip:focus-visible, .lb-search:focus-visible, .lb-select:focus-visible, .lb-sort:focus-visible { outline: 2px solid var(--color-fg); outline-offset: 2px; }
+  .lb-grid { display: grid; gap: var(--cds-gap-md); grid-template-columns: repeat(auto-fit, minmax(min(100%, 30rem), 1fr)); min-height: 12rem; }
+  .lb-exp-top { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--cds-gap-sm); }
+  .lb-pills { display: inline-flex; gap: var(--cds-gap-xs); align-items: center; }
+  .lb-pill { font-size: var(--cds-font-size-caption); padding: 1px var(--cds-pad-sm); border-radius: 999px; border: 1px solid var(--color-border-line); color: var(--color-fg-muted); white-space: nowrap; }
+  .lb-pill.is-met { color: var(--color-ok); border-color: currentColor; }
+  .lb-pill.is-not-met { color: var(--color-bad); border-color: currentColor; }
+  .lb-q { margin: 0; font-family: var(--font-anthropic-serif); font-size: var(--cds-font-size-heading); line-height: 1.35; }
+  .lb-dl { display: grid; grid-template-columns: max-content 1fr; gap: var(--cds-gap-xs) var(--cds-gap-md); margin: 0; font-size: var(--cds-font-size-caption); }
+  .lb-dl dt { color: var(--color-fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .lb-dl dd { margin: 0; min-width: 0; }
+  .lb-bar { display: flex; height: 0.5rem; border-radius: 999px; overflow: hidden; background: var(--cds-chart-grid); }
+  .lb-bar i { display: block; height: 100%; }
+  .lb-chart { position: relative; min-height: 4rem; }
+  .lb-chart svg { display: block; overflow: visible; }
+  .lb-empty { margin: 0; color: var(--color-fg-muted); font-size: var(--cds-font-size-caption); }
+  .lb-arms { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; font-size: var(--cds-font-size-caption); }
+  .lb-arms li { display: flex; gap: var(--cds-gap-sm); justify-content: space-between; min-width: 0; }
+  .lb-arms code { font-size: var(--cds-font-size-caption); overflow-wrap: anywhere; color: var(--color-fg-muted); text-align: right; }
+  .lb-tip { position: absolute; pointer-events: none; background: var(--cds-surface-popover); border: 1px solid var(--cds-border); border-radius: var(--cds-radius); box-shadow: var(--cds-shadow-popover); padding: var(--cds-pad-xs) var(--cds-pad-sm); font-size: var(--cds-font-size-caption); max-width: 18rem; z-index: 2; font-variant-numeric: tabular-nums; }
+  .lb-tip .lb-tip-h { color: var(--cds-text-secondary); }
+  .lb-tools { display: flex; flex-wrap: wrap; gap: var(--cds-gap-sm); align-items: center; }
+  .lb-search, .lb-select { font: inherit; font-size: var(--cds-font-size-caption); padding: var(--cds-pad-xs) var(--cds-pad-sm); border: 1px solid var(--color-border-line); border-radius: var(--cds-radius); background: var(--color-bg); color: var(--color-fg); min-width: 0; }
+  .lb-search { flex: 1 1 14rem; }
+  .lb-box { max-height: 28rem; overflow: auto; }
+  .lb-table { width: 100%; border-collapse: collapse; font-size: var(--cds-font-size-caption); font-variant-numeric: tabular-nums; }
+  .lb-table th { position: sticky; top: 0; background: var(--color-panel); text-align: left; font-weight: var(--cds-font-weight-medium); padding: var(--cds-pad-xs) var(--cds-pad-sm); border-bottom: 1px solid var(--color-border-line); }
+  .lb-table td { padding: var(--cds-pad-xs) var(--cds-pad-sm); border-bottom: 1px solid var(--cds-chart-grid); vertical-align: top; }
+  .lb-sort { font: inherit; background: none; border: 0; padding: 0; color: inherit; cursor: pointer; }
+  .lb-curves { min-height: 16rem; }
+  [data-dash-source-state=empty] { color: transparent; }
+  [data-dash-source-state=refreshing] { opacity: .5; transition: opacity var(--cds-dur-slow); }
+  @media (max-width: 40rem) { .lb-hide-narrow { display: none; } }
+</style>
+
+<div class="lb">
+  <header class="lb-head" id="top">
+    <h1 class="lb-title">loud experiment board</h1>
+    <p class="lb-take">
+      <b data-draw="take" data-source="job_states" data-field="n" data-where="group=done">—</b> of
+      <b data-draw="take-total" data-source="job_states" data-field="n" data-where="group=all">—</b> planned jobs are
+      done, <b data-draw="take-running" data-source="job_states" data-field="n" data-where="group=running">—</b>
+      running and <b data-draw="take-queued" data-source="job_states" data-field="n" data-where="group=queued">—</b>
+      queued. Each experiment below states its question and success test; its chart fills in as runs finish.
+    </p>
+  </header>
+
+  <section class="lb-card" id="progress">
+    <h2 class="lb-h2">Queue progress</h2>
+    <p class="lb-note">Every planned job, follow-ups included, by its state in the queue on the shared volume.</p>
+    <div class="lb-strip" data-draw="strip" data-source="job_states">—</div>
+    <div class="lb-legend">
+      <span><i class="lb-sw" style="background: var(--lb-c-done)"></i>Done</span>
+      <span><i class="lb-sw" style="background: var(--lb-c-running)"></i>Running</span>
+      <span><i class="lb-sw" style="background: var(--lb-c-queued)"></i>Queued (ready or waiting for a gate)</span>
+      <span><i class="lb-sw" style="background: var(--cds-chart-status-critical)"></i>Blocked or failed</span>
+      <span><i class="lb-sw" style="background: var(--cds-chart-muted)"></i>Not queued (follow-ups, not yet submitted)</span>
+    </div>
+    <h3 class="lb-note">Next up</h3>
+    <ul class="lb-next" data-draw="next" data-source="jobs"></ul>
+  </section>
+
+  <section id="experiments" class="lb-head">
+    <h2 class="lb-h2">Experiments, in run order</h2>
+    <p class="lb-note">Final validation loss per arm (official scorer; dots are seeds, the bar is the mean, the line its standard deviation) against the reference cell (solid line) and its −0.02 margin (dashed).</p>
+    <div class="lb-chips" role="group" aria-label="Show experiments">
+      <button class="lb-chip" type="button" data-group="all" aria-pressed="true">All</button>
+      <button class="lb-chip" type="button" data-group="P1" aria-pressed="false">P1</button>
+      <button class="lb-chip" type="button" data-group="P2" aria-pressed="false">P2</button>
+      <button class="lb-chip" type="button" data-group="followups" aria-pressed="false">Follow-ups</button>
+      <button class="lb-chip" type="button" data-group="results" aria-pressed="false">With results</button>
+    </div>
+    <p class="lb-note lb-cards-empty" hidden>No experiment matches this filter yet.</p>
+    <div class="lb-grid" data-draw="cards" data-source="experiments arms runs"></div>
+  </section>
+
+  <section class="lb-card" id="curves">
+    <h2 class="lb-h2">Held-out loss while training</h2>
+    <p class="lb-note">The 32 held-out training sequences' loss against sequences seen, the mean over each arm's finished seeds, with the experiment's reference cell in grey.</p>
+    <div class="lb-tools">
+      <select class="lb-select" id="lb-curve-exp" aria-label="Experiment" data-draw="curve-pick" data-source="experiments"></select>
+    </div>
+    <div class="lb-chart lb-curves" data-draw="curves" data-source="curves experiments"></div>
+  </section>
+
+  <section class="lb-card" id="jobs">
+    <h2 class="lb-h2">All jobs</h2>
+    <p class="lb-note">One row per job: experiment, arm and seed, its queue state and, for a waiting or blocked job, what it waits on.</p>
+    <div class="lb-tools">
+      <input class="lb-search" id="lb-job-search" type="search" placeholder="Filter jobs, e.g. e6 or waiting" aria-label="Filter jobs">
+    </div>
+    <div class="lb-box">
+      <table class="lb-table" data-source="jobs" data-row-key="id">
+        <thead>
+          <tr>
+            <th data-field="id"><button class="lb-sort" type="button" data-sort="id">Job</button></th>
+            <th data-field="state"><button class="lb-sort" type="button" data-sort="state">State</button></th>
+            <th data-field="priority"><button class="lb-sort" type="button" data-sort="priority">Priority</button></th>
+            <th data-field="detail" class="lb-hide-narrow">Waiting on</th>
+          </tr>
+        </thead>
+        <tbody data-draw="jobs"></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<script>
+  dash.calc('job_states', {
+    title: 'Jobs by state',
+    description: 'Planned jobs counted by queue state, grouped as on the board (ready and waiting are queued; blocked, failed and cancelled are problems).',
+    inputs: ['jobs'],
+    fn: (jobs) => {
+      const group = {done: 'done', running: 'running', ready: 'queued', waiting: 'queued', blocked: 'problem', failed: 'problem'};
+      const order = ['done', 'running', 'queued', 'problem', 'idle'];
+      const n = Object.fromEntries(order.map((g) => [g, 0]));
+      for (const j of jobs) n[group[j.state] || 'idle'] += 1;
+      return [...order.map((g) => ({group: g, n: n[g]})), {group: 'all', n: jobs.length}];
+    },
+  });
+
+  window.lbFmt = {loss: d3.format('.4f'), delta: d3.format('+.4f'), int: d3.format(',')};
+  window.lbStateGroup = (s) => ({done: 'done', running: 'running', ready: 'queued', waiting: 'queued', blocked: 'problem', failed: 'problem'}[s] || 'idle');
+  window.lbColor = (g) => ({done: 'var(--lb-c-done)', running: 'var(--lb-c-running)', queued: 'var(--lb-c-queued)', problem: 'var(--cds-chart-status-critical)', idle: 'var(--cds-chart-muted)'}[g]);
+  const root = document.querySelector('.lb');
+  if (root) {
+    root.style.setProperty('--lb-c-done', dash.colors[0]);
+    root.style.setProperty('--lb-c-running', dash.colors[1]);
+    root.style.setProperty('--lb-c-queued', dash.colors[2]);
+  }
+
+  const count = (group) => {
+    const d = dash.data('job_states');
+    return d.status === 'ok' ? (d.data.find((r) => r.group === group) || {}).n : null;
+  };
+  for (const [name, group] of [['take', 'done'], ['take-total', 'all'], ['take-running', 'running'], ['take-queued', 'queued']]) {
+    dash.draw(name, (el) => {
+      const n = count(group);
+      el.textContent = n == null ? '—' : lbFmt.int(n);
+    });
+  }
+
+  dash.draw('strip', (el) => {
+    const d = dash.data('job_states');
+    if (d.status !== 'ok') { el.textContent = '—'; return; }
+    const parts = d.data.filter((r) => r.group !== 'all');
+    const total = d3.sum(parts, (r) => r.n) || 1;
+    const width = Math.max(240, el.clientWidth);
+    const h = 18;
+    const x = d3.scaleLinear([0, total], [0, width]);
+    let at = 0;
+    const svg = d3.create('svg').attr('width', '100%').attr('viewBox', `0 0 ${width} ${h + 22}`).attr('role', 'img')
+      .attr('aria-label', parts.map((r) => `${r.group} ${r.n}`).join(', '));
+    for (const r of parts) {
+      const w = x(r.n);
+      if (r.n) {
+        svg.append('rect').attr('x', at).attr('y', 0).attr('width', Math.max(0, w - 2)).attr('height', h).attr('rx', 3)
+          .style('fill', lbColor(r.group));
+        if (w > 34) {
+          svg.append('text').attr('x', at + 4).attr('y', h + 15).attr('font-size', 12)
+            .style('fill', 'var(--color-fg-muted)').text(lbFmt.int(r.n));
+        }
+      }
+      at += w;
+    }
+    el.replaceChildren(svg.node());
+  });
+
+  dash.draw('next', (el) => {
+    const d = dash.data('jobs');
+    if (d.status !== 'ok') { el.replaceChildren(); return; }
+    const rank = {running: 0, ready: 1, waiting: 2};
+    const next = d.data.filter((j) => j.state in rank)
+      .sort((a, b) => rank[a.state] - rank[b.state] || a.priority - b.priority || a.seed - b.seed).slice(0, 6);
+    if (!next.length) {
+      const li = document.createElement('li');
+      li.textContent = 'Nothing is queued. Submit the configs, then launch a worker.';
+      el.replaceChildren(li);
+      return;
+    }
+    el.replaceChildren(...next.map((j) => {
+      const li = document.createElement('li');
+      const code = document.createElement('code');
+      code.textContent = j.id;
+      code.dataset.source = 'jobs'; code.dataset.field = 'id'; code.dataset.where = `id=${encodeURIComponent(j.id)}`;
+      const state = document.createElement('span');
+      state.textContent = j.state + (j.detail ? ` ${j.detail}` : '');
+      state.style.color = 'var(--color-fg-muted)';
+      li.append(code, state);
+      return li;
+    }));
+  });
+</script>
+
+<script>
+  const chips = () => document.querySelectorAll('.lb-chip');
+  for (const chip of chips()) {
+    chip.addEventListener('click', () => dash.setParams({group: chip.dataset.group}));
+  }
+
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  };
+  const mark = (node, source, field, where) => {
+    node.dataset.source = source; node.dataset.field = field; node.dataset.where = where;
+    return node;
+  };
+  const keep = (e, group, arms, runs) => {
+    if (group === 'P1' || group === 'P2') return e.priority === group && !e.followup;
+    if (group === 'followups') return e.followup || arms.some((a) => a.experiment === e.id && a.followup);
+    if (group === 'results') return runs.some((r) => r.experiment === e.id);
+    return true;
+  };
+  dash.onData(() => {
+    const group = dash.params().group || 'all';
+    for (const chip of chips()) chip.setAttribute('aria-pressed', String(chip.dataset.group === group));
+    const ex = dash.data('experiments'); const ar = dash.data('arms'); const ru = dash.data('runs');
+    const ready = ex.status === 'ok' && ar.status === 'ok' && ru.status === 'ok';
+    const shown = ready ? ex.data.filter((e) => keep(e, group, ar.data, ru.data)).length : 1;
+    for (const note of document.querySelectorAll('.lb-cards-empty')) note.hidden = shown > 0;
+  });
+
+  function dotPlot(box, e, arms, runs, refRuns) {
+    const rows = arms.map((a) => ({label: a.variant, arm: a, vals: runs.filter((r) => r.arm === a.key && r.counted).map((r) => r)}));
+    if (e.reference) rows.push({label: 'reference', arm: null, vals: refRuns, ref: true});
+    const all = rows.flatMap((r) => r.vals.map((v) => v.val_loss)).concat(e.reference_val != null ? [e.reference_val, e.reference_val - 0.02] : []);
+    if (!all.length) return false;
+    const width = Math.max(260, box.clientWidth);
+    const row = 26;
+    const top = 6;
+    const height = top + rows.length * row + 26;
+    const svg = d3.create('svg').attr('width', '100%').attr('viewBox', `0 0 ${width} ${height}`);
+    box.replaceChildren(svg.node());
+    const probe = svg.append('text').attr('font-size', 12);
+    let left = 0;
+    for (const r of rows) { probe.text(r.label); left = Math.max(left, probe.node().getComputedTextLength()); }
+    probe.remove();
+    left = Math.min(left + 12, width * 0.42);
+    const [lo, hi] = d3.extent(all);
+    const pad = Math.max((hi - lo) * 0.15, 0.005);
+    const x = d3.scaleLinear([lo - pad, hi + pad], [left + 18, width - 22]);
+    const y = (i) => top + i * row + row / 2;
+    const ticks = x.ticks(Math.max(2, Math.floor((width - left) / 90)));
+    svg.append('g').selectAll('line').data(ticks).join('line')
+      .attr('x1', (t) => x(t)).attr('x2', (t) => x(t)).attr('y1', top).attr('y2', height - 22)
+      .style('stroke', 'var(--cds-chart-grid)').attr('stroke-width', 1);
+    svg.append('g').selectAll('text').data(ticks).join('text')
+      .attr('x', (t) => x(t)).attr('y', height - 6).attr('text-anchor', 'middle').attr('font-size', 11)
+      .style('fill', 'var(--color-fg-muted)').text((t) => d3.format('.3f')(t));
+    if (e.reference_val != null) {
+      svg.append('line').attr('x1', x(e.reference_val)).attr('x2', x(e.reference_val)).attr('y1', top).attr('y2', height - 22)
+        .style('stroke', 'var(--cds-chart-reference)').attr('stroke-width', 1.5);
+      svg.append('line').attr('x1', x(e.reference_val - 0.02)).attr('x2', x(e.reference_val - 0.02)).attr('y1', top).attr('y2', height - 22)
+        .style('stroke', 'var(--cds-chart-reference)').attr('stroke-width', 1).attr('stroke-dasharray', '4 3');
+    }
+    const tip = el('div', 'lb-tip');
+    tip.hidden = true;
+    rows.forEach((r, i) => {
+      const color = r.ref ? 'var(--cds-chart-muted)' : dash.colors[i % dash.colors.length];
+      svg.append('text').attr('x', 0).attr('y', y(i) + 4).attr('font-size', 12)
+        .style('fill', r.ref ? 'var(--color-fg-muted)' : 'var(--color-fg)').text(r.label);
+      const vals = r.vals.map((v) => v.val_loss);
+      if (!vals.length) {
+        svg.append('text').attr('x', left).attr('y', y(i) + 4).attr('font-size', 11).style('fill', 'var(--color-fg-muted)')
+          .text(r.arm ? `${r.arm.counted} of ${r.arm.seeds} seeds` : 'no runs yet');
+        return;
+      }
+      const mean = d3.mean(vals);
+      const sd = vals.length > 1 ? d3.deviation(vals) : 0;
+      svg.append('line').attr('x1', x(mean - sd)).attr('x2', x(mean + sd)).attr('y1', y(i)).attr('y2', y(i))
+        .style('stroke', color).attr('stroke-width', 2).attr('stroke-linecap', 'round');
+      svg.append('rect').attr('x', x(mean) - 1.5).attr('y', y(i) - 8).attr('width', 3).attr('height', 16).attr('rx', 1.5).style('fill', color);
+      svg.append('g').selectAll('circle').data(r.vals).join('circle')
+        .attr('cx', (v) => x(v.val_loss)).attr('cy', y(i)).attr('r', 4)
+        .style('fill', 'var(--color-panel)').style('stroke', color).attr('stroke-width', 1.5);
+      svg.append('rect').attr('x', left).attr('y', y(i) - row / 2).attr('width', width - left).attr('height', row)
+        .style('fill', 'transparent')
+        .on('pointermove', (event) => {
+          const [px, py] = d3.pointer(event, box);
+          tip.replaceChildren(
+            el('div', 'lb-tip-h', r.ref ? `reference ${e.reference}` : `${e.id}.${r.label}`),
+            el('div', null, `mean ${lbFmt.loss(mean)}${vals.length > 1 ? ` ± ${lbFmt.loss(sd)}` : ''} (n = ${vals.length})`),
+            ...(e.reference_val != null && !r.ref ? [el('div', null, `vs reference ${lbFmt.delta(mean - e.reference_val)}`)] : []),
+            ...(r.arm ? [el('div', null, r.arm.change)] : []),
+            el('div', null, `seeds: ${r.vals.map((v) => `s${v.seed} ${lbFmt.loss(v.val_loss)}`).join(', ')}`));
+          tip.hidden = false;
+          const w = tip.offsetWidth;
+          tip.style.left = `${Math.min(Math.max(0, px + 12), box.clientWidth - w)}px`;
+          tip.style.top = `${py + 12}px`;
+        })
+        .on('pointerleave', () => { tip.hidden = true; });
+    });
+    box.append(tip);
+    return true;
+  }
+
+  dash.draw('cards', (grid) => {
+    const ex = dash.data('experiments'); const ar = dash.data('arms'); const ru = dash.data('runs');
+    if (ex.status !== 'ok' || ar.status !== 'ok' || ru.status !== 'ok') { grid.replaceChildren(); return; }
+    const group = dash.params().group || 'all';
+    const shown = ex.data.slice().sort((a, b) => a.order - b.order).filter((e) => keep(e, group, ar.data, ru.data));
+    grid.replaceChildren();
+    for (const e of shown) {
+      const where = `id=${encodeURIComponent(e.id)}`;
+      const card = el('article', 'lb-card');
+      card.id = `exp-${e.id}`;
+      const top = el('div', 'lb-exp-top');
+      top.append(mark(el('h3', 'lb-h2', e.name), 'experiments', 'name', where));
+      const pills = el('span', 'lb-pills');
+      pills.append(mark(el('span', 'lb-pill', e.priority), 'experiments', 'priority', where));
+      const v = mark(el('span', `lb-pill ${e.verdict === 'met' ? 'is-met' : e.verdict === 'not met' ? 'is-not-met' : ''}`, e.verdict), 'experiments', 'verdict', where);
+      pills.append(v);
+      top.append(pills);
+      card.append(top);
+      card.append(mark(el('p', 'lb-q', e.question), 'experiments', 'question', where));
+      const dl = el('dl', 'lb-dl');
+      for (const [label, field] of [['Setup', 'setup'], ['Success', 'success'], ['Gate', 'gate'], ['Verdict', 'verdict_note']]) {
+        dl.append(el('dt', null, label), mark(el('dd', null, e[field]), 'experiments', field, where));
+      }
+      card.append(dl);
+      const bar = el('div', 'lb-bar');
+      bar.dataset.source = 'experiments';
+      bar.setAttribute('role', 'img');
+      const parts = [['done', e.done], ['running', e.running], ['queued', e.ready + e.waiting], ['problem', e.blocked + e.failed], ['idle', e.not_submitted + e.follow_up + e.cancelled]];
+      bar.setAttribute('aria-label', parts.map(([g, n]) => `${g} ${n}`).join(', '));
+      for (const [g, n] of parts) {
+        if (!n) continue;
+        const seg = document.createElement('i');
+        seg.style.width = `${(100 * n) / Math.max(1, e.jobs)}%`;
+        seg.style.background = lbColor(g);
+        bar.append(seg);
+      }
+      const jobsLine = el('p', 'lb-note');
+      jobsLine.append(mark(el('span', 'lb-num', lbFmt.int(e.done)), 'experiments', 'done', where), ' of ',
+        mark(el('span', 'lb-num', lbFmt.int(e.jobs)), 'experiments', 'jobs', where), ' jobs done');
+      card.append(jobsLine, bar);
+      const arms = ar.data.filter((a) => a.experiment === e.id);
+      const refRuns = ru.data.filter((r) => r.arm === e.reference && r.counted);
+      const chart = el('div', 'lb-chart');
+      chart.dataset.source = 'arms runs';
+      card.append(chart);
+      grid.append(card);
+      if (!dotPlot(chart, e, arms, ru.data, refRuns)) {
+        const list = el('ul', 'lb-arms');
+        for (const a of arms) {
+          const li = el('li');
+          li.append(mark(el('span', null, `${a.variant}${a.followup ? ' (follow-up)' : ''} · ${a.seeds} seed${a.seeds > 1 ? 's' : ''}`), 'arms', 'variant', `key=${encodeURIComponent(a.key)}`),
+            mark(el('code', null, a.change), 'arms', 'change', `key=${encodeURIComponent(a.key)}`));
+          list.append(li);
+        }
+        chart.replaceChildren(el('p', 'lb-empty', 'No finished runs yet. Arms and what each changes:'), list);
+      }
+    }
+  });
+</script>
+
+<script>
+  dash.draw('curve-pick', (sel) => {
+    const ex = dash.data('experiments');
+    const rows = ex.status === 'ok' ? ex.data.slice().sort((a, b) => a.order - b.order) : [];
+    sel.replaceChildren(...rows.map((e) => new Option(e.name, e.id)));
+    sel.value = dash.params().curve || 'e1';
+    sel.onchange = () => dash.setParams({curve: sel.value});
+  });
+
+  dash.draw('curves', (box) => {
+    const cu = dash.data('curves'); const ex = dash.data('experiments');
+    if (cu.status !== 'ok' || ex.status !== 'ok') { box.replaceChildren(); return; }
+    const id = dash.params().curve || 'e1';
+    const e = ex.data.find((r) => r.id === id);
+    const series = d3.groups(cu.data.filter((r) => r.experiment === id || (e && r.arm === e.reference)), (r) => r.arm)
+      .map(([arm, pts]) => ({arm, pts: pts.slice().sort((a, b) => a.seqs - b.seqs), ref: e && arm === e.reference}));
+    if (!series.length) {
+      const p = document.createElement('p');
+      p.className = 'lb-empty';
+      p.textContent = 'No held-out curves for this experiment yet: they appear as its runs finish.';
+      box.replaceChildren(p);
+      return;
+    }
+    const width = Math.max(280, box.clientWidth);
+    const height = 260;
+    const m = {top: 10, right: 120, bottom: 28, left: 52};
+    const xs = cu.data.filter((r) => series.some((s) => s.arm === r.arm));
+    const x = d3.scaleLinear(d3.extent(xs, (r) => r.seqs), [m.left, width - m.right]);
+    const y = d3.scaleLinear(d3.extent(xs, (r) => r.heldout), [height - m.bottom, m.top]).nice();
+    const svg = d3.create('svg').attr('width', '100%').attr('viewBox', `0 0 ${width} ${height}`);
+    svg.append('g').selectAll('line').data(y.ticks(5)).join('line').attr('x1', m.left).attr('x2', width - m.right)
+      .attr('y1', (t) => y(t)).attr('y2', (t) => y(t)).style('stroke', 'var(--cds-chart-grid)');
+    svg.append('g').selectAll('text').data(y.ticks(5)).join('text').attr('x', m.left - 6).attr('y', (t) => y(t) + 4)
+      .attr('text-anchor', 'end').attr('font-size', 11).style('fill', 'var(--color-fg-muted)').text((t) => d3.format('.2f')(t));
+    svg.append('g').selectAll('text').data(x.ticks(Math.max(2, Math.floor(width / 140)))).join('text')
+      .attr('x', (t) => x(t)).attr('y', height - 8).attr('text-anchor', 'middle').attr('font-size', 11)
+      .style('fill', 'var(--color-fg-muted)').text((t) => d3.format(',')(t));
+    const line = d3.line().x((p) => x(p.seqs)).y((p) => y(p.heldout));
+    const ends = [];
+    series.forEach((s, i) => {
+      const color = s.ref ? 'var(--cds-chart-muted)' : dash.colors[i % dash.colors.length];
+      svg.append('path').attr('d', line(s.pts)).attr('fill', 'none').style('stroke', color).attr('stroke-width', 2)
+        .attr('stroke-linecap', 'round').attr('stroke-linejoin', 'round');
+      const last = s.pts[s.pts.length - 1];
+      ends.push({y: y(last.heldout), text: `${s.ref ? 'ref ' : ''}${s.arm.split('.').slice(1).join('.')} ${d3.format('.3f')(last.heldout)}`, color});
+    });
+    ends.sort((a, b) => a.y - b.y);
+    for (let i = 1; i < ends.length; i++) ends[i].y = Math.max(ends[i].y, ends[i - 1].y + 13);
+    for (const t of ends) {
+      svg.append('text').attr('x', width - m.right + 6).attr('y', t.y + 4).attr('font-size', 11)
+        .style('fill', 'var(--color-fg)').text(t.text);
+    }
+    box.replaceChildren(svg.node());
+  });
+</script>
+
+<script>
+  const search = document.querySelectorAll('#lb-job-search');
+  for (const input of search) input.addEventListener('input', () => dash.draw('jobs'));
+  const sortState = {key: 'priority', dir: 1};
+  for (const b of document.querySelectorAll('.lb-sort')) {
+    b.addEventListener('click', () => {
+      sortState.dir = sortState.key === b.dataset.sort ? -sortState.dir : 1;
+      sortState.key = b.dataset.sort;
+      for (const other of document.querySelectorAll('.lb-sort')) {
+        other.closest('th').setAttribute('aria-sort', other === b ? (sortState.dir > 0 ? 'ascending' : 'descending') : 'none');
+      }
+      dash.draw('jobs');
+    });
+  }
+  dash.draw('jobs', (tbody) => {
+    const d = dash.data('jobs');
+    if (d.status !== 'ok') { tbody.replaceChildren(); return; }
+    const q = ([...document.querySelectorAll('#lb-job-search')][0]?.value || '').trim().toLowerCase();
+    const rows = d.data.filter((j) => !q || `${j.id} ${j.state} ${j.detail}`.toLowerCase().includes(q));
+    const k = sortState.key;
+    rows.sort((a, b) => (k === 'priority' ? a.priority - b.priority || a.seed - b.seed : String(a[k]).localeCompare(String(b[k]))) * sortState.dir
+      || a.id.localeCompare(b.id));
+    tbody.replaceChildren(...rows.map((j) => {
+      const tr = document.createElement('tr');
+      tr.dataset.key = j.id;
+      for (const [value, cls] of [[j.id, ''], [j.state, ''], [String(j.priority), ''], [j.detail, 'lb-hide-narrow']]) {
+        const td = document.createElement('td');
+        if (cls) td.className = cls;
+        td.textContent = value;
+        tr.append(td);
+      }
+      tr.children[1].style.color = lbColor(lbStateGroup(j.state)) === 'var(--cds-chart-muted)' ? 'var(--color-fg-muted)' : 'var(--color-fg)';
+      return tr;
+    }));
+  });
+</script>
