@@ -53,7 +53,7 @@ class Reference:
         else:
             raise ValueError(f'unknown recipe {key!r}')
         self.settings, self.key = s, key
-        self.make_optimizer = lambda model, steps: m.make_optimizer(model, s, steps)
+        self.make_optimizer = lambda model, steps: arch.embedding_rates(m.make_optimizer(model, s, steps), model)
 
     def describe(self):
         settings = asdict(self.settings) if is_dataclass(self.settings) else dict(vars(self.settings))

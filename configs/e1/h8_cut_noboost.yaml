@@ -4,7 +4,7 @@ variant: h8_cut_noboost
 task: h8
 seeds: [0, 1, 2]
 priority: 50
-after: [verify.score_record.s0, verify.h8_smoke.s0]
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
 args:
   final_dtype: float32  # exact: verifications and baselines keep their scored weights
   sequences: 10M

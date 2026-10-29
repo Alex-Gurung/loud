@@ -421,13 +421,13 @@ def capture_linears(model, io):
 
 
 def agreed_gradients(module, params, out, credit, io, tokens, kept):
-    """E10 (b): a sublayer's block-local gradients with each nn.Linear weight's entries kept only where the tokens
-    agree. G (the credit at the layer's output, from this sublayer's credit alone) and X (its input) give the weight
-    gradient G^T X and, in one more matrix multiply, S = sign(G)^T sign(X), the net votes for each entry's sign; an
-    entry is kept if |S| >= (2 AGREE - 1) x tokens, which is 'at least AGREE of the tokens agree' when every
-    contribution is nonzero. A zero contribution (a unit off after the ReLU^2, an exact zero credit) votes for neither
-    sign, so it counts against agreement, as a rule computed in one matrix multiply must count it. Other parameters
-    (the value-embedding table) keep their gradients. Appends each weight's kept share to `kept`."""
+    """E10 (b): a sublayer's block-local gradients with each nn.Linear weight's entries kept only where at least AGREE
+    of the tokens agree in sign. G (the credit at the layer's output, from this sublayer's credit alone) and X (its
+    input) give the weight gradient G^T X; S = sign(G)^T sign(X) is each entry's net votes and
+    N = [G != 0]^T [X != 0] its nonzero contributions, so (N + |S|) / 2 tokens back the majority sign, and an entry is
+    kept if that is at least AGREE x tokens. A zero contribution (a unit off after the ReLU^2, an exact zero credit)
+    backs neither sign, so it counts against agreement. Other parameters (the value-embedding table) keep their
+    gradients. Appends each weight's kept share to `kept`."""
     linears = [m for m in module.modules() if isinstance(m, nn.Linear)]
     weights = {id(m.weight) for m in linears}
     others = [p for p in params if id(p) not in weights]
@@ -437,7 +437,8 @@ def agreed_gradients(module, params, out, credit, io, tokens, kept):
     with torch.autocast(out.device.type, enabled=False):  # float32: the vote counts must be exact
         for m, G in zip(linears, grads):
             G2, X2 = G.flatten(0, -2).float(), io[m][0].flatten(0, -2).float()
-            keep = (G2.sign().T @ X2.sign()).abs() >= (2 * AGREE - 1) * tokens
+            votes, nonzero = G2.sign().T @ X2.sign(), (G2 != 0).float().T @ (X2 != 0).float()
+            keep = (nonzero + votes.abs()) / 2 >= AGREE * tokens
             found[id(m.weight)] = ((G2.T @ X2) * keep).to(m.weight.dtype)
             kept.append(keep.float().mean())
     return found
@@ -611,7 +612,7 @@ class H8:
         (Boost keeps the record's, since partial-row noise exists only in the Cut phase)."""
         if self.shaper is not None and phase == 'cut':
             return shaped_optimizer(self.m, self.model, self.settings, horizon, self.shaper, 'BatchedAnvil')
-        return self.m.make_optimizer(self.model, self.settings, horizon)
+        return arch.embedding_rates(self.m.make_optimizer(self.model, self.settings, horizon), self.model)
 
     def reset_latent(self):
         """E14's dynamics model, E15's predictors, the EMA teacher either reads (H4), and one Adam for the two at the
@@ -726,7 +727,7 @@ class H8:
         if self.o['nextlat'] and step in (round(0.2 * self.steps), self.steps):
             record['effective_rank'] = effective_ranks(self.model, x, y, self.device)
         handoff = next((i for i, b in enumerate(self.schedule, 1) if b[0] == 'cut'), None)
-        if self.targets is not None and handoff is not None and step == handoff - 1:
+        if handoff is not None and step == handoff - 1:  # every Boost run: E15's arms and their baseline, e1.h8_cut
             record['handoff_cut_cosine'] = cut_cosine(self.model, x, y, self.device)
         return record
 

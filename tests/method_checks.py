@@ -693,7 +693,7 @@ def anvil_hook(scratch):
     trainer, m = proxy_trainer()
     original = m.Anvil
     twin = copy.deepcopy(trainer.model)
-    polar = type('Polar', (), dict(lane_gain=True, direction=lambda self, p, pending: m.polar(pending)))()
+    polar = type('Polar', (), dict(lane_gain=True, direction=lambda self, p, pending, before: m.polar(pending)))()
     shaped = shaped_optimizer(m, twin, trainer.reference.settings, 10, polar)
     assert m.Anvil is original and type(trainer.optimizer.optimizers[0]) is original
     for rows in batches(3, trainer.model.config.vocab_size):
@@ -719,7 +719,7 @@ def batched_anvil_hook(scratch):
         lane_gain = True
 
         @staticmethod
-        def direction(p, pending):
+        def direction(p, pending, before):
             return m.polar_batch(pending[None], s.polar_margin)[0]
 
     model = m.make_model(torch.device('cpu'), 0, s.model, s.projection_std, s.head_std)
@@ -741,9 +741,10 @@ def batched_anvil_hook(scratch):
                    for k in ('fast', 'slow', 'energy'))
 
 def snr_scaling(scratch):
-    """E8's intervention: r from the update's per-sequence projections (computed here one direction at a time), the
-    control arm's polar factor from the SVD, the rate arm's uniform Frobenius ratio, and ANVIL II's step without its
-    per-lane gain or renormalization."""
+    """E8's intervention: along the momentum's directions from before the batch, r from the batch's per-sequence
+    projections (computed here one direction at a time), the control arm's polar factor from the SVD, the rate arm's
+    uniform Frobenius ratio, the update's own directions while the rails are zero, and ANVIL II's step without its
+    per-lane gain or renormalization, its directions from the rails as they stood before the step."""
     trainer, m = proxy_trainer(per_sequence_grads=True, snr_scaling='snr')
     rows = batches(1, trainer.model.config.vocab_size)[0]
     trainer.gradient(rows)
@@ -751,8 +752,9 @@ def snr_scaling(scratch):
     shaper.before_step(1, trainer.pergrad)
     name = 'transformer.h.1.mlp.c_fc.weight'
     p = dict(trainer.model.named_parameters())[name]
-    pending = torch.randn(p.shape, generator=torch.Generator().manual_seed(12))
-    u, _, vh = torch.linalg.svd(pending, full_matrices=False)
+    generator = torch.Generator().manual_seed(12)
+    pending, before = torch.randn(p.shape, generator=generator), torch.randn(p.shape, generator=generator)
+    u, _, vh = torch.linalg.svd(before, full_matrices=False)
     grads = trainer.pergrad.stack(name).float()
     r = []
     for i in range(len(vh)):
@@ -761,25 +763,34 @@ def snr_scaling(scratch):
         r.append(max(0.0, (m2 - s2 / len(grads)).item()) / m2.item())
     r = torch.tensor(r)
     assert (r < 1).all() and (r > 0).any() and (r == 0).any(), r
-    assert torch.allclose(shaper.direction(p, pending), (u * r) @ vh, atol=1e-5)
+    assert torch.allclose(shaper.direction(p, pending, before), (u * r) @ vh, atol=1e-5)
     shaper.arm = 'rate'
-    assert torch.allclose(shaper.direction(p, pending), r.square().mean().sqrt() * (u @ vh), atol=1e-5)
+    assert torch.allclose(shaper.direction(p, pending, before), r.square().mean().sqrt() * (u @ vh), atol=1e-5)
     shaper.arm = 'control'
-    control = shaper.direction(p, pending)
+    control = shaper.direction(p, pending, before)
     assert torch.allclose(torch.linalg.svdvals(control), torch.ones(min(p.shape)), atol=1e-4)
-    assert (control - m.polar(pending)).norm() < 0.1 * control.norm()  # ANVIL's Newton-Schulz polar, roughly
+    assert (control - m.polar(before)).norm() < 0.1 * control.norm()  # ANVIL's Newton-Schulz polar, roughly
+    first = shaper.direction(p, pending, torch.zeros_like(pending))  # zero rails: the update's own directions
+    assert (first - m.polar(pending)).norm() < 0.1 * first.norm()
 
     # ANVIL II's step with lane_gain off: the shaped direction, the decay, the rate and nothing else
     anvil = trainer.optimizer.optimizers[0]
     seen = {}
     direction = shaper.direction
-    shaper.direction = lambda q, pend: seen.setdefault(id(q), direction(q, pend))
+    shaper.direction = lambda q, pend, bef: seen.setdefault(id(q), (direction(q, pend, bef), bef.clone()))[0]
     w = p.detach().clone()
     trainer.optimizer.step()
     lr, wd = anvil.param_groups[0]['lr'], anvil.param_groups[0]['weight_decay']
     slow = anvil.state[p]['slow']
-    expected = w - lr * max(1, w.size(0) / w.size(1)) ** 0.5 * (seen[id(p)] + (slow * w >= 0) * w * (wd * lr))
+    update, before = seen[id(p)]
+    assert not before.any()  # the first step's rails are zero
+    expected = w - lr * max(1, w.size(0) / w.size(1)) ** 0.5 * (update + (slow * w >= 0) * w * (wd * lr))
     assert torch.allclose(p, expected, atol=1e-6), 'the lane gain or its renormalization was applied'
+    weight = anvil.fast_weight if anvil.t >= anvil.engage else 1.0  # the blend the next step reads
+    expected = weight * anvil.state[p]['fast'] + (1 - weight) * anvil.state[p]['slow']
+    seen.clear()
+    trainer.optimizer.step()
+    assert torch.equal(seen[id(p)][1], expected), 'the directions are not the rails from before the step'
 
 
 def snr_diagnostic(scratch):

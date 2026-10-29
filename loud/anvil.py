@@ -3,7 +3,8 @@ for E8 and E9.
 
 Anvil.step forms each matrix's pending update, g.lerp(w * fast + (1 - w) * slow, beta), and orthogonalizes it with
 polar() before the per-lane gain, the decay and the step. ShapedAnvil.step is that code with one change: the
-orthogonalized update is `shaper.direction(p, pending)`; a shaper with lane_gain False also skips the per-lane gain and
+orthogonalized update is `shaper.direction(p, pending, before)`, `before` the blended momentum w * fast + (1 - w) * slow
+as it stood before this batch's gradient entered the rails; a shaper with lane_gain False also skips the per-lane gain and
 its Frobenius renormalization (E8, whose per-direction scaling they would undo). The proxy keeps the unchanged Anvil
 unless E8 or E9 is on; tests/method_checks.py (anvil_hook) checks that ShapedAnvil reproduces Anvil bit for bit when the
 shaper returns polar(pending). ShapedBatchedAnvil is the same hook on PR #40's BatchedAnvil, for E8's H8 setting
@@ -35,9 +36,10 @@ def shaped_anvil_class(m):
                         state.update(fast=torch.zeros_like(g), slow=torch.zeros_like(g),
                                      energy=torch.zeros_like(g.mean(lanes, keepdim=True)))
                     fast, slow, energy = state['fast'], state['slow'], state['energy']
+                    before = weight * fast + (1 - weight) * slow  # E8's directions: fixed before this batch
                     fast.lerp_(g, 1 - fast_beta)
                     slow.lerp_(g, 1 - self.slow_beta)
-                    update = self.shaper.direction(p, g.lerp(weight * fast + (1 - weight) * slow, beta))
+                    update = self.shaper.direction(p, g.lerp(weight * fast + (1 - weight) * slow, beta), before)
                     if self.shaper.lane_gain:  # E8 turns the gain and its renormalization off: they undo its scaling
                         energy.lerp_(update.square().mean(lanes, keepdim=True), 1 - self.lane_beta)
                         gained = update * energy.clamp_min(1e-10).rsqrt()
@@ -52,8 +54,8 @@ def shaped_anvil_class(m):
 
 def shaped_batched_anvil_class(m):
     """PR #40's BatchedAnvil (H8's optimizer) with the same hook: each matrix's orthogonalized update is
-    `shaper.direction(p, pending)` in place of polar_batch's, and a shaper with lane_gain False skips the per-lane gain
-    and its renormalization. The rest is anvil_update's lines, run eagerly."""
+    `shaper.direction(p, pending, before)` in place of polar_batch's, and a shaper with lane_gain False skips the
+    per-lane gain and its renormalization. The rest is anvil_update's lines, run eagerly."""
 
     class ShapedBatchedAnvil(m.BatchedAnvil):
         shaper = None
@@ -74,6 +76,7 @@ def shaped_batched_anvil_class(m):
                     stack = self.stacked_state(shape, params)
                     g, w = torch.stack([p.grad.float() for p in params]), torch.stack([p.float() for p in params])
                     fast, slow, energy = stack['fast'], stack['slow'], stack['energy']
+                    before = weight * fast + (1 - weight) * slow  # E8's directions: fixed before this batch
                     fast.lerp_(g, 1 - fast_beta)
                     slow.lerp_(g, 1 - slow_beta)
                     pending = g.lerp(weight * fast + (1 - weight) * slow, beta)
@@ -82,7 +85,7 @@ def shaped_batched_anvil_class(m):
                     update = (pending.new_empty(len(params), shape[1], shape[0]).transpose(1, 2)
                               if shape[0] > shape[1] else torch.empty_like(pending))
                     for i, p in enumerate(params):
-                        update[i] = self.shaper.direction(p, pending[i])
+                        update[i] = self.shaper.direction(p, pending[i], before[i])
                     if self.shaper.lane_gain:
                         lanes = 1 if shape[0] >= shape[1] else 0
                         energy.lerp_(update.square().mean(lanes + 1, keepdim=True), 1 - value(self.lane_beta))

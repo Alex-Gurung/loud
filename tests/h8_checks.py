@@ -316,8 +316,9 @@ def synthesized(h8, model, x, y, scheme_args, **kwargs):
 
 def h8_shaping(scratch):
     """E10. (a) clip: each site's credits capped at 3x the batch's median token norm, then the block-local gradients,
-    as written out. (b) agree: against per-token contributions summed and sign-counted token by token; with the
-    threshold at one half every entry is kept and the gradients are synthesis mode's own."""
+    as written out. (b) agree: against per-token contributions summed and sign-counted token by token (an entry kept
+    where at least 70% of all tokens back its majority sign; zeros back neither); with the threshold at 0 every entry
+    is kept and the gradients are synthesis mode's own."""
     from torch import nn
     from loud import h8
     _, _, model, x, y = record_setup()
@@ -353,17 +354,25 @@ def h8_shaping(scratch):
             outputs = torch.autograd.grad(out, [io[m][1] for m in linears], g, retain_graph=True)
             for m, G in zip(linears, outputs):
                 G2, X2 = G.flatten(0, -2), io[m][0].flatten(0, -2)
-                total, votes = torch.zeros_like(m.weight), torch.zeros_like(m.weight)
+                total, up, down = (torch.zeros_like(m.weight) for _ in range(3))
                 for t in range(tokens):  # token by token
                     c = torch.outer(G2[t], X2[t])
-                    total, votes = total + c, votes + c.sign()
-                keep = votes.abs() >= 0.4 * tokens  # 70% of the tokens agree: votes for the majority sign minus against
+                    total, up, down = total + c, up + (c > 0), down + (c < 0)
+                keep = torch.maximum(up, down) >= 0.7 * tokens  # 70% of all the tokens back the majority sign
                 assert torch.allclose(agreed[m.weight], total * keep, atol=1e-6, rtol=1e-4), m
                 kept.append(keep.float().mean().item())
     assert sum(kept) > 0 and max(kept) < 1, kept  # a real filter: 70% agreement over 128 tokens keeps few entries
-    h8.AGREE = 0.5
-    half, _ = synthesized(h8, model, x, y, {}, agree=True)
-    assert all(torch.allclose(half[p], plain[p], atol=1e-6, rtol=1e-4) for p in plain), 'agree at 1/2 is not plain'
+    contributions = torch.zeros(10, 1)  # Codex's case: 4 positive, 6 zero: 40% back the sign, so it goes
+    contributions[:4] = 1
+    linear = nn.Linear(1, 1, bias=False)
+    out = linear(contributions)
+    dropped = h8.agreed_gradients(linear, [linear.weight], out, torch.ones_like(out), {linear: (contributions, out)},
+                                  10, [])
+    assert dropped[id(linear.weight)].abs().sum() == 0
+    h8.AGREE = 0.0
+    every, _ = synthesized(h8, model, x, y, {}, agree=True)
+    h8.AGREE = 0.7
+    assert all(torch.allclose(every[p], plain[p], atol=1e-6, rtol=1e-4) for p in plain), 'agree at 0 is not plain'
 
 
 def h8_runway(scratch):
@@ -507,6 +516,14 @@ def h8_arch(scratch):
         preset='2m', arch='ngram', ngram_rows=512, mode='cut', sequences=72, heldout=32, batch=4, official_eval=False))
     result = h8.run(spec, Path(scratch) / 'arch')
     assert result['complete'] and result['updates'] == 10
+    from loud.cut import record_settings  # the n-gram tables at wte's rate (record #5's rule), their projections not
+    s = record_settings(m, '2m', 4)
+    optimizer = arch.embedding_rates(m.make_optimizer(model, s, 10), model)
+    rate = {id(p): g['lr'] for g in optimizer.optimizers[1].param_groups for p in g['params']}
+    assert rate[id(model.ngram_embeds['2'].weight)] == rate[id(model.transformer.wte.weight)] == 300 * s.lr
+    assert rate[id(model.ngram_proj['0'].weight)] == s.lr
+    assert sum(len(g['params']) for g in optimizer.optimizers[1].param_groups) + len(
+        optimizer.optimizers[0].param_groups[0]['params']) == len(list(model.parameters()))
     import loud.proxy  # E16's backprop arm: the same model under PR #40's recipe at batch 4
     args = dict(spec['args'], recipe='pr40')
     del args['mode']

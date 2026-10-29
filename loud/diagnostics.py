@@ -362,7 +362,7 @@ def run_task(spec, run_dir):
                                   heldout_rows=None if o['tool'] == 'snr_spectrum' else
                                   split.describe()['heldout_rows'][o['row']:o['row'] + 1]))
     if o['tool'] == 'ngram_tiers':  # E13's diagnostic: the 32 held-out sequences, the stream up to the checkpoint
-        summary, tensors = ngram.tiers_tool(model, split.heldout.to(device), checkpoint), {}
+        summary, tensors = ngram.tiers_tool(model, split.heldout.to(device), checkpoint)
     elif o['tool'] == 'snr_spectrum':  # E8's: training sequences after the checkpoint
         summary, tensors = snr_tool(model, split, checkpoint, o)
     else:

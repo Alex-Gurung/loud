@@ -11,14 +11,18 @@ the sequences), and a batch of B averages the noise to sigma^2 / B.
                     configs), and the share of the momentum's energy (squared singular values) in directions below
                     SNR 1. `gradients` supplies the per-sequence gradients: exact backprop by default, or any
                     estimate (H8's synthesized partial rows).
-    SNRScaling      the intervention, through loud/anvil.py's ShapedAnvil: the polar factor U V^T of the update ANVIL
-                    II orthogonalizes becomes U diag(r) V^T, r_i = max(0, m_i^2 - s_i^2 / B) / m_i^2 over the
-                    update's B per-sequence gradients (H2), an estimate of mu^2 / (mu^2 + sigma^2 / B). (That update
-                    holds the batch's own gradient at weight 1 - beta, about a tenth, so its directions depend on the
-                    sequences a little.) ANVIL II's per-lane gain and Frobenius renormalization would undo the
-                    scaling, so every arm runs without them: 'control' (r = 1), 'snr', and 'rate' (a uniform r, each
-                    matrix's sqrt(mean r_i^2): the SNR arm's Frobenius ratio, so that a gain cannot come from a
-                    smaller step alone). One SVD per block matrix per update (development).
+    SNRScaling      the intervention, through loud/anvil.py's ShapedAnvil (the proxy) and ShapedBatchedAnvil (H8):
+                    with U, V the singular directions of ANVIL II's momentum as it stood before this batch (its
+                    blended rails, as the diagnostic takes them), the update becomes U diag(r) V^T, r_i =
+                    max(0, m_i^2 - s_i^2 / B) / m_i^2 over the batch's B per-sequence gradients (H2), an estimate of
+                    mu^2 / (mu^2 + sigma^2 / B). Directions taken from the update itself would hold the batch's own
+                    gradient (weight 0.14 to 0.21 on the records' rails) and make its noise look like signal: on pure
+                    noise, mean r 0.85 against 0.18 (review round 7). So the batch enters the step only through r;
+                    the first update, whose rails are still zero, takes the update's own directions. ANVIL II's
+                    per-lane gain and Frobenius renormalization would undo the scaling, so every arm runs without
+                    them: 'control' (r = 1), 'snr', and 'rate' (a uniform r, each matrix's sqrt(mean r_i^2): the SNR
+                    arm's Frobenius ratio, so that a gain cannot come from a smaller step alone). One SVD per block
+                    matrix per update (development).
 """
 import copy
 
@@ -100,8 +104,9 @@ class SNRScaling:
     def after_step(self, model, batch, pergrad):
         pass
 
-    def direction(self, p, pending):
-        u, _, vh = torch.linalg.svd(pending, full_matrices=False)
+    def direction(self, p, pending, before=None):
+        basis = pending if before is None or not before.any() else before
+        u, _, vh = torch.linalg.svd(basis, full_matrices=False)
         if self.arm == 'control':
             return u @ vh
         name = self.names[id(p)]

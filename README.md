@@ -374,8 +374,9 @@ cross-token patches nor its top-512 MLP routes, so H8 and backprop bracket the c
 - **E6** (`rows` 128, 64, 32 × `row_assign` time, token) and **E7** (`prior: identity` at m = 64, 128, token rows)
   against `e1.h8_synth`; E6's success is K = 4 within 0.02 of K = 1 and K = 16 within 0.05.
 - **E10** `clip_credit`: each token's credit at a site capped at 3× the site's batch median norm. `agree`: each block
-  weight-update entry kept only where |sign(G)ᵀ sign(X)| ≥ 0.4 × tokens (70% agreement when no contribution is zero;
-  a zero contribution votes for neither sign), with the share of entries kept logged (`agree_kept`).
+  weight-update entry kept only where at least 70% of the tokens back its majority sign: (N + |S|) / 2 ≥ 0.7 × tokens,
+  with S = sign(G)ᵀ sign(X) the net votes and N = [G ≠ 0]ᵀ [X ≠ 0] the nonzero contributions (a zero, common after
+  the ReLU², backs neither sign), and the share of entries kept logged (`agree_kept`).
 - **E11** `runway`: each token's credit at a site weighted by the move along −g/|g| (0.01 to 0.08 of its RMS per
   coordinate, through `reforward`) that lowers its loss most, normalized to mean 1 per site; the chosen moves are
   logged per site (`runway`).

@@ -52,6 +52,23 @@ def make_model(device, seed, config, projection_std, head_std):
     return model.requires_grad_(False)
 
 
+def embedding_rates(optimizer, model):
+    """Record #5's rate for the n-gram tables on PR #40's optimizers. PR #40's make_optimizer has no rule for them, so
+    they would get the base Adam rate (a 300th of wte's); record #5 gives them the embedding tables' multiplier
+    (ngram_scale 0: emb_scale), so here they join wte's Adam group. Their projections keep the base rate, as there.
+    Call before the first step."""
+    adam = optimizer.optimizers[1]
+    tables = {id(p) for n, p in model.named_parameters() if n.startswith('ngram_embeds.')}
+    if tables:
+        wte = next(g for g in adam.param_groups if any(p is model.transformer.wte.weight for p in g['params']))
+        for group in adam.param_groups:
+            if group is not wte:
+                wte['params'] += [p for p in group['params'] if id(p) in tables]
+                group['params'] = [p for p in group['params'] if id(p) not in tables]
+        adam.param_groups[:] = [g for g in adam.param_groups if g['params']]
+    return optimizer
+
+
 def ngram_features(model, idx):
     """The summed hashed n-gram embeddings the track-3 GPT projects into every block's value embedding (as its
     forward), or None for a model without them (the fixed one)."""

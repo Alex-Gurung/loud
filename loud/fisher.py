@@ -75,7 +75,7 @@ class FisherFactor:
         if (step - 1) % FISHER_EVERY == 0:
             self.R = [inverse_root(fisher) for fisher in self.F]
 
-    def direction(self, p, pending):
+    def direction(self, p, pending, before=None):
         return self.polar(self.R[self.index[id(p)]] @ pending)
 
     def after_step(self, model, batch, pergrad=None):
