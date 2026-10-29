@@ -8,9 +8,10 @@ A method supplies a trainer with
     describe()                 what config.json records about the method
 and optionally
     warmup(batch)              the untimed compilation on random tokens (default: update(1, batch))
-    finish                     None, or finish(means): work after the last update of a complete run that is timed
-                               with the training and may change the weights (the record's end merge); returns result
-                               fields. The weights before it are kept as final_plain.pt and scored too.
+    finish                     None, or finish(means, heldout): work after the last update of a complete run that
+                               is timed with the training and may change the weights (the record's end merge, its
+                               scores logged through H3); returns result fields. The weights before it are kept as
+                               final_plain.pt and scored too.
 
 The loop follows the record scripts: an untimed warmup on random tokens (compilation), then a fresh trainer;
 the clock covers the updates only (diagnostics, held-out scoring and checkpoints are paused out); then final.pt and
@@ -134,7 +135,7 @@ def train(spec, run_dir, o, build, method):
     if complete and finish is not None:
         plain = checkpoints.save_final(trainer.model, 'final_plain.pt')
         begin = time.perf_counter()
-        finished = finish(means)
+        finished = finish(means, heldout)
         if dev.type == 'cuda':
             torch.cuda.synchronize()
         elapsed += time.perf_counter() - begin

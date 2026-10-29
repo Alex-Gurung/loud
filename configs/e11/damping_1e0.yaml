@@ -1,0 +1,17 @@
+# E11 on the Cut chain (1M slice), as damping_1e-1 (see there) with target_damping 1: the most damped fit, close to the
+# targets' outer product with the inputs.
+experiment: e11
+variant: damping_1e0
+task: cut
+seeds: [0, 1, 2]
+priority: 65
+gpu: H100  # wall-clocks compared across experiments (E7 against e6.cut_k1)
+after: [verify.score_record.s0, verify.cut_prefix.s0, verify.cut_prefix_match.s0, verify.cut_variants_smoke.s0]
+args:
+  merge_batch: true  # the merge scores each candidate in one batch: bf16 rounding of close calls only
+  sequences: 1M
+  heldout: 32
+  batch: 4
+  target_damping: 1.0
+  heldout_every: 10
+  checkpoints: true

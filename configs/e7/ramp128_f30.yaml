@@ -1,15 +1,18 @@
 # E7 on the Cut chain (1M slice): fewer rows early, all rows late. Each chain site reads 128 rows per token at the first
 # Cut update (scaled by 512 / 128), rising linearly in steps of 64 to the full 512 at 30% of the run's updates; each
-# token reads its own window, consecutive tokens tiling the cycle, so every row is read in every update. Baseline: the
-# unchanged chain, e6.cut_k1. Success: equal loss at lower time. The plan's precondition, to read before submitting:
-# h6.credit_dump_c20 and _c100 show a median identity-path cosine above 0.9 at 20% and below 0.7 at 100%.
+# token reads its own window, consecutive tokens tiling the cycle, so every row is read in every update. At the mid
+# sites the rows measure the identity-path guess's residual (the credit is the guess plus it). Baseline: the
+# unchanged chain, e6.cut_k1. Success: equal loss at lower time. The plan's precondition (h6.credit_dump_c20 and _c100
+# show a median identity-path cosine above 0.9 at 20% and below 0.7 at 100%) is the gate e7.precondition.
 experiment: e7
 variant: ramp128_f30
 task: cut
 seeds: [0, 1]
 priority: 65
-after: [verify.score_record.s0, verify.cut_prefix.s0, verify.cut_prefix_match.s0]
+gpu: H100  # wall-clocks compared across experiments (E7 against e6.cut_k1)
+after: [verify.score_record.s0, verify.cut_prefix.s0, verify.cut_prefix_match.s0, e7.precondition.s0]
 args:
+  merge_batch: true  # the merge scores each candidate in one batch: bf16 rounding of close calls only
   sequences: 1M
   heldout: 32
   batch: 4

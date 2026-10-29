@@ -46,9 +46,10 @@ def damp(x, a, b, f):
 
 
 class CurvatureDamping:
-    """The E8 shaper of ShapedAnvil (loud/anvil.py) and the hooks Backprop.update calls around the optimizer step."""
+    """The E8 shaper of ShapedAnvil and ShapedBatchedAnvil (loud/anvil.py), and the hooks the proxy's and the Cut
+    chain's updates call around the optimizer step."""
 
-    def __init__(self, o, model, anvil_lr, polar):
+    def __init__(self, o, model, anvil_lr, polar=None):  # polar: ShapedAnvil's; the batched hook passes its own
         self.polar = polar
         self.k, self.every, self.where, self.batch = o['damp_directions'], o['damp_every'], o['damp_where'], o['batch']
         self.names = [n for n, p in model.named_parameters() if is_anvil_matrix(n, p)]
@@ -79,17 +80,26 @@ class CurvatureDamping:
     def direction(self, p, pending):
         """ShapedAnvil's orthogonalization: polar(), with the factors before or after it; on a refresh update, also
         record the pending update's top directions."""
+        if self.where == 'step':
+            return self.after_polar(p, pending, self.polar(pending))
+        i = self.record(p, pending)
+        if self.factors is not None:
+            pending = damp(pending, self.left[i], self.right[i], self.factors[i])
+        return self.polar(pending)
+
+    def after_polar(self, p, pending, update):
+        """The 'step' placement given the orthogonalized update (also PR #40's batched ANVIL II hook, loud/anvil.py):
+        record on a refresh, then scale the update along the tracked directions."""
+        i = self.record(p, pending)
+        return update if self.factors is None else damp(update, self.left[i], self.right[i], self.factors[i])
+
+    def record(self, p, pending):
+        """Matrix p's index; on a refresh update, its pending update's top directions are recorded too."""
         i = self.index[id(p)]
         if self.refreshing:
             u, _, vh = torch.linalg.svd(pending, full_matrices=False)
             self.recorded[i] = (u[:, :self.k].contiguous(), vh[:self.k].T.contiguous())
-        damped = self.factors is not None
-        if damped and self.where == 'pending':
-            pending = damp(pending, self.left[i], self.right[i], self.factors[i])
-        update = self.polar(pending)
-        if damped and self.where == 'step':
-            update = damp(update, self.left[i], self.right[i], self.factors[i])
-        return update
+        return i
 
     def after_step(self, model, batch, pergrad):
         """On a refresh update: the recorded directions become the tracked ones, their curvature is measured at the

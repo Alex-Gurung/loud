@@ -86,12 +86,42 @@ def test_bad_configs_fail_at_submission(tmp_path, text, error):
     ('{rows: 128, rows_start: 64, rows_full_at: 0.5}', 'not both'),
     ('{heldout: 0}', 'end merge needs'),
     ('{end_merge: false, heldout: 0, drift_every: 10}', 'needs heldout'),
+    ('{rows_tiled: true}', "rows_tiled is E7's partial cycle"),
+    ('{rows: 128, row_offset_per_step: true, rows_tiled: true}', "rows_tiled is E7's partial cycle"),
+    ('{rows: 128, rows_check: 0.5}', 'needs tiled rows'),
+    ('{target_damping: -1.0}', 'must be >= 0'),
+    ('{curvature_damping: 30.0, batch: 1, virtual_gpus: 2}', '2 <= batch'),
+    ('{curvature_damping: 30.0, damp_directions: 1024}', 'at most the width'),
 ])
 def test_bad_cut_options_fail_at_submission(tmp_path, args, error):
     path = tmp_path / 'c.yaml'
     path.write_text(f'experiment: e\nvariant: v\ntask: cut\nargs: {args}\n')
     with pytest.raises(ValueError, match=error):
         specs_from_config(path)
+
+
+def test_turns_sum_the_parts_as_an_all_reduce():
+    from loud.cut import Turns
+    turns = Turns(2)
+    parts = [torch.tensor([1.0, 2.0]), torch.tensor([10.0, 20.0])]
+    out = turns.run([lambda p=p: turns.group_sum(p, parts[p]).clone() for p in range(2)])
+    assert all(torch.equal(t, torch.tensor([11.0, 22.0])) for t in out + parts)
+
+
+@pytest.mark.parametrize('extra', [0, 1])
+def test_turns_fail_when_one_part_has_an_extra_collective(extra):
+    """In either direction: the part with the extra group_sum would otherwise wait forever (part 0) or get its own
+    tensor back unsummed (part 1)."""
+    from loud.cut import Turns
+    turns = Turns(2)
+
+    def job(part):
+        total = turns.group_sum(part, torch.ones(1))
+        if part == extra:
+            turns.group_sum(part, torch.ones(1))
+        return total
+    with pytest.raises(RuntimeError, match='different collectives'):
+        turns.run([lambda p=p: job(p) for p in range(2)])
 
 
 def row(variant, seed, val, check='pass', gpu='H100', code='c1', complete=True):

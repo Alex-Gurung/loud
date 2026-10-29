@@ -11,11 +11,10 @@ replace ANVIL II's orthogonalization (loud/anvil.py), each off by default.
 import contextlib
 import copy
 from dataclasses import asdict, is_dataclass
-import time
 
 import torch
 
-from . import refs
+from . import checkpoints, refs
 from .anvil import shaped_optimizer
 from .curvature import CurvatureDamping
 from .fisher import FisherFactor
@@ -62,10 +61,9 @@ class Reference:
 
 
 class Backprop:
-    def __init__(self, o, reference, device, seed, steps, heldout=None):
+    def __init__(self, o, reference, device, seed, steps):
         self.o, self.reference, self.device, self.seed, self.steps = o, reference, device, seed, steps
         self.warmdown = reference.warmdown if o['warmdown'] is None else o['warmdown']
-        self.heldout = heldout
         self.finish = self.end_merge if o['end_merge'] else None  # loud/train.py runs it after the last update
         self.reset()
 
@@ -171,16 +169,10 @@ class Backprop:
             self.pergrad.clear()
         return record
 
-    def end_merge(self, means):
-        """The record's end merge (PR #40's, PR #46's) of the nine trajectory means, chosen on the held-out sequences
-        and timed with the training, as the records run it; returns its result fields."""
-        if means.means is None:
-            return {}
-        start = time.perf_counter()
-        out = self.reference.module.end_merge(self.model, means.means, self.heldout, 0, 1)
-        if self.device.type == 'cuda':
-            torch.cuda.synchronize()
-        return dict(out, merge_seconds=round(time.perf_counter() - start, 2))
+    def end_merge(self, means, heldout):
+        """The record's end merge (PR #40's, PR #46's; loud.checkpoints.end_merge), timed with the training as the
+        records run it, each candidate scored by H3's one-forward mean; returns its result fields."""
+        return checkpoints.end_merge(self.reference.module, self.model, means, heldout, self.steps)
 
     def assign(self, other):
         """Take another trainer's weights and optimizer state (E3: branching a copy, replacing the worst one)."""
@@ -204,6 +196,5 @@ def shaper(o, reference, model, seed):
 def run(spec, run_dir):
     o = proxy_options(spec.get('args', {}))
     reference = Reference(o['recipe'], o['lr_mult'], o['preset'])
-    return train(spec, run_dir, o, lambda device, seed, steps, heldout: Backprop(o, reference, device, seed, steps,
-                                                                               heldout),
+    return train(spec, run_dir, o, lambda device, seed, steps, heldout: Backprop(o, reference, device, seed, steps),
                  method='backprop')

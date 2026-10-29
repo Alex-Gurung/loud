@@ -1,9 +1,9 @@
 # The Cut-chain port against PR #40's published 8-GPU log (unrounded per-update losses), over the 262 updates of
 # cut_prefix. Same weights, data and draws, so the two differ only by float rounding: the order of the 8-way gradient
-# sum (NCCL's ring here against rank order) and the kernels of the image's torch against the record's 2.10. Those
-# differences start near 1e-6 and grow along the trajectory, so the first 20 updates (the plan's steps 2 and 10) are
-# held to 0.003 and all 262 (step 100, and 20 Cut updates) to 0.02. A port error (a wrong draw, half, scale or batch)
-# moves the loss by more than that within a few updates.
+# sum (NCCL's ring here against rank order) and the kernels of the image's torch against the record's 2.10. Held to
+# 0.003 over the first 20 updates (the plan's steps 2 and 10) and to the plan's seed noise, 0.01, over all 262 (step
+# 100, and 20 Cut updates). No measurement sets these yet: they are relaxed only after a GPU run measures the drift
+# between identical references, cut_prefix_reversed_match (the same run with the sum in reversed rank order).
 experiment: verify
 variant: cut_prefix_match
 task: compare
@@ -16,4 +16,4 @@ args:
   first: 20
 expect:
   train_loss_max_diff: [0, 0.003]
-  train_loss_max_diff_all: [0, 0.02]
+  train_loss_max_diff_all: [0, 0.01]

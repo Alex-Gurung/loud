@@ -1,0 +1,23 @@
+# E8's real test on the Cut chain (1M slice): cut_rows128 (see there) with E8's curvature damping in the Cut phase.
+# Every 50 Cut updates, from the first, the top 16 singular directions of each block matrix's pending update and the
+# curvature along each (float32 central differences on 2 sequences, autograd allowed in development); the noise along
+# them from the 4 sequences' estimates; each step along a direction scaled by 1 / (1 + c / (B h^2 lambda)) right after
+# ANVIL II's orthogonalization. curvature_damping 30 is the proxy sweep's middle (e8.lambda_3e1). Boost is unchanged.
+experiment: e8
+variant: cut_rows128_damped
+task: cut
+seeds: [0, 1, 2]
+priority: 65
+gpu: H100  # wall-clocks compared across experiments (E7 against e6.cut_k1)
+after: [verify.score_record.s0, verify.cut_prefix.s0, verify.cut_prefix_match.s0, verify.cut_variants_smoke.s0,
+        verify.curvature_smoke.s0]
+args:
+  merge_batch: true  # the merge scores each candidate in one batch: bf16 rounding of close calls only
+  sequences: 1M
+  heldout: 32
+  batch: 4
+  rows: 128
+  rows_tiled: true
+  curvature_damping: 30.0
+  heldout_every: 10
+  checkpoints: true

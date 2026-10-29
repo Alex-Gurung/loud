@@ -34,12 +34,13 @@ class HeldoutScorer:
     def loss(self, model):
         return mean_loss(model, self.rows, self.device, len(self.rows))
 
-    def score(self, model, step, reason, **fields):
-        """Score and log one call. `reason` names the decision (or 'monitor' when nothing depends on it)."""
+    def score(self, model, step, reason, loss=None, **fields):
+        """Score and log one call. `reason` names the decision (or 'monitor' when nothing depends on it); `loss`, a
+        function of the model, replaces the one-forward mean (the Cut chain's end merge scores as the record does)."""
         if not self:
             raise RuntimeError('this run holds out no sequences (heldout: 0)')
         start = time.perf_counter()
-        value = self.loss(model)
+        value = (loss or self.loss)(model)
         self.calls += 1
         self.log.write(dict(call=self.calls, step=step, reason=reason, heldout_loss=value,
                             seconds=round(time.perf_counter() - start, 3), **fields))

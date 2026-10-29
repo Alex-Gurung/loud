@@ -11,6 +11,7 @@ every 5 updates and at the last update, nine exponential means of every paramete
 (0.5, 0.3, 0.2, 0.12, 0.08, 0.05, 0.03, 0.02, 0.01) on the newest; the first qualifying step copies the weights.
 """
 import os
+import time
 
 import torch
 
@@ -109,3 +110,21 @@ class TrajectoryMeans:
         cast = lambda m: m.to(dtype) if dtype is not None and m.ndim == 2 else m
         torch.save(dict(decays=MERGE_DECAYS, updates=self.updates, dtype=str(dtype or 'float32'),
                         means=[{n: cast(m).cpu() for n, m in zip(names, mean)} for mean in self.means or []]), path)
+
+
+def end_merge(module, model, means, heldout, step, loss=None):
+    """The record's end merge (`module`: PR #40's or PR #46's run.py, whose end_merge and joint_parts look up
+    holdout_loss by name) of the nine trajectory means, on the held-out rows; returns its result fields. Each candidate
+    it scores goes through H3's log (heldout.jsonl, reason 'merge'); `loss(model, rows)` scores one (default: H3's
+    one-forward mean). Timed by the caller's clock, as the records time it."""
+    if means.means is None:  # as the records: no means, no merge
+        return {}
+
+    def holdout_loss(candidate, rows, rank, world):
+        return heldout.score(candidate, step, 'merge', loss=None if loss is None else lambda c: loss(c, rows))
+    module.holdout_loss = holdout_loss
+    start = time.perf_counter()
+    out = module.end_merge(model, means.means, heldout.rows, 0, 1)
+    if heldout.device.type == 'cuda':
+        torch.cuda.synchronize()
+    return dict(out, merge_seconds=round(time.perf_counter() - start, 2))

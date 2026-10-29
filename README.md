@@ -29,10 +29,10 @@ EIDF, the GPU cluster, sharing one volume).
 | H6 diagnostic toolkit (`loud/diagnostics.py`, task `diagnose`): the plan's five tools and E5's `credit_recovery` | done; CPU tests on tiny models; `configs/h6/`, `configs/e5/` |
 | H7 runner, results table, per-experiment plots (`run.py`, `collect.py`, `python3 -m loud.plots <exp>`) | done |
 | E1, E2, E3, E4, E6, E7, E8 and E9 (proxy), E10, E12 | configs in `configs/e<N>/`; see What runs |
-| E11, E7's self-check, E8 on the Cut chain | being built |
+| E7's self-check, E8's real test and E11 on the Cut chain (options of `cut`; `configs/e7/check_*`, `e8/cut_*`, `e11/`) | done; CPU tests: the hooked optimizer is PR #40's to the bit; the fit, runway and control variate |
 | Port checks against their sources (`compare` task) | done |
 | GPU queue and workers, one GPU or eight (`loud/jobqueue.py`, `loud/worker.py`, `worker/`) | done; tested end to end on CPU |
-| Independent review (Codex and Claude reviewers, [review/](review/README.md)) | rounds 1 to 4 triaged in [the ledger](review/LEDGER.md); round 5 (the experiments) running |
+| Independent review (Codex and Claude reviewers, [review/](review/README.md)) | rounds 1 to 5 triaged in [the ledger](review/LEDGER.md) |
 
 Not built, on purpose:
 - **E5's implementation in the chain.** The plan says not to build it before the maintainers answer the rules question
@@ -40,10 +40,10 @@ Not built, on purpose:
 - **E9's kernel version** (the curvature term and sampled-label loss from the chain's probes). The plan builds it only
   if the proxy test (`configs/e9/`) beats the batch-4 baseline by 0.02.
 
-Nothing has run on a GPU yet. Every config together is about 150 one-GPU jobs, roughly 40 GPU-hours by the estimates
-in the configs (most of it the Cut chain at about 35 minutes per 1M-slice run; a 10M proxy run is about 8 minutes),
-so about 10 hours on four workers. E12's record runs need one 8-GPU node for about 16 hours (18 runs of 35 to 56
-minutes). All estimates scale the published 8×H100 times; the first runs measure them.
+Nothing has run on a GPU yet. Every config together is 184 one-GPU jobs, roughly 55 GPU-hours by the estimates in
+the configs (most of it the Cut chain, about 35 minutes per 1M-slice run; a 10M proxy run is about 8 minutes), so
+about 14 hours on four workers or 7 on eight. E12's record runs need one 8-GPU node for about 16 hours (18 runs of 35
+to 56 minutes). All estimates scale the published 8×H100 times; the first runs measure them.
 
 ## Running on GPUs
 
@@ -102,8 +102,12 @@ is when they are needed to tell a port error from an environment difference.
    0.01). `verify.identity_match` compares its first 20 updates with PR #26's published 8-GPU log.
 5. **The Cut chain's check**, `verify.cut_prefix`: the 10M schedule for 262 updates (all 242 Boost and 20 Cut), held by
    `verify.cut_prefix_match` against PR #40's published 8-GPU log: within 0.003 over the first 20 updates (the plan's
-   steps 2 and 10), within 0.02 over all 262 (step 100 and the first Cut updates). Same seed, data and draws, so only
-   float rounding separates them.
+   steps 2 and 10) and within the plan's seed noise, 0.01, over all 262 (step 100 and the first Cut updates). Same
+   seed, data and draws, so only float rounding separates them. No measurement sets those bounds yet:
+   `verify.cut_prefix_reversed` runs the same prefix with the 8-way gradient sum in reversed rank order, and
+   `verify.cut_prefix_reversed_match` reports how far rounding alone moves the losses, the reference for relaxing
+   them. `verify.cut_variants_smoke` (16 updates through E11's runways and fits, E7's tiled rows with a self-check,
+   and E8's damping) gates E11, E8 on the chain and E7's self-check.
 6. **E1**, the baselines: backprop at batch 8 and batch 4, three seeds each, with held-out scoring and the nine means
    (`bp_b4` saves the H4 checkpoints and optimizer state for the diagnostics); `bp_b4_pr40`, batch 4 with PR #40's
    recipe, since no published run anchors boost-cut's rates at batch 4; `e1.identity`, seed 0. E1's Cut chain on the
@@ -119,11 +123,13 @@ is when they are needed to tell a port error from an environment difference.
    `adapt`, `adapt_t60`, and both without the warmdown at seed 0) and E10 (`cap`, `agree` at 0.6, 0.7, 0.8) at batch 8;
    E3 (five population rules), E8 (three dampings and the literal placement) and E9 (three dampings) at batch 4. E8 also
    waits for H6's `direction_stats`, which the plan runs first and which says where its knob should sit.
-10. **Cut-chain experiments** on the 1M slice (about 35 minutes each): E6's `cut_k1`, `cut_k4`, `cut_k16` and the
-    control `cut_k4_fresh` (three seeds, drift check every 10 updates), and E7's four ramps (two seeds) against
-    `e6.cut_k1`. The plan runs E7 if H6's `credit_dump` shows the identity-path guess good early (median cosine above
-    0.9 at 20%) and poor late (below 0.7 at 100%); the configs are queued with the rest, so read that result before
-    reading E7's (`python3 -m loud.plots e7`).
+10. **Cut-chain experiments** on the 1M slice (about 35 minutes each; every cell pins `gpu: H100`, since E6, E7 and
+    E11 compare wall-clocks, and scores its end merge in one batch, `merge_batch`): E6's `cut_k1`, `cut_k4`,
+    `cut_k16` and the control `cut_k4_fresh` (three seeds, drift check every 10 updates); E7's four ramps (two seeds)
+    against `e6.cut_k1`, gated by `e7.precondition`, the plan's rule on H6's `credit_dump` (the identity-path guess's
+    median cosine above 0.9 at 20% and below 0.7 at 100%); E7's two self-check cells (`check_045`, `check_077`; the
+    plan runs them only if the best ramp differs between seeds); E11 (three dampings, three seeds); E8's real test
+    (`configs/e8/cut_rows128*`: 128 tiled rows with and without the damping, three seeds).
 11. **E6 on the identity path**: K = 1, 4, 16 (512, 128, 32 probe rows per update) and the control
     `identity_k4_fresh` (128 rows of a fresh basis each update, so E6 can say whether stitching a cycle over K
     updates matters or only the row count does), three seeds each, drift check every 50 updates.
@@ -300,8 +306,8 @@ counts as the single run's next update number, which sets its rate and ANVIL II'
 the single run's does. Rules: `average` (every N updates per copy, weights only; each copy keeps its optimizer
 state), `select` (the worst copy takes the best's weights and optimizer state, by H3), `ensemble` (the mean at the end
 if H3 prefers it to the best copy). `population.jsonl` logs every N updates each copy's and each pairwise midpoint's
-held-out score, and the barrier (midpoint minus the worse end). Population runs have no H4 files: there is no single
-trajectory to checkpoint after the branch.
+held-out score, and the barrier (midpoint minus the worse end). H4: the trunk's checkpoints up to the branch, then each
+copy's at 50% and at its end (`ckpt_50.c<k>.pt`); no trajectory means, since the rules are E3's own merges.
 
 **E8 and E9** replace ANVIL II's orthogonalization through one hook (`loud/anvil.py`); a CPU test checks the hooked
 optimizer reproduces boost-cut's ANVIL II bit for bit, and with both off the proxy uses the original.
@@ -320,23 +326,57 @@ That script runs at batch 4 on 8 GPUs, two per sequence. The two GPUs of a seque
 cycle and add their parts with an all-reduce in the middle of each estimate. Here the 8 GPUs are virtual ranks with
 the record's seeds and roles (`virtual_gpus`, default 8). The two halves of a sequence are threads that take turns:
 one runs at a time and hands over at each of those all-reduces, where the parts are added. So the run draws the 8-GPU
-run's numbers. A CPU test runs PR #40's own `train_stages` on 8 gloo processes for 2 Boost and 2 Cut updates and finds
-the same losses and weights; only the order of the 8-way gradient sum differs. Differences from PR #40:
+run's numbers. A CPU test runs PR #40's own `train_stages` on 8 gloo processes for 2 Boost and 2 Cut updates, its
+all-reduces summing in rank order as the port does, and finds bit-identical losses and weights (on GPUs, NCCL's
+order changes only the rounding). Differences from PR #40:
 - **Seed:** the job's seed replaces the module's `SEED` constant (seed 0 is the record's). Data order and held-out set
   are the records' (`randperm(seed 1)`, the last 32), which the end merge scores.
 - **The end merge** runs after the last update inside the clock, as in the record. Its means are the shared loop's
-  (the same rule), and its held-out scorer adds the 32 sequences rank by rank, as the record's all-reduce does.
-  `final_plain.pt` keeps the weights before the merge, scored as `val_loss_plain` (the record's 3.703 to 3.676).
-- **E6** (`rows`, `row_offset_per_step`, `drift_every`) and **E7** (`rows_start`, `rows_full_at`) act only on the
-  Cut phase's chain, at its nine sites (the embedding and the 8 mid streams). Boost, the head-only top probe and the
-  key, gate, query and future probes keep their budgets. A token's credit at a site comes from its rows of the site's
-  signed basis, scaled by 512 / rows. E6 reads window `s mod K` of bases held for a cycle of K updates. E7 grows the
-  rows from `rows_start` at the first Cut update to 512 at the fraction `rows_full_at` of the run, in steps of 64;
-  token t reads the window starting at `(t * rows) mod 512`, so every row is read in every update. Every shape the
-  run will use compiles in the warmup. The full cycle runs the record's `chain_credits` itself. CPU tests check that,
-  that the K windows of a cycle average to the full cycle, and that each tiled token gets its window's credit.
+  (the same rule), and its held-out scorer adds the 32 sequences rank by rank, as the record's all-reduce does
+  (with `merge_batch`, in one forward of all 32, which changes only the bf16 rounding of close calls and saves most of
+  the merge's ~8 minutes). Each of its scores is logged to `heldout.jsonl` (reason `merge`). `final_plain.pt` keeps
+  the weights before the merge, scored as `val_loss_plain` (the record's 3.703 to 3.676).
+- **E6** (`rows`, `row_offset_per_step`, `drift_every`) and **E7** (`rows_start`, `rows_full_at`, or `rows_tiled`
+  at a fixed count) act only on the Cut phase's chain, at its nine sites (the embedding and the 8 mid streams).
+  Boost, the head-only top probe and the key, gate, query and future probes keep their budgets. A token's credit at
+  a site comes from its rows of the site's signed basis, scaled by 512 / rows. E6 reads window `s mod K` of bases held
+  for a cycle of K updates. E7 grows the rows from `rows_start` at the first Cut update to 512 at the fraction
+  `rows_full_at` of the run, in steps of 64; token t reads the window starting at `(t * rows) mod 512`, so every row
+  is read in every update. Every shape the run will use compiles in the warmup: `chain_chunk` compiles one graph per
+  site and moves per token (17 per row count, 16 more for E11), so the port raises the record's Dynamo limit of 64 to
+  twice what the run's row counts need and fails the job if the warmup reaches it (E7's ramps need up to 136). The
+  drift check reports the cosines with ANVIL II's fast and slow momenta (PR #40 steps along the fast one alone, so a
+  blend would repeat it). The full cycle runs the record's
+  `chain_credits` itself. CPU tests check that, that the K windows of a cycle average to the full cycle, and that each
+  tiled token gets its window's credit.
+- **E7's rows measure the identity-path guess's residual.** The plan's E7 cuts probes "while the identity-path guess
+  is good", which only matters if the estimate uses the guess. So at the mid sites the credit is the guess (the top
+  stream's credit carried down the residual scalars, as H6's `credit_dump` guesses it) plus the decoded residual
+  `d - guess . h` over the token's rows: a control variate, unbiased like the plain estimate but with a variance that
+  shrinks with the guess's error. At the full cycle it is the record's credit exactly. The embedding site has no guess
+  in the chain (PR #26 measures it with an RMS-norm cycle) and keeps the plain estimate.
+- **E7's self-check** (`rows_check`): part 0 also measures 8 rows past each token's window at every mid site. Being
+  orthogonal to the window, they are predicted by the guess alone, so their relative error over the batch says how
+  good the guess is where nothing was measured. Above `rows_check` the rows rise by 64 for the rest of the run, and
+  every count it can reach compiles in the warmup. Logged per update (`rows_check` in `metrics.jsonl`).
+- **E11** (`target_damping`): each `c_proj` writer (`attn.c_proj` writes block i's mid stream, `mlp.c_proj` its output)
+  has its output stream moved along minus its own credit (the record's: the mid credit plus path credits; for
+  `mlp.c_proj` the next mid's carried back) at 2, 4, 8 and 16 chain probe lengths (`chain_sigma` x RMS x
+  sqrt(width)), scored by the chain's own kernel (its `from_output` path for the MLP output). The runway is how far
+  the token's loss keeps falling (0 if the first move raises it); the target move D is the move there. Part 0 of each
+  sequence runs these 64 probes per token (against the chain's 4,608). The batch's A^T A and D^T A are summed over
+  the virtual GPUs and each writer's gradient becomes minus `D^T A (A^T A + lam I)^-1`, `lam = target_damping x
+  mean(diag A^T A)`, once per update; ANVIL II orthogonalizes it. `metrics.jsonl` logs each writer's runway
+  distribution every 10 Cut updates.
+- **E8 on the chain** (`curvature_damping`, `damp_directions`, `damp_every`): in the Cut phase, ANVIL II is
+  `loud/anvil.py`'s ShapedBatchedAnvil, PR #40's batched step with E8's factors applied right after `polar_batch`
+  (curvature.py's `step` placement), refreshed from the first Cut update. The curvature is curvature.py's float32
+  central difference; the noise comes from the sequences' own estimates (each virtual GPU group's summed parts). A
+  CPU test checks the hooked optimizer reproduces BatchedAnvil to the bit when the shaper changes nothing.
 - **Cost on one H100:** about 1.6 s per Boost update and 16 s per Cut update (8 times the published per-GPU times),
-  and about 8 minutes for the end merge. A 1M-slice run takes about 35 minutes; the full 10M epoch about 4.6 hours.
+  and about 8 minutes for the end merge (less with `merge_batch`). A 1M-slice run takes about 35 minutes; the full
+  10M epoch about 4.6 hours. E11 adds about a tenth to a Cut update (its probes are 1.4% of the chain's, but each
+  runway pass rebuilds the own-query context); E8 about 30 s per curvature refresh, two in a 1M-slice run.
 
 **E5's diagnostic** (`credit_recovery`, on a checkpoint, one held-out sequence). Each token's raw embedding takes a
 full cycle of 512 probes (signed Hadamard rows times PR #40's step, 0.01 of the token's RMS), run forward as PR #40's

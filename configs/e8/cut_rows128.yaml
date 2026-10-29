@@ -1,0 +1,19 @@
+# E8's real test on the Cut chain (1M slice), its baseline: E7's partial cycle at 128 rows per token per site (windows
+# tiled across tokens, around the identity-path guess) with ANVIL II unchanged. cut_rows128_damped adds E8's damping.
+# Success: the damped run recovers most of the loss this partial cycle gives up against the full chain (e6.cut_k1).
+experiment: e8
+variant: cut_rows128
+task: cut
+seeds: [0, 1, 2]
+priority: 65
+gpu: H100  # wall-clocks compared across experiments (E7 against e6.cut_k1)
+after: [verify.score_record.s0, verify.cut_prefix.s0, verify.cut_prefix_match.s0, verify.cut_variants_smoke.s0]
+args:
+  merge_batch: true  # the merge scores each candidate in one batch: bf16 rounding of close calls only
+  sequences: 1M
+  heldout: 32
+  batch: 4
+  rows: 128
+  rows_tiled: true
+  heldout_every: 10
+  checkpoints: true
