@@ -241,8 +241,13 @@ def test_plots_read_only_the_run_files(tmp_path, monkeypatch):
         (tmp_path / 'runs' / 'e3' / 'avg10' / f's{seed}' / 'population.jsonl').write_text(''.join(
             json.dumps(dict(round=r, step=242 + 4 * r, barriers={'0-1': 0.01 * r, '0-2': -0.01})) + '\n'
             for r in (10, 20)))
-    for experiment in ('e2', 'e3', 'e4', 'e8'):
+    for seed in (0, 1):
+        fake_run(tmp_path, 'e1', 'bp_b4', seed, 3.70)
+        fake_run(tmp_path, 'e1', 'h8_cut', seed, 3.80)
+        fake_run(tmp_path, 'e14', 'lambda_1', seed, 3.75)
+    for experiment in ('e2', 'e3', 'e4', 'e8', 'e14'):
         plots.plot(experiment)
+    assert '| lambda_1 | 2 | 3.7500 | +0.50 |' in (tmp_path / 'plots' / 'e14' / 'gap.md').read_text()
     made = {p.relative_to(tmp_path / 'plots').as_posix() for p in (tmp_path / 'plots').rglob('*.*')}
     assert {'e4/step_control.png', 'e3/barriers.png', 'e2/gap.md', 'e8/damping.md', 'e2/final.png'} <= made
     assert '| baseline e1.bp_b8 | 2 | 3.7100 |' in (tmp_path / 'plots' / 'e2' / 'gap.md').read_text()

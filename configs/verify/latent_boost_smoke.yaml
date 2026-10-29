@@ -1,0 +1,15 @@
+# A complete short H8 run on the 1M range (E15's latent target beside Boost's readouts) before E15's cells: the GPU
+# paths the CPU checks cannot reach and the step time behind the cost estimate.
+experiment: verify
+variant: latent_boost_smoke
+task: h8
+seeds: [0]
+priority: 3
+after: [verify.smoke.s0]
+args:
+  sequences: 1M
+  heldout: 32
+  batch: 4
+  mode: cut
+  latent_boost: plus
+notes: Pipeline check only; its numbers are not a result.

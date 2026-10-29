@@ -1,0 +1,18 @@
+# E14's 2 x 2 of target x onset (plan v2), at the best lambda of configs/e14/: set nextlat here to that lambda, then
+# submit this directory (configs/followups/ is skipped by directory submissions). This cell: the live target from the
+# first update. The fourth cell (EMA target, onset at the handoff) is the sweep's own best.
+experiment: e14
+variant: live_start
+task: h8
+seeds: [0, 1, 2]
+priority: 65
+after: [verify.score_record.s0, verify.nextlat_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  mode: cut
+  heldout_every: 100
+  nextlat: 1.0  # the sweep's best lambda
+  nextlat_target: live
+  nextlat_onset: start

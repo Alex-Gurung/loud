@@ -281,6 +281,26 @@ def e8_table(out):
     return text
 
 
+def gap_table(experiment, out, low=('e1', 'bp_b4'), high=('e1', 'h8_cut')):
+    """E14 (and E15): each variant's final validation loss and the fraction of the gap between H8's cut-mode
+    Boost -> Cut (e1.h8_cut) and backprop at batch 4 (e1.bp_b4) it closes, means over seeds."""
+    means = {}
+    for name, (source, variant) in (('low', low), ('high', high)):
+        found = counted(source).get(variant)
+        means[name] = statistics.fmean(r['val_loss'] for r in found) if found else None
+    rows = []
+    for v, runs_ in sorted(counted(experiment).items()):
+        val = statistics.fmean(r['val_loss'] for r in runs_)
+        closed = ('-' if None in means.values() or means['high'] == means['low']
+                  else f'{(means["high"] - val) / (means["high"] - means["low"]):+.2f}')
+        rows.append([v, len(runs_), f'{val:.4f}', closed])
+    if not rows:
+        return None
+    text = markdown(['variant', 'n', 'val', f'gap closed ({high[0]}.{high[1]} -> {low[0]}.{low[1]})'], rows)
+    (out / 'gap.md').write_text(text)
+    return text
+
+
 def e12_table(out, target=3.5):
     """E12: per variant, the final validation loss (the records' after their end merge), the plain weights' where a
     record kept them, and when the untimed validation curve first reached the speedrun target (linear between the
@@ -417,10 +437,12 @@ def e8_plot(plt, out):
 
 EXTRA = {'e3': [e3_plot], 'e4': [e4_plots], 'e6': [drift_plot], 'e12': [val_time_plot]}
 TABLES = {'e2': e2_table, 'e5': e5_table, 'e6': partial(time_table, 'e6'), 'e7': e7_tables, 'e8': e8_table,
-          'e11': partial(time_table, 'e11', baseline=('e6', 'cut_k1')), 'e12': e12_table}
+          'e11': partial(time_table, 'e11', baseline=('e6', 'cut_k1')), 'e12': e12_table,
+          'e14': partial(gap_table, 'e14'), 'e15': partial(gap_table, 'e15')}
 # The plan's reference cell for experiments whose baseline lives in E1.
 BASELINES = {'e2': ('e1', 'bp_b8'), 'e4': ('e1', 'bp_b8'), 'e10': ('e1', 'bp_b8'), 'e3': ('e1', 'bp_b4'),
-             'e8': ('e1', 'bp_b4'), 'e9': ('e1', 'bp_b4'), 'e7': ('e6', 'cut_k1'), 'e11': ('e6', 'cut_k1')}
+             'e8': ('e1', 'bp_b4'), 'e9': ('e1', 'bp_b4'), 'e7': ('e6', 'cut_k1'), 'e11': ('e6', 'cut_k1'),
+             'e14': ('e1', 'h8_cut'), 'e15': ('e1', 'h8_cut')}
 FIGURES = {'e8': e8_plot}
 
 

@@ -1,0 +1,17 @@
+# A complete short H8 run on the 1M range (E14's NextLat loss with the EMA target, from the first update so Boost's
+# path runs too) before E14's cells: the GPU paths the CPU checks cannot reach and the step time behind the cost
+# estimate.
+experiment: verify
+variant: nextlat_smoke
+task: h8
+seeds: [0]
+priority: 3
+after: [verify.smoke.s0]
+args:
+  sequences: 1M
+  heldout: 32
+  batch: 4
+  mode: cut
+  nextlat: 1.0
+  nextlat_onset: start
+notes: Pipeline check only; its numbers are not a result.

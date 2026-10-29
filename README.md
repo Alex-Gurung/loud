@@ -411,6 +411,18 @@ train and held-out curves. Added where the plan names a series: E2's train/val g
 acceptance rate per 50 updates and effective rate against the hand schedule, E6's drift cosine, E8's damping, E12's
 validation loss over time with the 3.5 line and time to 3.5; E5 and E7 diagnostic tables, E8's h²/c per matrix type.
 
+**E14 and E15 in H8** (task `h8`, cut mode; `loud/latent.py`, `loud/ema.py`). E14 (`nextlat`): NextLat's latent
+consistency, following its code (JaydenTeoh/NextLat at 3770be6) with v2's one-hidden-layer dynamics model: the
+final-norm latent and the next token's raw embedding predict the next latent, smooth-L1 against the EMA teacher's
+latent or the live one (`nextlat_target`), masked where the next token opens a document (`<|endoftext|>`, id 0), from
+the handoff or the first update (`nextlat_onset`). It trains the trunk and wte, never the head. Logged: its gradient's
+cosine to the next-token gradient at the top stream every 50 updates, and the effective ranks of the top latents and
+site credits at 20% and 100%; `python3 -m loud.plots e14` gives the fraction of the e1.h8_cut to e1.bp_b4 gap closed.
+E15 (`latent_boost`): during Boost, per-sublayer predictors to the teacher's latent (1 - cosine) beside the logit-lens
+readouts (`plus`) or instead of them (`only`; the head then learns from the final readout alone); logged: per-sublayer
+readout and latent losses, and the cut gradient's cosine to backprop's at the handoff. The EMA teacher's decay rises
+linearly from 0.996 to 0.9995 (ProteinJEPA's end points; it does not publish the curve), in float32.
+
 ## Review
 
 Every piece and every result goes to two independent reviewers: Codex (run as an unprivileged user on a frozen copy)

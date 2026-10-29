@@ -18,7 +18,13 @@ Modes of the Cut phase (option mode):
              from resid_lambdas[i+1] times the credit at S(i+2) (block 7's from the top-stream credit); wte from S0;
              the head and the mixing scalars from the cut graph. With the identity scheme this is PR #40's core estimate.
 The Boost phase (the first 20% of updates as PR #40 schedules it; boost: false starts Cut at update 1) is
-boost_gradients: PR #40's Boost, each sublayer against the shared head's readout of the stream right after it.
+boost_loss: PR #40's Boost, each sublayer against the shared head's readout of the stream right after it.
+
+Latent objectives (loud/latent.py; cut mode, one per run): E14's NextLat loss joins the active phase's loss from its
+onset (the handoff, or the first update), trained into the cut graph (or, during Boost, the Boost graph) and into its
+dynamics model; E15's sublayer predictors join or replace Boost's readouts. Their targets come from H4's EMA teacher
+(loud/ema.py), updated after every step; the dynamics model and predictors have their own Adam at the record's base
+Adam rate, betas and schedule. Neither enters final.pt.
 
 H8 has neither the record's cross-token patches (value path, input-key and gate probes, path scalars, future-token
 probes) nor its top-512 MLP routes (it uses every unit), so H8 and backprop bracket the cross-token credit.
@@ -29,12 +35,16 @@ import sys
 import torch
 import torch.nn.functional as F
 
-from . import refs
+from . import latent, refs
+from .ema import EMAWeights
 from .options import h8_options
 from .train import current_rates, rate_labels, train
 
 SOFTCAP = 15
 SCHEME_SEED = 7907   # the probing scheme's signs: the job seed plus this
+PROBE_ROWS = 4       # held-out sequences E14's and E15's untimed logs measure
+AUX_LOG_EVERY = 50   # E14's cosine of its gradient to the next-token one at the top stream, every this many updates
+LATENT_LOG_EVERY = 10  # E15's per-sublayer readout and latent losses, every this many Boost updates
 
 
 def um():
@@ -73,8 +83,9 @@ def attention(attn, x, ve, cos_sin, window, held, freeze_queries=False):
 
 
 def cut_forward(model, idx, targets, held=True, freeze_queries=False):
-    """GPT.forward on the cut graph (held=False: the model's own forward). Returns the token losses [B, T], the nine
-    sites, the top stream and each block's attention and MLP outputs (what synthesis mode differentiates)."""
+    """GPT.forward on the cut graph (held=False: the model's own forward). Returns the token losses [B, T] (None
+    without targets), the nine sites, the top stream and each block's attention and MLP outputs (what synthesis mode
+    differentiates)."""
     m = um()
     cos_sin = (model.cos[:, :idx.shape[1]], model.sin[:, :idx.shape[1]])
     e = model.transformer.wte(idx)
@@ -90,7 +101,7 @@ def cut_forward(model, idx, targets, held=True, freeze_queries=False):
         f = block.mlp(m.norm(x))
         x = x + f
         mlp_out.append(f)
-    return token_losses(model, x, targets), sites, x, attn_out, mlp_out
+    return None if targets is None else token_losses(model, x, targets), sites, x, attn_out, mlp_out
 
 
 def own_path_attention(attn, x, cos_sin, window):
@@ -111,34 +122,53 @@ def own_path_attention(attn, x, cos_sin, window):
     return attn.c_proj(out.transpose(1, 2).contiguous().view(B, T, -1))
 
 
-def boost_loss(model, idx, targets):
+def boost_loss(model, idx, targets, side=None, keep=None):
     """PR #40's Boost as one loss to differentiate: each sublayer trained by the shared head's readout of the stream
     right after it, its input detached (attention left whole: Boost's internals measure it exactly); the head by the
     readouts after every sublayer of blocks 0..L-2 and the final one (Boost.estimate; not block L-1's attention
     readout); the mixing scalars by their block's attention readout with the block's inputs held (stage_losses); the
     embedding by block 0's attention readout along each token's own path (embedding_block0). Returns (loss, the
-    model's own token losses)."""
+    model's own token losses).
+    side (E15, loud.latent.LatentTargets): every sublayer's stream but the last's also, or instead of its readout
+    (side.lens), predicts the teacher's latent. keep: a dict that receives the top stream and the raw embedding (E14)."""
     m = um()
     L, head = model.config.n_layer, model.lm_head.weight
+    count = (targets != -1).sum()
     cos_sin = (model.cos[:, :idx.shape[1]], model.sin[:, :idx.shape[1]])
     e = model.transformer.wte(idx)
     x0 = m.norm(e)
-    readout = lambda stream, live: token_losses(model, stream, targets, None if live else head.detach()).sum()
+
+    def sublayer(k, stream, live, own=False):
+        """Sublayer k's terms on its stream (k = 2i: block i's attention, 2i + 1: its MLP); own: the embedding's path."""
+        if side is not None and not side.lens:
+            if side.logging and not own:
+                with torch.no_grad():
+                    side.note(k, token_losses(model, stream, targets).sum(), count)
+            return side(k, stream, own)
+        readout = token_losses(model, stream, targets, None if live else head.detach()).sum()
+        if side is None:
+            return readout
+        if not own:
+            side.note(k, readout, count)
+        return readout + side(k, stream, own)
+
     total, x = 0.0, x0
     for i, block in enumerate(model.transformer.h):
         xin = model.resid_lambdas[i] * x.detach() + model.x0_lambdas[i] * x0.detach()
         ve = model.value_embeds[str(i)](idx) if str(i) in model.value_embeds else None
         mid = xin + attention(block.attn, m.norm(xin), ve, cos_sin, model.window_sizes[i], held=False)
-        total = total + readout(mid, i < L - 1)
+        total = total + sublayer(2 * i, mid, i < L - 1)
         x = mid.detach() + block.mlp(m.norm(mid.detach()))
         final = token_losses(model, x, targets) if i == L - 1 else None
-        total = total + (final.sum() if i == L - 1 else readout(x, True))
+        total = total + (final.sum() if i == L - 1 else sublayer(2 * i + 1, x, True))
     attn0, mix = model.transformer.h[0].attn, (model.resid_lambdas[0] + model.x0_lambdas[0]).detach()
     with frozen(attn0):
         xin0 = mix * m.norm(e)
         mid0 = xin0 + own_path_attention(attn0, m.norm(xin0), cos_sin, model.window_sizes[0])
-    total = total + readout(mid0, False)
-    return total / (targets != -1).sum(), final
+    total = total + sublayer(0, mid0, False, own=True)
+    if keep is not None:
+        keep.update(top=x, embedding=e)
+    return total / count, final
 
 
 class Replay:
@@ -365,6 +395,7 @@ class H8:
         from .cut import record_settings
         m = self.m = refs.trainer_module('pr40')
         self.o, self.device, self.seed, self.steps = o, device, seed, steps
+        self.probe = heldout[:PROBE_ROWS].to(device) if len(heldout) else None  # E14/E15's untimed logs
         self.settings = s = record_settings(m, o['preset'], o['batch'])
         if not o['boost']:
             s.switch = 0.0  # Cut from the first update
@@ -380,6 +411,21 @@ class H8:
         self.optimizer = m.make_optimizer(self.model, s, self.horizons[self.phase])
         self.labels = rate_labels(self.optimizer, s.lr)
         self.scheme = Scheme(self.o, s.model.n_embd, self.device, self.seed)
+        self.reset_latent()
+
+    def reset_latent(self):
+        """E14's dynamics model, E15's predictors, the EMA teacher either reads (H4), and one Adam for the two at the
+        record's base Adam rate and betas, following its schedule."""
+        o, s, width = self.o, self.settings, self.settings.model.n_embd
+        self.dynamics = latent.Dynamics(width).to(self.device) if o['nextlat'] else None
+        self.targets = (latent.LatentTargets(s.model.n_layer, width, o['latent_boost'] == 'plus', o['latent_lambda'])
+                        .to(self.device) if o['latent_boost'] != 'none' else None)
+        modules = [mod for mod in (self.dynamics, self.targets) if mod is not None]
+        self.aux_params = [p for mod in modules for p in mod.parameters()]
+        self.aux_optimizer = (torch.optim.Adam(self.aux_params, lr=s.lr, betas=s.betas, eps=1e-8)
+                              if self.aux_params else None)
+        teacher = (o['nextlat'] and o['nextlat_target'] == 'ema') or self.targets is not None
+        self.teacher = EMAWeights(self.model, self.steps) if teacher else None
 
     def warmup(self, batch):
         """Every phase's code path once on random tokens, from fresh models (loud/train.py then resets)."""
@@ -404,29 +450,101 @@ class H8:
         fields = dict(current_rates(self.optimizer, self.labels), phase=phase)
         x, y = batch[:, :-1].contiguous(), batch[:, 1:].contiguous()
         compare = bool(o['compare_every']) and step % o['compare_every'] == 0
+        nextlat = bool(o['nextlat']) and (o['nextlat_onset'] == 'start' or phase == 'cut')  # E14 acts this update
+        side = self.targets if phase == 'boost' else None                                 # E15 acts this update
+        aux_params = self.aux_params if nextlat or side is not None else []
         with torch.autocast(self.device.type, dtype=torch.bfloat16):
+            teacher = None
+            if self.teacher is not None and ((nextlat and o['nextlat_target'] == 'ema') or side is not None):
+                with torch.no_grad():
+                    teacher = um().norm(cut_forward(self.teacher.model, x, None, held=False)[2])
+            if side is not None:
+                side.target, side.logging, side.seen = teacher, step % LATENT_LOG_EVERY == 0, {}
             if phase == 'boost':
-                loss, losses = boost_loss(self.model, x, y)
-                grads = dict(zip(map(id, self.params), torch.autograd.grad(loss, self.params, allow_unused=True)))
+                keep = {}
+                loss, losses = boost_loss(self.model, x, y, side, keep)
+                top, embedding = keep['top'], keep['embedding']
             elif o['mode'] == 'cut':
-                losses = cut_forward(self.model, x, y, True, o['freeze_queries'])[0]
-                loss = losses.sum() / (y != -1).sum()
-                grads = dict(zip(map(id, self.params), torch.autograd.grad(loss, self.params, allow_unused=True)))
+                losses, sites, top, _, _ = cut_forward(self.model, x, y, True, o['freeze_queries'])
+                loss, embedding = losses.sum() / (y != -1).sum(), sites[0]
             else:
                 grads, losses, extra = synthesis_gradients(self.model, x, y, self.scheme, step, o['freeze_queries'],
                                                            compare)
                 fields.update(extra)
-        for p in self.params:
+            if phase == 'boost' or o['mode'] == 'cut':
+                if nextlat:
+                    h = um().norm(top)
+                    aux = o['nextlat'] * latent.nextlat_loss(self.dynamics, h, embedding, x,
+                                                             h.detach() if teacher is None else teacher)
+                    if step % AUX_LOG_EVERY == 0:
+                        fields['nextlat'] = dict(loss=aux.item() / o['nextlat'], top_cosine=gradient_cosine(
+                            loss, aux, top))
+                    loss = loss + aux
+                found = torch.autograd.grad(loss, self.params + aux_params, allow_unused=True)
+                grads = dict(zip(map(id, self.params + aux_params), found))
+        if side is not None and side.logging:
+            fields['latent_boost'] = {k: {name: round(v.item(), 5) for name, v in kinds.items()}
+                                      for k, kinds in sorted(side.seen.items())}
+        for p in self.params + aux_params:
             g = grads.get(id(p))
             p.grad = torch.zeros_like(p) if g is None else g.to(p.dtype)
         if o['rank_every'] and step % o['rank_every'] == 0:
             fields['stable_rank'] = stable_ranks(self.model, self.optimizer)
         self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
+        if aux_params:  # only while its modules act: Adam's momentum would move them on zero gradients
+            group = self.optimizer.param_groups[0]
+            for aux_group in self.aux_optimizer.param_groups:  # the record's schedule on the base rate
+                aux_group['lr'] = self.settings.lr * group['lr'] / group['initial_lr']
+            self.aux_optimizer.step()
+            self.aux_optimizer.zero_grad(set_to_none=True)
+        if self.teacher is not None and (o['nextlat'] or phase == 'boost'):  # while anything still reads it
+            self.teacher.update(step)
         return losses.detach().float()[y != -1].mean(), fields
 
     def diagnose(self, step):
-        return {}
+        """Untimed, on PROBE_ROWS held-out sequences: E14's effective ranks of the top-layer latents and the site
+        credits at 20% and at the end; E15's cosine of the cut graph's gradient to the full one at the handoff."""
+        record = {}
+        if self.probe is None:
+            return record
+        x, y = self.probe[:, :-1].contiguous(), self.probe[:, 1:].contiguous()
+        if self.o['nextlat'] and step in (round(0.2 * self.steps), self.steps):
+            record['effective_rank'] = effective_ranks(self.model, x, y, self.device)
+        handoff = next((i for i, b in enumerate(self.schedule, 1) if b[0] == 'cut'), None)
+        if self.targets is not None and handoff is not None and step == handoff - 1:
+            record['handoff_cut_cosine'] = cut_cosine(self.model, x, y, self.device)
+        return record
+
+
+def gradient_cosine(a, b, at):
+    """The cosine of two losses' gradients at a tensor of their graph (E14: the next-token and the latent loss at the
+    top stream)."""
+    ga, gb = (torch.autograd.grad(loss, at, retain_graph=True)[0].float().flatten() for loss in (a, b))
+    return round((ga @ gb / (ga.norm() * gb.norm()).clamp_min(1e-30)).item(), 5)
+
+
+def effective_ranks(model, x, y, device):
+    """E14's log: the effective rank of the top-layer latents [B * T, W] and of each site's credits."""
+    with torch.autocast(device.type, dtype=torch.bfloat16):
+        losses, sites, top, _, _ = cut_forward(model, x, y)
+        credits = torch.autograd.grad(losses.sum(), sites)
+    ranks = dict(top=latent.effective_rank(um().norm(top.detach()).flatten(0, 1)))
+    ranks.update({f'S{k}': latent.effective_rank(c.flatten(0, 1)) for k, c in enumerate(credits)})
+    return {k: round(v, 2) for k, v in ranks.items()}
+
+
+def cut_cosine(model, x, y, device):
+    """E15's log: the cosine of the cut graph's weight gradient to the full graph's (backprop's) on the same rows."""
+    params = [p for p in model.parameters() if p.requires_grad]
+    flat = []
+    for held in (True, False):
+        with torch.autocast(device.type, dtype=torch.bfloat16):
+            losses = cut_forward(model, x, y, held)[0]
+            grads = torch.autograd.grad(losses.sum(), params, allow_unused=True)
+        flat.append(torch.cat([(torch.zeros_like(p) if g is None else g).float().flatten()
+                               for p, g in zip(params, grads)]))
+    return round((flat[0] @ flat[1] / (flat[0].norm() * flat[1].norm()).clamp_min(1e-30)).item(), 5)
 
 
 @torch.no_grad()

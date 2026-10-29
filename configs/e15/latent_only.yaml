@@ -1,0 +1,20 @@
+# E15 (plan v2): is Boost's logit-lens objective a crutch? During Boost (the first 20% of updates), a predictor per
+# sublayer (512 -> 1024 -> 512, GELU, discarded at the end) maps the stream after the sublayer (not the last) to the
+# EMA teacher's final latent for the same token, loss 1 - cosine (loud/latent.py); then H8 cut mode, as E1's
+# e1.h8_cut, arm (a). Arm (d), no Boost, is e1.h8_cut_noboost. This arm (c): the latent target alone; the sublayers'
+# logit-lens readouts are gone, so during Boost the head learns only from the final readout (the model's own next-
+# token loss), which also trains the last MLP. Success: this arm beats e1.h8_cut by 0.02, or raises the handoff's cut-
+# gradient cosine (handoff_cut_cosine) at equal final loss.
+experiment: e15
+variant: latent_only
+task: h8
+seeds: [0, 1, 2]
+priority: 65
+after: [verify.score_record.s0, verify.latent_boost_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  mode: cut
+  heldout_every: 100
+  latent_boost: only
