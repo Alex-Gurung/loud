@@ -315,7 +315,7 @@
       box.append(lb.el('span', 'lb-prog-t', `${lb.int(e.done)} of ${lb.int(e.jobs)} done`));
       const bar = lb.el('div', 'lb-bar');
       for (const [g, n] of [['done', e.done], ['running', e.running], ['queued', e.ready + e.waiting],
-                            ['problem', e.blocked + e.failed], ['idle', e.not_submitted + e.follow_up + e.cancelled]]) {
+                            ['problem', e.blocked + e.failed], ['idle', e.not_submitted + e.follow_up + e.cancelled + (e.skipped || 0)]]) {
         if (!n) continue;
         const seg = document.createElement('i');
         seg.style.width = `${(100 * n) / Math.max(1, e.jobs)}%`;

@@ -514,6 +514,19 @@ def noop_options(args):
     return args
 
 
+def jobs_read(task, args):
+    """[(job id, the dependency lists that may name it)] for each job whose files the task's args read, so it must be
+    done first: a diagnostic's checkpoint run must pass its check (`after`), a comparison runs whether or not its runs
+    passed theirs (`after_done`: it explains a failed check), and a gate reads finished diagnostics either way."""
+    if task == 'diagnose' and ':' in args['checkpoint']:
+        return [(args['checkpoint'].split(':', 1)[0], ('after',))]
+    if task == 'compare':
+        return [(side, ('after_done',)) for side in (args['a'], args['b']) if isinstance(side, str)]
+    if task == 'gate':
+        return [(value[0], ('after', 'after_done')) for value in args['values'].values()]
+    return []
+
+
 VALIDATE = {'proxy': proxy_options, 'identity': identity_options, 'h8': h8_options, 'population': population_options,
             'cut': cut_options, 'score': score_options,
             'reference': reference_options, 'compare': compare_options, 'diagnose': diagnose_options,

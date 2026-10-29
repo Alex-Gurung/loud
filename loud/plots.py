@@ -1,7 +1,7 @@
 """Plots per experiment, read from the run files only (metrics.jsonl, heldout.jsonl, result.json, a diagnostic's JSON).
 
-    python3 -m loud.plots e1            # artifacts/plots/e1/*.png (and *.md tables)
-    python3 -m loud.plots all
+    /opt/loud-cpu-venv/bin/python -m loud.plots e1   # artifacts/plots/e1/*.png (and *.md tables); needs matplotlib
+    /opt/loud-cpu-venv/bin/python -m loud.plots all
 
 Every training experiment gets final.png (each variant's final validation loss: a dot per seed, the mean +- sd) and
 curves.png (train loss and held-out loss against sequences seen, the mean over seeds), from the runs the results
@@ -16,7 +16,7 @@ import statistics
 
 from .collect import counts, own_score, runs
 from .common import read_json, read_jsonl
-from .paths import ARTIFACTS, RUNS
+from .paths import ARTIFACTS, REPO, RUNS
 
 FULL_CYCLE = ('e1', 'h8_synth')  # E6's and E7's reference: H8 synthesis with all 512 rows (K = 1)
 SLOTS = ('#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948')
@@ -604,14 +604,29 @@ def plot(experiment):
     print(f'{experiment}: {", ".join(made) if made else "nothing to plot yet"} -> {out}')
 
 
+def known(found):
+    """The experiments with configs (follow-ups included), runs or a table, in the plan's order."""
+    configs = REPO / 'configs'
+    named = {p.name for d in (configs, configs / 'followups') if d.exists() for p in d.iterdir() if p.is_dir()}
+    first = ('verify', 'h6')
+    order = lambda e: (0, first.index(e)) if e in first else (1, int(e[1:])) if e[1:].isdigit() else (2, e)
+    return sorted((named - {'followups'}) | found | set(TABLES) | set(FIGURES), key=order)
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('experiment', help="e1 ... e12, or 'all'")
-    args = parser.parse_args()
     found = {p.name for p in RUNS.iterdir()} if RUNS.exists() else set()
+    names = known(found)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('experiment', choices=[*names, 'all'], metavar='experiment',
+                        help=f"one of {', '.join(names)}, or 'all' (those with runs or a table)")
+    args = parser.parse_args()
     experiments = sorted(found | set(TABLES) | set(FIGURES)) if args.experiment == 'all' else [args.experiment]
-    for experiment in experiments:
-        plot(experiment)
+    try:
+        for experiment in experiments:
+            plot(experiment)
+    except ModuleNotFoundError as exc:  # plain python3 on the CPU pod has no matplotlib
+        raise SystemExit(f'{exc}: plots need matplotlib; run /opt/loud-cpu-venv/bin/python -m loud.plots '
+                         f'(scripts/cpu_env.sh builds it)')
 
 
 if __name__ == '__main__':

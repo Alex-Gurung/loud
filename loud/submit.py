@@ -4,14 +4,18 @@
     python3 -m loud.submit configs/e1/bp_b8.yaml --seeds 0
     python3 -m loud.submit configs/e1 --dry-run           # what each job would do, checked against the queue
     python3 -m loud.submit configs/e1/bp_b8.yaml --rerun  # supersede finished runs (their directories are kept)
-    python3 -m loud.submit --cancel e1.bp_b8.s2           # cancel a queued job
+    python3 -m loud.submit --cancel e1.bp_b8.s2 'e13.theta*'   # cancel queued jobs, by id or glob pattern
 
 The code is frozen once per submission (artifacts/code/<digest>, from the checkout this module sits in). Resubmitting
 an unchanged config updates a job that has not started (newer code, priority, `after`, `gpu`); finished and cancelled
 jobs never change without --rerun; a failed job is queued again. Nothing is written unless every job can be submitted.
 """
 import argparse
+from collections import Counter
+import fnmatch
 from pathlib import Path
+
+import yaml
 
 from .jobqueue import STATES, JobQueue, job_id
 from .paths import QUEUE, SOURCE, run_dir
@@ -75,6 +79,42 @@ def check_dependencies(jobs, queue):
                 stack.extend(after.get(dep, []))
 
 
+def described(queue, jid, action):
+    """The action, with the reason when the submission leaves the job as it is."""
+    if action != 'unchanged':
+        return action
+    state, _ = queue.find(jid)
+    return f'unchanged ({state}; resubmit with --rerun)' if state in ('cancelled', 'done') else f'unchanged ({state})'
+
+
+def summary(actions):
+    return f'{len(actions)} jobs: ' + ', '.join(f'{n} {a}' for a, n in sorted(Counter(actions).items()))
+
+
+def cancel(queue, names, dry_run):
+    """Cancel the queued jobs that each id or glob pattern (on job ids) names; False if one of them named none."""
+    queued, seen, ok = sorted(j['id'] for j in queue.jobs('queued')), set(), True
+    for name in names:
+        matched = [jid for jid in queued if fnmatch.fnmatchcase(jid, name)]
+        if not matched:
+            ok, state = False, queue.find(name)[0]
+            why = ('no queued job matches' if set(name) & set('*?[') else
+                   f'{state}; only queued jobs can be cancelled' if state else 'not in the queue')
+            print(f'{name}: {why}')
+        for jid in (j for j in matched if j not in seen):
+            seen.add(jid)
+            if dry_run:
+                print(f'would cancel {jid}')
+                continue
+            try:
+                queue.cancel(jid)
+                print(f'cancelled {jid}')
+            except ValueError as exc:  # claimed since the listing
+                ok = False
+                print(exc)
+    return ok
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('configs', nargs='*')
@@ -82,36 +122,51 @@ def main():
     parser.add_argument('--priority', type=int, help='Override each config\'s priority (lower runs first).')
     parser.add_argument('--rerun', action='store_true')
     parser.add_argument('--dry-run', action='store_true')
-    parser.add_argument('--cancel', nargs='+', metavar='JOB', help='Cancel these queued jobs.')
+    parser.add_argument('--cancel', nargs='+', metavar='JOB',
+                        help="Cancel these queued jobs: ids or quoted glob patterns ('e13.theta*').")
     parser.add_argument('--queue', type=Path, default=QUEUE)
     args = parser.parse_args()
     queue = JobQueue(args.queue, create=not args.dry_run)
+    if args.dry_run and not queue.root.exists():
+        print(f'note: {queue.root} does not exist yet; read as an empty queue')
     if args.cancel:
-        for jid in args.cancel:
-            queue.cancel(jid)
-            print(f'cancelled {jid}')
+        if not cancel(queue, args.cancel, args.dry_run):
+            raise SystemExit(1)
         return
     if not args.configs:
         parser.error('give configs to submit, or --cancel')
     seeds = None if args.seeds is None else [int(s) for s in args.seeds.split(',')]
-    jobs = plan(args.configs, seeds, args.priority)
+    try:
+        jobs = plan(args.configs, seeds, args.priority)
+    except (OSError, ValueError, yaml.YAMLError) as exc:  # each names its config file
+        raise SystemExit(' '.join(str(exc).split()))
     check_dependencies(jobs, queue)
+    actions = []
     if args.dry_run:  # decided against the queue without freezing code, so newer code alone is not shown
         for job in jobs:
             try:
                 action = queue.submit(dict(job, code_dir=None, code_digest=None), args.rerun, dry_run=True)
             except ValueError as exc:
                 action = f'CONFLICT: {exc}'
-            print(f'{job["id"]:36s} priority {job["priority"]:<4} after {",".join(job["after"]) or "-":40s} {action}')
+            shown = described(queue, job['id'], action)
+            actions.append(shown.split(':')[0])
+            deps = ''.join(f'  {key} {",".join(job[key])}' for key in ('after', 'after_done') if job[key])
+            print(f'{job["id"]:40s} priority {job["priority"]:<4} {shown}{deps}')
+        print(summary(actions))
         return
     for job in jobs:  # every conflict is raised before anything is written
-        queue.submit(dict(job, code_dir=None, code_digest=None), args.rerun, dry_run=True)
+        try:
+            queue.submit(dict(job, code_dir=None, code_digest=None), args.rerun, dry_run=True)
+        except ValueError as exc:
+            raise SystemExit(f'{exc} (nothing was submitted)')
     code = snapshot()
     manifest = verify(code)
     for job in jobs:
         job.update(code_dir=str(code), code_digest=manifest['digest'], git=manifest.get('git'))
-        print(f'{queue.submit(job, rerun=args.rerun):9s} {job["id"]}')
+        actions.append(described(queue, job['id'], queue.submit(job, rerun=args.rerun)))
+        print(f'{job["id"]:40s} {actions[-1]}')
     print(f'code {code} (from {SOURCE}, git {manifest["git"]})')
+    print(summary(actions))
 
 
 if __name__ == '__main__':

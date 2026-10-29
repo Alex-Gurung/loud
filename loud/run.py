@@ -10,7 +10,7 @@ Config layout (YAML):
     experiment: e1              # results-table grouping
     variant: bp_b8              # one change per variant
     task: proxy                 # see loud/options.py
-    seeds: [0, 1, 2]            # or seed: 0 (the default when neither is given)
+    seeds: [0, 1, 2]            # or seed: 0 (the default when neither is given: seed 0 only)
     priority: 50                # lower runs first (default 100)
     after: [verify.bp_b8.s0]    # job ids that must be done (and pass their check) first; '{seed}' is substituted
     after_done: [...]           # job ids that must be done, passed or not (a comparison that explains a failed gate)
@@ -27,7 +27,7 @@ from pathlib import Path
 
 from .common import digest, load_config, read_json
 from .jobqueue import JobQueue, free_name, job_id
-from .options import TASKS, VALIDATE, check_expect
+from .options import TASKS, VALIDATE, check_expect, jobs_read
 from .paths import QUEUE, REPO, run_dir as default_run_dir
 
 KEYS = {'experiment', 'variant', 'task', 'seed', 'seeds', 'priority', 'after', 'after_done', 'gpu', 'args', 'expect',
@@ -36,9 +36,8 @@ KEYS = {'experiment', 'variant', 'task', 'seed', 'seeds', 'priority', 'after', '
 
 def specs_from_config(path, seeds=None):
     """[(spec, meta)] for each seed: spec is what the task runs (and what the config hash covers), meta schedules it."""
-    config = load_config(path)
     try:
-        return _specs(config, path, seeds)
+        return _specs(load_config(path), path, seeds)
     except (ValueError, TypeError) as exc:
         raise ValueError(f'{path}: {exc}') from None
 
@@ -87,6 +86,9 @@ def _specs(config, path, seeds):
         meta = dict(config_path=rel, notes=config.get('notes'), priority=priority,
                     after=[a.format(seed=seed) for a in after], after_done=[a.format(seed=seed) for a in after_done],
                     gpu=gpu)
+        for jid, lists in jobs_read(task, args):
+            if not any(jid in meta[key] for key in lists):
+                raise ValueError(f'args read {jid}\'s files, so it must be done first: list it in {" or ".join(lists)}')
         out.append((spec, meta))
     return out
 

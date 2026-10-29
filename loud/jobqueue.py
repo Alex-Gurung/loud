@@ -62,6 +62,9 @@ class JobQueue:
 
     @contextmanager
     def locked(self):
+        if not self.root.exists():  # a queue not made yet (a dry run): nothing to guard, and it reads as empty
+            yield
+            return
         with (self.root / 'lock').open('a+') as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             try:
@@ -158,23 +161,40 @@ class JobQueue:
     # ----------------------------------------------------------------------------------------------- dependencies
 
     def finished(self):
-        """(done id -> record, failed or cancelled id -> that state): what dependency_state reads."""
-        return {j['id']: j for j in self.jobs('done')}, {j['id']: s for s in ('failed', 'cancelled') for j in self.jobs(s)}
+        """What dependency_state reads, in one pass: (done id -> record, failed or cancelled id -> that state, queued id
+        -> record, a memo of the queued jobs' states)."""
+        return ({j['id']: j for j in self.jobs('done')},
+                {j['id']: s for s in ('failed', 'cancelled') for j in self.jobs(s)},
+                {j['id']: j for j in self.jobs('queued')}, {})
 
     def dependency_state(self, job, finished=None):
-        """('ready', ''), ('waiting', the first unfinished dependency) or ('blocked', why): a dependency failed, was
-        cancelled or failed its own check. Pass `finished` (from finished()) to save rereading."""
-        done, stopped = finished or self.finished()
-        waiting = None
-        for dep, must_pass in [(d, True) for d in job.get('after') or []] + [(d, False) for d in job.get('after_done') or []]:
+        """('ready', ''), ('waiting', the first unfinished dependency), ('blocked', why) or ('skipped', why).
+        Blocked: a dependency failed, was cancelled or failed its own check, or is queued and blocked itself; `why`
+        names the chain ('a.s0 <- b.s0 failed its check': this job waits on a.s0, which waits on b.s0). Skipped: a
+        `gate` job in `after` failed its check, so the plan skips this job (or a queued dependency is skipped). Pass
+        one `finished` (from finished()) to a run of calls: the queue is read once and each job's state found once."""
+        finished = finished or self.finished()
+        done, stopped, queued, memo = finished
+        deps = [(d, True) for d in job.get('after') or []] + [(d, False) for d in job.get('after_done') or []]
+        first = {}
+        for dep, must_pass in deps:
             if dep in stopped:
-                return 'blocked', f'{dep} {stopped[dep]}'
-            if dep in done:
-                if must_pass and (done[dep].get('result') or {}).get('check') == 'fail':
-                    return 'blocked', f'{dep} failed its check'
-            elif waiting is None:
-                waiting = dep
-        return ('waiting', waiting) if waiting else ('ready', '')
+                found = 'blocked', f'{dep} {stopped[dep]}'
+            elif dep in done:
+                if not must_pass or (done[dep].get('result') or {}).get('check') != 'fail':
+                    continue
+                gate = (done[dep].get('spec') or {}).get('task') == 'gate'
+                found = ('skipped', f'gate {dep} says skip') if gate else ('blocked', f'{dep} failed its check')
+            elif dep in queued:
+                if dep not in memo:
+                    memo[dep] = 'blocked', 'a cycle of dependencies'  # submission rejects cycles; never recurse twice
+                    memo[dep] = self.dependency_state(queued[dep], finished)
+                state, why = memo[dep]
+                found = (state, f'{dep} <- {why}') if state in ('blocked', 'skipped') else ('waiting', dep)
+            else:
+                found = 'waiting', dep  # running (or not in the queue)
+            first.setdefault(found[0], found)
+        return next((first[s] for s in ('skipped', 'blocked', 'waiting') if s in first), ('ready', ''))
 
     # ------------------------------------------------------------------------------------------------ workers
 
@@ -197,7 +217,7 @@ class JobQueue:
                 if now - job.get('heartbeat', 0) > self.lease_seconds:
                     self._requeue(job, 'lease expired', 'no heartbeat for the lease time')
             finished = self.finished()
-            for job in sorted(self.jobs('queued'), key=queue_order):
+            for job in sorted(finished[2].values(), key=queue_order):
                 if self.dependency_state(job, finished)[0] != 'ready':
                     continue
                 if job.get('gpu') and job['gpu'] not in (gpu or ''):

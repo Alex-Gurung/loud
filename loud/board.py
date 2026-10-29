@@ -207,7 +207,7 @@ def build(configs=REPO / 'configs', queue_root=QUEUE, runs_root=RUNS, out=OUT):
         if state == 'queued':
             readiness, why = queue.dependency_state(record, finished)
             state, detail = {'ready': ('ready', ''), 'waiting': ('waiting', f'for {why}'),
-                             'blocked': ('blocked', why)}[readiness]
+                             'blocked': ('blocked', why), 'skipped': ('skipped', why)}[readiness]
         elif state is None:
             state = 'follow-up' if followup else 'not submitted'
         elif state == 'failed':
@@ -259,7 +259,7 @@ def build(configs=REPO / 'configs', queue_root=QUEUE, runs_root=RUNS, out=OUT):
             reference_val=ref['val_mean'] if ref else None, reference_n=ref['counted'] if ref else 0,
             verdict=state, verdict_note=sentence, jobs=sum(n.values()),
             **{k.replace(' ', '_').replace('-', '_'): n.get(k, 0) for k in (
-                'done', 'running', 'ready', 'waiting', 'blocked', 'failed', 'cancelled', 'not submitted',
+                'done', 'running', 'ready', 'waiting', 'blocked', 'skipped', 'failed', 'cancelled', 'not submitted',
                 'follow-up')}))
     for a in arms:
         a.pop('states', None)

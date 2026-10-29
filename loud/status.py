@@ -4,6 +4,7 @@
     python3 -m loud.status --done 50
 """
 import argparse
+from collections import Counter
 from pathlib import Path
 import re
 import shutil
@@ -14,6 +15,7 @@ from .paths import QUEUE, REPO
 from .worker import last_line
 
 RECENT = 24 * 3600  # older worker records and startup failures are not shown
+LISTED = 10  # cancelled jobs named in full
 
 
 def age(seconds):
@@ -28,6 +30,7 @@ def main():
     args = parser.parse_args()
     q = JobQueue(args.queue, create=False)
     now = time.time()
+    print(f'queue: {q.root}' + ('' if q.root.exists() else '  (MISSING: nothing submitted here; check LOUD_QUEUE_DIR)'))
     disk = shutil.disk_usage(REPO)
     print(f'shared disk: {disk.free / 1e9:.1f} GB free of {disk.total / 1e9:.0f} GB (workers pause below '
           f'LOUD_MIN_FREE_GB, default 15)')
@@ -49,7 +52,8 @@ def main():
     for j in running:
         p = j.get('progress') or {}
         beat = now - j.get('heartbeat', now)
-        note = '  LEASE EXPIRED: requeued at the next claim' if beat > LEASE_SECONDS else ''
+        note = '  LEASE EXPIRED: requeued at the next claim (start a worker if none is running)' \
+            if beat > LEASE_SECONDS else ''
         print(f'  {j["id"]:40s} {j.get("worker", ""):44s} attempt {j["attempts"]}  step {p.get("step", "-")}  '
               f'loss {p.get("train_loss", "-")}  heartbeat {age(beat)} ago{note}')
         print(f'  {"":40s} {j.get("attempt_dir", "")}')
@@ -58,12 +62,15 @@ def main():
     done = finished[0]
     failed = {j['id']: j for j in q.jobs('failed')}
     cancelled = sorted(k for k, s in finished[1].items() if s == 'cancelled')
-    queued = sorted(q.jobs('queued'), key=queue_order)
-    print(f'\nqueued ({len(queued)}):')
-    for j in queued:
-        state, why = q.dependency_state(j, finished)
+    queued = sorted(finished[2].values(), key=queue_order)
+    states = [q.dependency_state(j, finished) for j in queued]
+    tally = Counter(state for state, _ in states)
+    tally = ', '.join(f'{tally[s]} {s}' for s in ('ready', 'waiting', 'blocked', 'skipped'))
+    print(f'\nqueued ({len(queued)}: {tally}):')
+    for j, (state, why) in zip(queued, states):
         gpu = f'  needs {j["gpu"]}' if j.get('gpu') else ''
-        print(f'  {j["id"]:40s} priority {j.get("priority", 100):4d}  {state}{": " + why if why else ""}{gpu}')
+        why = f' ({why})' if state == 'skipped' else f': {why}' if why else ''
+        print(f'  {j["id"]:40s} priority {j.get("priority", 100):4d}  {state}{why}{gpu}')
 
     print(f'\nfailed ({len(failed)}):')
     for j in failed.values():
@@ -72,7 +79,8 @@ def main():
         if j.get('attempt_dir'):
             print(f'  {"":40s} log: {j["attempt_dir"]}/stdout.log')
     if cancelled:
-        print(f'\ncancelled ({len(cancelled)}): {", ".join(cancelled)}')
+        more = f', and {len(cancelled) - LISTED} more (ls {q.root / "cancelled"})' if len(cancelled) > LISTED else ''
+        print(f'\ncancelled ({len(cancelled)}): {", ".join(cancelled[:LISTED])}{more}')
 
     recent = sorted(done.values(), key=lambda j: j.get('finished_at', ''))[-args.done:]
     print(f'\ndone (last {len(recent)} of {len(done)}):')
