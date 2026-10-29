@@ -481,6 +481,33 @@ def h8_variants_run(scratch):
             assert all(0 <= r['low_tier'] <= 1 for r in cut) and any(r['low_tier'] > 0 for r in cut)
 
 
+
+def h8_arch(scratch):
+    """E16's second architecture in H8: the cut graph without detaches is the track-3 GPT's own forward (its hashed
+    n-gram value embeddings on every block included); a complete cut-mode Boost -> Cut run."""
+    from loud import arch, h8
+    m = cut_module()
+    patch_sequences(length=CUT_SEQ, vocab=512)
+    config = arch.config(2, 128, 512)
+    config.vocab_size, config.sequence_len = 512, CUT_SEQ - 1
+    model = arch.make_model(torch.device('cpu'), 0, config, 1.5, 0.02).requires_grad_(True)
+    arch.module().attention = sys.modules['utils.model'].attention  # its forward's flex attention: dense on a CPU
+    with torch.no_grad():
+        for p in model.parameters():
+            p.add_(0.02 * torch.randn(p.shape, generator=torch.Generator().manual_seed(p.numel())))
+    rows = cut_rows_data()[:2]
+    x, y = rows[:, :-1].contiguous(), rows[:, 1:].contiguous()
+    ours = h8.cut_forward(model, x, y, held=False)[0]
+    assert torch.allclose(ours, model(x, y, loss_reduction='none').view_as(y), atol=1e-6), 'not the track-3 forward'
+    loss = h8.cut_forward(model, x, y)[0].sum()
+    grads = torch.autograd.grad(loss, [model.ngram_embeds['2'].weight, model.ngram_proj['0'].weight])
+    assert all(g.abs().sum() > 0 for g in grads), 'the n-gram path gets no credit'
+    spec = dict(experiment='cpu', variant='arch', seed=0, task='h8', args=dict(
+        preset='2m', arch='ngram', ngram_rows=512, mode='cut', sequences=72, heldout=32, batch=4, official_eval=False))
+    result = h8.run(spec, Path(scratch) / 'arch')
+    assert result['complete'] and result['updates'] == 10
+
+
 if __name__ == '__main__':
     torch.set_num_threads(8)
     torch.manual_seed(0)

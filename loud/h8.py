@@ -47,7 +47,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from . import latent, refs
+from . import arch, latent, refs
 from .ema import EMAWeights
 from .ngram import NGram, low_tier
 from .options import h8_options
@@ -108,10 +108,11 @@ def cut_forward(model, idx, targets, held=True, freeze_queries=False):
     cos_sin = (model.cos[:, :idx.shape[1]], model.sin[:, :idx.shape[1]])
     e = model.transformer.wte(idx)
     x = x0 = m.norm(e)
+    ngram = arch.ngram_features(model, idx)
     sites, attn_out, mlp_out = [e], [], []
     for i, block in enumerate(model.transformer.h):
         x = model.resid_lambdas[i] * x + model.x0_lambdas[i] * x0
-        ve = model.value_embeds[str(i)](idx) if str(i) in model.value_embeds else None
+        ve = arch.value_embedding(model, idx, i, ngram)
         a = attention(block.attn, m.norm(x), ve, cos_sin, model.window_sizes[i], held, freeze_queries)
         x = x + a
         sites.append(x)
@@ -122,15 +123,20 @@ def cut_forward(model, idx, targets, held=True, freeze_queries=False):
     return None if targets is None else token_losses(model, x, targets), sites, x, attn_out, mlp_out
 
 
-def own_path_attention(attn, x, cos_sin, window):
+def own_path_attention(attn, x, cos_sin, window, ve=None):
     """Block 0's attention as Boost.embedding_block0 moves it: each token's own query, key and value live, the other
     positions' keys and values held. Dense (one T x T map per head), with the held parts entering by value only: the
-    diagonal carries the live key's and value's difference from their held copies, zero in value and exact in gradient."""
+    diagonal carries the live key's and value's difference from their held copies, zero in value and exact in gradient.
+    A value embedding (the fixed model has none at block 0) enters held, through its live gate."""
     m = um()
     B, T, _ = x.shape
     q = m.norm(m.apply_rotary_emb(attn.c_q(x).view(B, T, attn.n_head, attn.head_dim), *cos_sin)).transpose(1, 2)
     k = m.norm(m.apply_rotary_emb(attn.c_k(x).view(B, T, attn.n_kv_head, attn.head_dim), *cos_sin)).transpose(1, 2)
-    v = attn.c_v(x).view(B, T, attn.n_kv_head, attn.head_dim).transpose(1, 2)
+    v = attn.c_v(x).view(B, T, attn.n_kv_head, attn.head_dim)
+    if ve is not None:
+        gate = 2 * torch.sigmoid(attn.ve_gate(x[..., :attn.ve_gate_channels]))
+        v = v + gate.unsqueeze(-1) * ve.detach().view_as(v)
+    v = v.transpose(1, 2)
     kd, vd = k.detach(), v.detach()
     scores = q @ kd.transpose(-1, -2) + torch.diag_embed((q * (k - kd)).sum(-1))
     i = torch.arange(T, device=x.device)
@@ -155,6 +161,7 @@ def boost_loss(model, idx, targets, side=None, keep=None):
     cos_sin = (model.cos[:, :idx.shape[1]], model.sin[:, :idx.shape[1]])
     e = model.transformer.wte(idx)
     x0 = m.norm(e)
+    ngram = arch.ngram_features(model, idx)
 
     def sublayer(k, stream, live, own=False):
         """Sublayer k's terms on its stream (k = 2i: block i's attention, 2i + 1: its MLP); own: the embedding's path."""
@@ -173,7 +180,7 @@ def boost_loss(model, idx, targets, side=None, keep=None):
     total, x = 0.0, x0
     for i, block in enumerate(model.transformer.h):
         xin = model.resid_lambdas[i] * x.detach() + model.x0_lambdas[i] * x0.detach()
-        ve = model.value_embeds[str(i)](idx) if str(i) in model.value_embeds else None
+        ve = arch.value_embedding(model, idx, i, ngram)
         mid = xin + attention(block.attn, m.norm(xin), ve, cos_sin, model.window_sizes[i], held=False)
         total = total + sublayer(2 * i, mid, i < L - 1)
         x = mid.detach() + block.mlp(m.norm(mid.detach()))
@@ -182,7 +189,8 @@ def boost_loss(model, idx, targets, side=None, keep=None):
     attn0, mix = model.transformer.h[0].attn, (model.resid_lambdas[0] + model.x0_lambdas[0]).detach()
     with frozen(attn0):
         xin0 = mix * m.norm(e)
-        mid0 = xin0 + own_path_attention(attn0, m.norm(xin0), cos_sin, model.window_sizes[0])
+        mid0 = xin0 + own_path_attention(attn0, m.norm(xin0), cos_sin, model.window_sizes[0],
+                                         arch.value_embedding(model, idx, 0, ngram))
     total = total + sublayer(0, mid0, False, own=True)
     if keep is not None:
         keep.update(top=x, embedding=e)
@@ -208,21 +216,21 @@ class Replay:
         self.cos, self.sin = model.cos[:, :T], model.sin[:, :T]
         e = model.transformer.wte(idx)
         x = self.x0 = m.norm(e)
+        ngram = arch.ngram_features(model, idx)
         self.sites, self.keys, self.values = [e], [], []
         for i, block in enumerate(model.transformer.h):
-            attn = block.attn
+            attn, ve = block.attn, arch.value_embedding(model, idx, i, ngram)
             x = model.resid_lambdas[i] * x + model.x0_lambdas[i] * self.x0
             h = m.norm(x)
             k = m.norm(m.apply_rotary_emb(attn.c_k(h).view(*h.shape[:2], attn.n_kv_head, attn.head_dim),
                                           self.cos, self.sin))
             v = attn.c_v(h).view(*h.shape[:2], attn.n_kv_head, attn.head_dim)
-            if str(i) in model.value_embeds:
+            if ve is not None:
                 gate = 2 * torch.sigmoid(attn.ve_gate(h[..., :attn.ve_gate_channels]))
-                v = v + gate.unsqueeze(-1) * model.value_embeds[str(i)](idx).view_as(v)
+                v = v + gate.unsqueeze(-1) * ve.view_as(v)
             self.keys.append(k.transpose(1, 2))    # [B, H, T, d]
             self.values.append(v.transpose(1, 2))
-            x = x + attention(attn, h, model.value_embeds[str(i)](idx) if str(i) in model.value_embeds else None,
-                              (self.cos, self.sin), model.window_sizes[i], held=True)
+            x = x + attention(attn, h, ve, (self.cos, self.sin), model.window_sizes[i], held=True)
             self.sites.append(x)
             x = x + block.mlp(m.norm(x))
 
@@ -540,7 +548,12 @@ class H8:
     def reset(self, phase=None):
         m, s = self.m, self.settings
         self.phase = phase or self.schedule[0][0]
-        self.model = m.make_model(self.device, self.seed, s.model, s.projection_std, s.head_std).requires_grad_(True)
+        if self.o['arch'] == 'ngram':  # E16: track-3 record #5's design at this preset's shape
+            config = arch.config(s.model.n_layer, s.model.n_embd, self.o['ngram_rows'])
+            self.model = arch.make_model(self.device, self.seed, config, s.projection_std, s.head_std)
+        else:
+            self.model = m.make_model(self.device, self.seed, s.model, s.projection_std, s.head_std)
+        self.model.requires_grad_(True)
         self.params = list(self.model.parameters())
         self.optimizer = m.make_optimizer(self.model, s, self.horizons[self.phase])
         self.labels = rate_labels(self.optimizer, s.lr)

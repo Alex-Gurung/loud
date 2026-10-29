@@ -22,7 +22,8 @@ TASKS = {
 # Training ranges (the first N rows of train.pt) and model presets (n_layer, width: the Dust paper's ladder plus PR
 # #26's 'tiny'; only '38m' is the benchmark model, the others are for smoke tests).
 RANGES = {'1M': 488, '10M': 4880, '30M': 14648}
-PRESETS = {'tiny': (4, 128), '2m': (2, 128), '7m': (4, 256), '38m': (8, 512), '243m': (16, 1024)}
+PRESETS = {'tiny': (4, 128), '2m': (2, 128), '7m': (4, 256), '38m': (8, 512), '243m': (16, 1024),
+           'track3': (12, 1024)}  # track3: track-3 record #5's shape (E16, with arch: ngram)
 CHECKPOINT_DTYPES = ('bfloat16', 'float32')
 
 # What each task's result.json holds that `expect` may check.
@@ -142,6 +143,8 @@ H8 = dict(
     prior='none',               # 'identity': read only the residual from the identity path's guess (E7)
     compare_every=0,            # every N updates, the cosine of the block-local gradient to the identity scheme's (E6)
     rank_every=0,               # every N updates, the stable rank of ANVIL II's orthogonalization input (E6)
+    arch='fixed',               # 'ngram' (E16): track-3 record #5's design, hashed n-gram value embeddings on every block
+    ngram_rows=1048576,         # E16: rows of each hashed n-gram table (the record's)
     # latent objectives (loud/latent.py), cut mode, one per run:
     nextlat=0.0,                # E14: lambda of NextLat's latent-consistency loss (0: off)
     nextlat_target='ema',       # E14: the target latent, 'ema' (H4's teacher) or 'live' (the network's, detached)
@@ -368,6 +371,14 @@ def h8_options(args):
         raise ValueError("nextlat_target must be 'ema' or 'live', nextlat_onset 'handoff' or 'start'")
     if o['latent_boost'] not in ('none', 'plus', 'only'):
         raise ValueError("latent_boost must be 'none', 'plus' or 'only'")
+    if o['arch'] not in ('fixed', 'ngram'):
+        raise ValueError("arch must be 'fixed' or 'ngram'")
+    if o['arch'] == 'ngram' and o['mode'] != 'cut':
+        raise ValueError("arch ngram runs in cut mode (E16): its n-gram tables feed every block, so synthesis's "
+                         "block-local gradients are not defined for them")
+    if 'ngram_rows' in args and o['arch'] != 'ngram':
+        raise ValueError('ngram_rows acts only with arch: ngram')
+    positive(o, 'ngram_rows')
     latent = [k for k, on in (('nextlat', o['nextlat'] > 0), ('latent_boost', o['latent_boost'] != 'none')) if on]
     if len(latent) > 1:
         raise ValueError('nextlat (E14) and latent_boost (E15) are separate experiments')

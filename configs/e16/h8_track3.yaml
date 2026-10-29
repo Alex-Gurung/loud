@@ -1,0 +1,17 @@
+# E16: does H8 rank architectures as the real chain does? Track-3 record #5's design (a 12 x 1,024 GPT whose value
+# embeddings on every block add hashed bigram, trigram and skip-bigram tables) under H8 cut-mode Boost -> Cut with
+# PR #40's recipe. Compare with the fixed model under the same harness (e1.h8_cut, seeds 0-1) and both under backprop
+# (e16.bp_track3, e16.bp_fixed), against the leaderboard's 3.211 vs 3.338 on 30M. Success: H8 reproduces the order;
+# then screen track-3 changes with it. No H4 checkpoints (the model is about 0.6 GB in bf16 with its tables).
+experiment: e16
+variant: h8_track3
+task: h8
+seeds: [0, 1]
+priority: 75
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  preset: track3
+  arch: ngram
+  mode: cut
