@@ -387,6 +387,19 @@ order changes only the rounding). Differences from PR #40:
   10M epoch about 4.6 hours. E11 adds about a tenth to a Cut update (its probes are 1.4% of the chain's, but each
   runway pass rebuilds the own-query context); E8 about 30 s per curvature refresh, two in a 1M-slice run.
 
+**H8 synthesis experiments** (task `h8`, `mode: synthesis`, one option per run, each a fixed rule; `loud/h8.py`):
+- **E10** `clip_credit`: each token's credit at a site capped at 3× the site's batch median norm. `agree`: each block
+  weight-update entry kept only where |sign(G)ᵀ sign(X)| ≥ 0.4 × tokens (70% agreement when no contribution is zero;
+  a zero contribution votes for neither sign), with the share of entries kept logged (`agree_kept`).
+- **E11** `runway`: each token's credit at a site weighted by the move along −g/|g| (0.01 to 0.08 of its RMS per
+  coordinate, through `reforward`) that lowers its loss most, normalized to mean 1 per site; the chosen moves are
+  logged per site (`runway`). Several synthesis updates' worth of replays per update.
+- **E13** `budget_theta`: 64 rows per site (token-assigned within the tier) where both a streaming Witten–Bell n-gram
+  model of the training stream (orders 1 to 4, `loud/ngram.py`) and the network put the token's loss at most θ, the
+  full cycle elsewhere. Its diagnostic `ngram_tiers` (the low tier's share of tokens and of credit energy, at 20% and
+  100% of `e1.h8_synth.s0`) gates each θ (`configs/e13/gate_theta*.yaml`). The 30M speedrun record's difficulty
+  order stratifies whole rows across batches; it does not give tokens different budgets.
+
 **E5's diagnostic** (`credit_recovery`, on a checkpoint, one held-out sequence). Each token's raw embedding takes a
 full cycle of 512 probes (signed Hadamard rows times PR #40's step, 0.01 of the token's RMS), run forward as PR #40's
 chain runs its cycles: forward differences against the clean pass, each MLP through the record's 512 routed units,

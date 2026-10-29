@@ -1,0 +1,20 @@
+# E13's decision rule at theta 3 nats: build the budget rule only if the low tier holds under 10% of the credit
+# energy with over 40% of the tokens, on both the 20% and the 100% checkpoint (e13.tiers_c20, e13.tiers_c100). The
+# theta3 arm waits for it.
+experiment: e13
+variant: gate_theta3
+task: gate
+seeds: [0]
+priority: 70
+after_done: [e13.tiers_c20.s0, e13.tiers_c100.s0]
+args:
+  values:
+    energy_c20: [e13.tiers_c20.s0, ngram_tiers.json, energy, theta3]
+    tokens_c20: [e13.tiers_c20.s0, ngram_tiers.json, tokens, theta3]
+    energy_c100: [e13.tiers_c100.s0, ngram_tiers.json, energy, theta3]
+    tokens_c100: [e13.tiers_c100.s0, ngram_tiers.json, tokens, theta3]
+expect:
+  energy_c20: {max: 0.1}
+  tokens_c20: {min: 0.4}
+  energy_c100: {max: 0.1}
+  tokens_c100: {min: 0.4}

@@ -1,0 +1,17 @@
+# E10 (a), per-token credit shaping in H8 synthesis mode: at each of the nine sites, each token's credit norm is capped
+# at 3 times that site's median over the update's tokens before the block-local gradients; otherwise E1's synthesis
+# run (identity scheme). A fixed rule, no sweep. Against e1.h8_synth (same seeds): success is beating it by 0.02.
+# Also a cheap control for E3 and E11.
+experiment: e10
+variant: clip
+task: h8
+seeds: [0, 1, 2]
+priority: 70
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  mode: synthesis
+  clip_credit: true
+  compare_every: 50
+  heldout_every: 100

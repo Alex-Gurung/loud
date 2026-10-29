@@ -18,6 +18,9 @@ query live. Probes run through H8's reforward (Replay), as the chain runs them.
                         float32 and bf16
     h8_validation       H8 synthesis (identity scheme) against PR #40's Cut estimate with its cross-token patches off,
                         no future draws and every MLP unit routed: per-matrix cosine (v2's bar: 0.99)
+    ngram_tiers         E13: the credit energy and token share of the low tier (max(n-gram loss, model loss) <= theta)
+                        on the held-out sequences, the n-gram table built from the training stream up to the checkpoint
+                        (loud/ngram.py)
 
 References are float32 (no autocast, 'highest' matmul precision), as in check_relay.py; probes run under bf16 where
 the chain does.
@@ -29,7 +32,7 @@ import json
 import torch
 import torch.nn.functional as F
 
-from . import h8, paths, refs
+from . import h8, ngram, paths, refs
 from .data import benchmark_split
 from .options import diagnose_options
 from .runlog import Run
@@ -204,7 +207,7 @@ class Toolkit:
         """H8's synthesis mode (identity scheme) against PR #40's Cut estimate on this checkpoint, the record's
         cross-token patches off, no future draws, every MLP unit routed (v2 H8, 'Validation before use')."""
         from .cut import record_settings
-        from .options import PRESETS
+        from .options import H8, PRESETS
         m, config = self.m, self.model.config
         preset = next(p for p, shape in PRESETS.items() if shape == (config.n_layer, config.n_embd))
         s = record_settings(m, preset, 4)
@@ -212,7 +215,7 @@ class Toolkit:
         s.key_path_draws, s.future_draws, s.route_k = 0, 0, 4 * config.n_embd
         model = self.model.requires_grad_(True)
         params = dict(model.named_parameters())
-        scheme = h8.Scheme(dict(rows=None, row_assign='token', prior='none'), config.n_embd, self.x.device, 0)
+        scheme = h8.Scheme(dict(H8), config.n_embd, self.x.device, 0)  # the defaults: the identity scheme
         with torch.autocast(self.x.device.type, dtype=torch.bfloat16, enabled=self.x.is_cuda):
             synth, _, _ = h8.synthesis_gradients(model, self.x, self.y, scheme, 1)
         model.requires_grad_(False)
@@ -260,7 +263,10 @@ def run_task(spec, run_dir):
     x, y = rows[:, :-1].contiguous(), rows[:, 1:].contiguous()
     run = Run(run_dir, spec, dict(options=o, checkpoint=str(checkpoint),
                                   heldout_rows=split.describe()['heldout_rows'][o['row']:o['row'] + 1]))
-    summary, tensors = getattr(Toolkit(m, model, x, y), o['tool'])()
+    if o['tool'] == 'ngram_tiers':  # E13's diagnostic: the 32 held-out sequences, the stream up to the checkpoint
+        summary, tensors = ngram.tiers_tool(model, split.heldout.to(device), checkpoint), {}
+    else:
+        summary, tensors = getattr(Toolkit(m, model, x, y), o['tool'])()
     (run_dir / f'{o["tool"]}.json').write_text(json.dumps(summary, indent=1) + '\n')
     if tensors:
         torch.save(tensors, run_dir / f'{o["tool"]}.pt')

@@ -1,0 +1,13 @@
+# E13's diagnostic on e1.h8_synth.s0's 100% checkpoint (no training): with an n-gram table (orders 1-4, Witten-Bell)
+# of the training rows the run had used by then, the 32 held-out sequences' tokens split by max(n-gram loss, model
+# loss) <= theta into a low tier, for theta 2, 3 and 4 nats; per theta, the low tier's share of the tokens and of the
+# exact credit energy (|g|^2 summed over the nine sites, H8's cut graph). The gates below read it.
+experiment: e13
+variant: tiers_c100
+task: diagnose
+seeds: [0]
+priority: 70
+after: [e1.h8_synth.s0]
+args:
+  tool: ngram_tiers
+  checkpoint: e1.h8_synth.s0:ckpt_100.pt

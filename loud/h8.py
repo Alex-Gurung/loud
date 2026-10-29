@@ -26,17 +26,30 @@ dynamics model; E15's sublayer predictors join or replace Boost's readouts. Thei
 (loud/ema.py), updated after every step; the dynamics model and predictors have their own Adam at the record's base
 Adam rate, betas and schedule. Neither enters final.pt.
 
+Synthesis-mode experiments, one per run, each a fixed rule (no knob but E13's theta):
+  E10 (a) clip_credit   each token's credit norm at each site capped at CLIP times that site's batch median (Scheme).
+  E10 (b) agree         each block nn.Linear's weight-update entry kept only where at least AGREE of the batch's
+                        tokens agree in the sign of their contribution, from sign(G)^T sign(X) in one matrix multiply
+                        (agreed_gradients).
+  E11     runway        each token's credit at each site weighted by its runway: how far its loss keeps falling along
+                        -g/|g| (runway_weights, through Replay).
+  E13     budget_theta  LOW_ROWS rows per site for tokens whose n-gram and model losses are both at most theta
+                        (loud/ngram.py), the full cycle for the rest (Scheme.read_tiers).
+
 H8 has neither the record's cross-token patches (value path, input-key and gate probes, path scalars, future-token
 probes) nor its top-512 MLP routes (it uses every unit), so H8 and backprop bracket the cross-token credit.
 """
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 import sys
 
 import torch
+from torch import nn
 import torch.nn.functional as F
 
 from . import latent, refs
 from .ema import EMAWeights
+from .ngram import NGram, low_tier
 from .options import h8_options
 from .train import current_rates, rate_labels, train
 
@@ -45,6 +58,11 @@ SCHEME_SEED = 7907   # the probing scheme's signs: the job seed plus this
 PROBE_ROWS = 4       # held-out sequences E14's and E15's untimed logs measure
 AUX_LOG_EVERY = 50   # E14's cosine of its gradient to the next-token one at the top stream, every this many updates
 LATENT_LOG_EVERY = 10  # E15's per-sublayer readout and latent losses, every this many Boost updates
+CLIP = 3.0           # E10 (a): a token's credit norm at a site is capped at this times the site's batch median
+AGREE = 0.7          # E10 (b): the share of tokens that must agree in sign for a weight-update entry to be kept
+LOW_ROWS = 64        # E13: rows per token per site in the low tier (the high tier reads the full cycle)
+RUNWAY = (0.01, 0.02, 0.04, 0.08)  # E11: moves along -g/|g|, in the token's activation RMS per coordinate
+RUNWAY_EVERY = 10    # E11: updates between logs of the runway distribution
 
 
 def um():
@@ -296,33 +314,47 @@ class Scheme:
     row_assign 'time': every token of an update reads rows [(s mod K) m, (s mod K + 1) m), K = 512 / m; 'token': token
     t reads rows offset by (t mod K) m, so every update covers the basis across tokens. prior 'identity' (E7): the
     estimate is p + (1/m) sum_j (v_j . (g - p)) v_j with p the identity path's guess, computed, not measured.
-    m = 512 with no prior is the identity (the exact credit)."""
+    clip_credit (E10 a) caps each token's credit norm at CLIP times the site's batch median. budget_theta (E13): the
+    low tier's tokens read LOW_ROWS rows, token-assigned among the tier's tokens of a sequence (read_tiers), the others
+    the full cycle. m = 512 with none of these is the identity (the exact credit)."""
 
     def __init__(self, o, width, device, seed):
         self.rows, self.assign, self.prior = o['rows'] or width, o['row_assign'], o['prior']
+        self.clip, self.tiers = o['clip_credit'], bool(o['budget_theta'])
         self.width = width
         self.hadamard = hadamard(width, device)
         self.generator = torch.Generator(device).manual_seed(seed + SCHEME_SEED)
 
     @property
     def identity(self):
-        return self.rows == self.width and self.prior == 'none'
+        return self.rows == self.width and self.prior == 'none' and not self.clip and not self.tiers
 
-    def __call__(self, credits, step, guess=None):
+    def __call__(self, credits, step, guess=None, low=None):
+        """credits: per site [B, T, W]; guess: the identity path's (prior); low: E13's low tier [B, T]."""
         if self.identity:
             return credits
         out = []
-        for k, g in enumerate(credits):
-            g = g.float()
-            p = guess[k].float() if self.prior == 'identity' else None
-            out.append(self.read(g if p is None else g - p, step) + (0 if p is None else p))
+        with torch.autocast(credits[0].device.type, enabled=False):  # the decoding in float32, as the record's
+            for k, g in enumerate(credits):
+                g = g.float()
+                if self.clip:
+                    out.append(clip(g))
+                elif self.tiers:
+                    out.append(self.read_tiers(g, low))
+                else:
+                    p = guess[k].float() if self.prior == 'identity' else None
+                    out.append(self.read(g if p is None else g - p, step) + (0 if p is None else p))
         return out
+
+    def signs(self, g):
+        shape = (g.shape[0], 1, g.shape[-1])
+        return torch.randint(0, 2, shape, device=g.device, generator=self.generator).float() * 2 - 1
 
     def read(self, g, step):
         """The partial-row estimate of g [B, T, W] for one site."""
         B, T, W = g.shape
         m, K = self.rows, W // self.rows
-        signs = torch.randint(0, 2, (B, 1, W), device=g.device, generator=self.generator).float() * 2 - 1
+        signs = self.signs(g)
         if m == W:
             return g
         blocks = self.hadamard.view(K, m, W)
@@ -336,6 +368,87 @@ class Scheme:
             out[:, k::K] = (part @ rows.transpose(1, 2)) @ rows / m
         return out
 
+    def read_tiers(self, g, low):
+        """E13: the low tier's tokens read LOW_ROWS rows (the j-th low token of a sequence block j mod K, so the tier
+        covers the basis), scaled to stay unbiased; the high tier reads the full cycle, which is the exact credit."""
+        B, T, W = g.shape
+        m = min(LOW_ROWS, W)
+        K = W // m
+        signs, blocks, out = self.signs(g), self.hadamard.view(K, m, W), g.clone()
+        for b in range(B):
+            tokens = low[b].nonzero().squeeze(1)
+            for k in range(K):
+                chosen = tokens[k::K]
+                rows = blocks[k] * signs[b]
+                out[b, chosen] = (g[b, chosen] @ rows.T) @ rows / m
+        return out
+
+
+def clip(g):
+    """E10 (a): each token's credit [B, T, W] scaled down to at most CLIP times the median token norm of the batch."""
+    norms = g.norm(dim=-1)
+    return g * (CLIP * norms.flatten().median() / norms.clamp_min(1e-30)).clamp(max=1).unsqueeze(-1)
+
+
+@contextmanager
+def capture_linears(model, io):
+    """E10 (b): io[module] = (input, output) of every block nn.Linear for one forward (the input as the matmul sees it,
+    in the output's dtype)."""
+    def hook(module, args, out):
+        io[module] = (args[0].to(out.dtype), out)
+    handles = [m.register_forward_hook(hook) for m in model.transformer.h.modules() if isinstance(m, nn.Linear)]
+    try:
+        yield
+    finally:
+        for h in handles:
+            h.remove()
+
+
+def agreed_gradients(module, params, out, credit, io, tokens, kept):
+    """E10 (b): a sublayer's block-local gradients with each nn.Linear weight's entries kept only where the tokens
+    agree. G (the credit at the layer's output, from this sublayer's credit alone) and X (its input) give the weight
+    gradient G^T X and, in one more matrix multiply, S = sign(G)^T sign(X), the net votes for each entry's sign; an
+    entry is kept if |S| >= (2 AGREE - 1) x tokens, which is 'at least AGREE of the tokens agree' when every
+    contribution is nonzero. A zero contribution (a unit off after the ReLU^2, an exact zero credit) votes for neither
+    sign, so it counts against agreement, as a rule computed in one matrix multiply must count it. Other parameters
+    (the value-embedding table) keep their gradients. Appends each weight's kept share to `kept`."""
+    linears = [m for m in module.modules() if isinstance(m, nn.Linear)]
+    weights = {id(m.weight) for m in linears}
+    others = [p for p in params if id(p) not in weights]
+    grads = torch.autograd.grad(out, [io[m][1] for m in linears] + others, grad_outputs=credit.to(out.dtype),
+                                retain_graph=True)
+    found = dict(zip(map(id, others), grads[len(linears):]))
+    with torch.autocast(out.device.type, enabled=False):  # float32: the vote counts must be exact
+        for m, G in zip(linears, grads):
+            G2, X2 = G.flatten(0, -2).float(), io[m][0].flatten(0, -2).float()
+            keep = (G2.sign().T @ X2.sign()).abs() >= (2 * AGREE - 1) * tokens
+            found[id(m.weight)] = ((G2.T @ X2) * keep).to(m.weight.dtype)
+            kept.append(keep.float().mean())
+    return found
+
+
+def runway_weights(model, idx, targets, sites, credits):
+    """E11: per site and token, the move along -g/|g| of d x RMS(h) per coordinate (length d x RMS(h) x sqrt(W)), d in
+    RUNWAY, with the lowest loss (Replay, on the cut graph's terms; the clean loss from the same replay, so both share
+    its arithmetic), or none if no move lowers the loss; alpha = that d (0 for none), normalized to mean 1 per site over
+    the batch's tokens. Returns the alphas [B, T] per site and the chosen move's index (0: none, 1..4: RUNWAY)."""
+    replay = Replay(model, idx, targets)
+    grid = torch.tensor((0.0,) + RUNWAY, device=idx.device)
+    valid = targets != -1
+    alphas, chosen = [], []
+    for k, (h, g) in enumerate(zip(sites, credits)):
+        h, g = h.detach().float(), g.detach().float()
+        reach = h.square().mean(-1, keepdim=True).sqrt() * h.shape[-1] ** 0.5
+        u = -g / g.norm(dim=-1, keepdim=True).clamp_min(1e-30)
+        losses = replay(k, grid.view(1, 1, -1, 1) * (reach * u).unsqueeze(2))
+        best = losses[..., 1:].min(-1)
+        falls = (best.values < losses[..., 0]) & valid
+        alpha = torch.where(falls, grid[1:][best.indices], torch.zeros_like(best.values))
+        mean = alpha[valid].mean()
+        alphas.append(torch.where(mean > 0, alpha / mean.clamp_min(1e-30), alpha))
+        chosen.append(torch.where(falls, best.indices + 1, torch.zeros_like(best.indices)))
+    return alphas, chosen
+
 
 def hadamard(d, device):
     """The Sylvester Hadamard matrix of order d (a power of two), entries +-1, as PR #40 builds it."""
@@ -345,39 +458,60 @@ def hadamard(d, device):
     return H
 
 
-def synthesis_gradients(model, idx, targets, scheme, step, freeze_queries=False, compare=False):
-    """Synthesis mode's parameter gradients (module docstring) and the model's token losses; with `compare`, also the
-    cosine of the summed block-local weight gradient to the identity scheme's (E6's log)."""
+def synthesis_gradients(model, idx, targets, scheme, step, freeze_queries=False, compare=False, agree=False,
+                        runway=False, tiers=None, log=False):
+    """Synthesis mode's parameter gradients (module docstring), the model's token losses and metrics fields: with
+    `compare`, the cosine of the summed block-local weight gradient to the identity's (E6's log); E10 (b) `agree`
+    (the share of entries kept logged when `log`); E11 `runway` (its distribution logged when `log`); E13 `tiers`, a
+    function of the token losses giving the low tier (its share logged)."""
     L = model.config.n_layer
-    losses, sites, top, attn_out, mlp_out = cut_forward(model, idx, targets, True, freeze_queries)
+    io = {}
+    with capture_linears(model, io) if agree else nullcontext():
+        losses, sites, top, attn_out, mlp_out = cut_forward(model, idx, targets, True, freeze_queries)
     loss = losses.sum() / (targets != -1).sum()
     shared = [model.lm_head.weight, model.resid_lambdas, model.x0_lambdas]
     *credits, g_top, g_head, g_lr, g_l0 = torch.autograd.grad(loss, sites + [top] + shared, retain_graph=True)
     guess = identity_guess(model, sites, g_top.float()) if scheme.prior == 'identity' else None
-    shaped = scheme(credits, step, guess)
+    fields, weighted = {}, credits
+    if runway:
+        alphas, chosen = runway_weights(model, idx, targets, sites, credits)
+        weighted = [g.float() * a.unsqueeze(-1) for g, a in zip(credits, alphas)]
+        if log:
+            share = lambda c: (torch.bincount(c.flatten(), minlength=len(RUNWAY) + 1) / c.numel()).tolist()
+            fields['runway'] = {f'S{k}': [round(v, 4) for v in share(c)] for k, c in enumerate(chosen)}
+    low = tiers(losses.detach()) if tiers is not None else None
+    if low is not None:
+        fields['low_tier'] = round(low.float().mean().item(), 4)
+    shaped = scheme(weighted, step, guess, low)
     lam = model.resid_lambdas.detach()
+    tokens = int((targets != -1).sum()) if agree else None
+    kept = []
 
-    def block_local(credit):
+    def block_local(credit, masked):
         """Each sublayer's parameters from its own output's credit alone: the attention's call stops at its
         parameters, and so does the MLP's (one call for both would carry the MLP's credit back through its input,
         the mid stream, into the attention)."""
         found = {}
         for i, block in enumerate(model.transformer.h):
             ve = [model.value_embeds[str(i)].weight] if str(i) in model.value_embeds else []
-            for params, out, g in ((list(block.attn.parameters()) + ve, attn_out[i], credit[i + 1]),
-                                   (list(block.mlp.parameters()), mlp_out[i],
-                                    lam[i + 1] * credit[i + 2] if i < L - 1 else g_top)):
-                found.update(zip(map(id, params), torch.autograd.grad(out, params, grad_outputs=g.to(out.dtype),
-                                                                      retain_graph=True)))
+            for module, params, out, g in ((block.attn, list(block.attn.parameters()) + ve, attn_out[i], credit[i + 1]),
+                                           (block.mlp, list(block.mlp.parameters()), mlp_out[i],
+                                            lam[i + 1] * credit[i + 2] if i < L - 1 else g_top)):
+                if masked:
+                    found.update(agreed_gradients(module, params, out, g, io, tokens, kept))
+                else:
+                    found.update(zip(map(id, params), torch.autograd.grad(out, params, grad_outputs=g.to(out.dtype),
+                                                                          retain_graph=True)))
         found[id(model.transformer.wte.weight)] = torch.autograd.grad(
             sites[0], model.transformer.wte.weight, grad_outputs=credit[0].to(sites[0].dtype), retain_graph=True)[0]
         return found
 
-    grads = block_local(shaped)
+    grads = block_local(shaped, agree)
     grads.update(zip(map(id, shared), (g_head, g_lr, g_l0)))
-    fields = {}
-    if compare and not scheme.identity:
-        exact = block_local(credits)
+    if agree and log:
+        fields['agree_kept'] = round(torch.stack(kept).mean().item(), 6)  # entries kept, mean over block weights
+    if compare and (not scheme.identity or agree or runway):
+        exact = block_local(credits, False)
         keys = list(exact)  # block-local only: the head and scalars are the cut graph's in both
         a = torch.cat([grads[k].float().flatten() for k in keys])
         b = torch.cat([exact[k].float().flatten() for k in keys])
@@ -411,6 +545,7 @@ class H8:
         self.optimizer = m.make_optimizer(self.model, s, self.horizons[self.phase])
         self.labels = rate_labels(self.optimizer, s.lr)
         self.scheme = Scheme(self.o, s.model.n_embd, self.device, self.seed)
+        self.ngram = NGram(s.model.vocab_size) if self.o['budget_theta'] else None  # E13: the stream so far
         self.reset_latent()
 
     def reset_latent(self):
@@ -453,6 +588,13 @@ class H8:
         nextlat = bool(o['nextlat']) and (o['nextlat_onset'] == 'start' or phase == 'cut')  # E14 acts this update
         side = self.targets if phase == 'boost' else None                                 # E15 acts this update
         aux_params = self.aux_params if nextlat or side is not None else []
+        tiers = None
+        if self.ngram is not None:  # E13: score the batch under the batches before it, then add it (every phase)
+            rows = batch.cpu().numpy()
+            if phase != 'boost':
+                ngram = torch.from_numpy(self.ngram.losses(rows)).float().to(self.device)
+                tiers = lambda losses: low_tier(ngram, losses, o['budget_theta'])
+            self.ngram.insert(rows)
         with torch.autocast(self.device.type, dtype=torch.bfloat16):
             teacher = None
             if self.teacher is not None and ((nextlat and o['nextlat_target'] == 'ema') or side is not None):
@@ -469,7 +611,8 @@ class H8:
                 loss, embedding = losses.sum() / (y != -1).sum(), sites[0]
             else:
                 grads, losses, extra = synthesis_gradients(self.model, x, y, self.scheme, step, o['freeze_queries'],
-                                                           compare)
+                                                           compare, o['agree'], o['runway'], tiers,
+                                                           log=step % RUNWAY_EVERY == 0)
                 fields.update(extra)
             if phase == 'boost' or o['mode'] == 'cut':
                 if nextlat:

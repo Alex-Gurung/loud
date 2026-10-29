@@ -284,6 +284,203 @@ def h8_latent_run(scratch):
             assert -1 <= by_step[2]['handoff_cut_cosine'] <= 1
 
 
+def block_local_reference(h8, model, x, y, transform):
+    """Synthesis mode's block-local gradients written out from its definition, for the site credits transformed by
+    `transform` (a list of [B, T, W] float credits to a list): block i's attention and value table from the credit at
+    S(i+1), its MLP from resid_lambdas[i+1] times the credit at S(i+2) (the last block's from the top stream's), wte
+    from S0."""
+    L = model.config.n_layer
+    losses, sites, top, attn_out, mlp_out = h8.cut_forward(model, x, y)
+    *g, g_top = torch.autograd.grad(losses.sum() / y.numel(), sites + [top], retain_graph=True)
+    g = transform([c.float() for c in g])
+    lam = model.resid_lambdas.detach()
+    out = {}
+    for i, block in enumerate(model.transformer.h):
+        attn = list(block.attn.parameters()) + ([model.value_embeds[str(i)].weight] if str(i) in model.value_embeds
+                                                else [])
+        out.update(zip(attn, torch.autograd.grad(attn_out[i], attn, g[i + 1], retain_graph=True)))
+        mlp = list(block.mlp.parameters())
+        out.update(zip(mlp, torch.autograd.grad(mlp_out[i], mlp, lam[i + 1] * g[i + 2] if i < L - 1 else g_top,
+                                                retain_graph=True)))
+    out[model.transformer.wte.weight] = torch.autograd.grad(sites[0], model.transformer.wte.weight, g[0])[0]
+    return out
+
+
+def synthesized(h8, model, x, y, scheme_args, **kwargs):
+    from loud.options import h8_options
+    scheme = h8.Scheme(h8_options(dict(preset='2m', **scheme_args)), model.config.n_embd, torch.device('cpu'), 0)
+    grads, _, fields = h8.synthesis_gradients(model, x, y, scheme, 1, **kwargs)
+    return {p: grads[id(p)] for p in model.parameters()}, fields
+
+
+def h8_shaping(scratch):
+    """E10. (a) clip: each site's credits capped at 3x the batch's median token norm, then the block-local gradients,
+    as written out. (b) agree: against per-token contributions summed and sign-counted token by token; with the
+    threshold at one half every entry is kept and the gradients are synthesis mode's own."""
+    from torch import nn
+    from loud import h8
+    _, _, model, x, y = record_setup()
+    model.requires_grad_(True)
+
+    def capped(g):
+        norms = g.norm(dim=-1, keepdim=True)
+        cap = 3 * torch.sort(norms.flatten()).values[(norms.numel() - 1) // 2]
+        return torch.where(norms > cap, g * cap / norms, g)
+    ours, _ = synthesized(h8, model, x, y, dict(clip_credit=True))
+    expected = block_local_reference(h8, model, x, y, lambda gs: [capped(g) for g in gs])
+    assert all(torch.allclose(ours[p], v, atol=1e-6, rtol=1e-4) for p, v in expected.items()), 'clip'
+    plain, _ = synthesized(h8, model, x, y, {})
+    g = torch.randn(2, 10, 8, generator=torch.Generator().manual_seed(4))
+    g[0, 3] *= 20  # an outlier token: capped at 3x the median norm; the rest untouched
+    capped_g, norms = h8.clip(g), g.norm(dim=-1)
+    assert torch.allclose(capped_g[0, 3].norm(), 3 * norms.flatten().median())
+    assert torch.equal(capped_g.flatten(0, 1)[norms.flatten() <= 3 * norms.flatten().median()],
+                       g.flatten(0, 1)[norms.flatten() <= 3 * norms.flatten().median()])
+
+    agreed, _ = synthesized(h8, model, x, y, {}, agree=True)
+    tokens = y.numel()
+    losses, sites, top, attn_out, mlp_out = h8.cut_forward(model, x, y)
+    *credits, g_top = torch.autograd.grad(losses.sum() / tokens, sites + [top], retain_graph=True)
+    io = {}
+    with h8.capture_linears(model, io):
+        losses, sites, top, attn_out, mlp_out = h8.cut_forward(model, x, y)
+    lam, L, kept = model.resid_lambdas.detach(), model.config.n_layer, []
+    for i, block in enumerate(model.transformer.h):
+        for module, out, g in ((block.attn, attn_out[i], credits[i + 1]),
+                               (block.mlp, mlp_out[i], lam[i + 1] * credits[i + 2] if i < L - 1 else g_top)):
+            linears = [m for m in module.modules() if isinstance(m, nn.Linear)]
+            outputs = torch.autograd.grad(out, [io[m][1] for m in linears], g, retain_graph=True)
+            for m, G in zip(linears, outputs):
+                G2, X2 = G.flatten(0, -2), io[m][0].flatten(0, -2)
+                total, votes = torch.zeros_like(m.weight), torch.zeros_like(m.weight)
+                for t in range(tokens):  # token by token
+                    c = torch.outer(G2[t], X2[t])
+                    total, votes = total + c, votes + c.sign()
+                keep = votes.abs() >= 0.4 * tokens  # 70% of the tokens agree: votes for the majority sign minus against
+                assert torch.allclose(agreed[m.weight], total * keep, atol=1e-6, rtol=1e-4), m
+                kept.append(keep.float().mean().item())
+    assert sum(kept) > 0 and max(kept) < 1, kept  # a real filter: 70% agreement over 128 tokens keeps few entries
+    h8.AGREE = 0.5
+    half, _ = synthesized(h8, model, x, y, {}, agree=True)
+    assert all(torch.allclose(half[p], plain[p], atol=1e-6, rtol=1e-4) for p in plain), 'agree at 1/2 is not plain'
+
+
+def h8_runway(scratch):
+    """E11: each token's runway against a move-by-move Replay; alphas normalized to mean 1 per site; synthesis mode
+    weights each site's credits by them."""
+    from loud import h8
+    _, _, model, x, y = record_setup()
+    model.requires_grad_(True)
+    losses, sites, top, _, _ = h8.cut_forward(model, x, y)
+    credits = torch.autograd.grad(losses.sum() / y.numel(), sites)
+    alphas, chosen = h8.runway_weights(model, x, y, sites, credits)
+    replay = h8.Replay(model.requires_grad_(False), x, y)
+    model.requires_grad_(True)
+    grid = (0.0,) + h8.RUNWAY
+    agree = []
+    for k, (h, g) in enumerate(zip(sites, credits)):
+        h, g = h.detach(), g.detach()
+        reach = h.square().mean(-1, keepdim=True).sqrt() * h.shape[-1] ** 0.5
+        moved = torch.stack([replay(k, (d * reach * -g / g.norm(dim=-1, keepdim=True)).unsqueeze(2))[..., 0]
+                             for d in grid], -1)
+        best = moved[..., 1:].argmin(-1) + 1
+        expect = torch.where(moved[..., 1:].min(-1).values < moved[..., 0], best, torch.zeros_like(best))
+        agree.append((expect == chosen[k]).float().mean().item())
+        raw = torch.tensor(grid)[chosen[k]]
+        assert torch.allclose(alphas[k] * raw.mean(), raw, atol=1e-6) and abs(alphas[k].mean() - 1) < 1e-5, k
+    assert min(agree) > 0.99, agree
+    ours, fields = synthesized(h8, model, x, y, {}, runway=True, log=True)
+    expected = block_local_reference(h8, model, x, y, lambda gs: [g * a.unsqueeze(-1) for g, a in zip(gs, alphas)])
+    assert all(torch.allclose(ours[p], v, atol=1e-6, rtol=1e-4) for p, v in expected.items()), 'runway weights'
+    assert set(fields['runway']) == {f'S{k}' for k in range(len(sites))}
+    assert all(abs(sum(v) - 1) < 1e-3 for v in fields['runway'].values())
+
+
+def h8_ngram(scratch):
+    """E13's statistics: the n-gram counts against a direct count; Witten-Bell probabilities sum to one over the
+    vocabulary for seen and unseen histories; scoring is causal; copies on a crafted row; the low tier's partial rows
+    are unbiased and the high tier is exact; the tier diagnostic on a tiny model."""
+    import numpy as np
+    from collections import Counter
+    from loud import h8, ngram
+    from loud.options import h8_options
+    V = 16
+    rows = np.random.default_rng(0).integers(0, V, (3, 41))
+    table = ngram.NGram(V)
+    before = table.losses(rows)
+    assert np.allclose(before, np.log(V)), 'an empty table is uniform'
+    table.insert(rows)
+    for n in range(1, 5):
+        # every window of n ids whose last id is a target (not a row's first id), packed oldest first
+        direct = Counter(tuple(r[s:s + n]) for r in rows for s in range(len(r) - n + 1) if s + n - 1 >= 1)
+        packed = {}
+        for window, c in direct.items():
+            key = 0
+            for v in window:
+                key = (key << ngram.BITS) | int(v)
+            packed[key] = c
+        assert table.pairs[n - 1] == packed, n
+        history = rows[0][5:5 + max(n - 1, 1)].tolist()  # every order up to its length applies
+        assert abs(table.distribution(history).sum() - 1) < 1e-9, n
+    assert abs(table.distribution([V - 1, V - 1, V - 1]).sum() - 1) < 1e-9  # unseen histories
+    assert not np.allclose(table.losses(rows), before) and np.all(table.losses(rows) < before + 1e-9)
+    # a unigram value by hand: P(w) = (c(w) + T / V) / (N + T)
+    counts = Counter(rows[:, 1:].flatten().tolist())
+    N, T = sum(counts.values()), len(counts)
+    w = rows[0, 1]
+    p1 = (counts[w] + T / V) / (N + T)
+    one = ngram.NGram(V, order=1)
+    one.insert(rows)
+    assert abs(one.probabilities(rows[:1, :2])[0, 0] - p1) < 1e-12
+
+    crafted = np.array([[5, 6, 7, 8, 1, 2, 5, 6, 7, 8, 9]])
+    flags = ngram.copies(crafted)[0]
+    assert flags.tolist() == [False] * 8 + [True, False], flags  # the second 5, 6, 7 is followed by 8 again: a copy
+
+    scheme = h8.Scheme(h8_options(dict(preset='2m', budget_theta=3.0)), 128, torch.device('cpu'), 0)
+    g = torch.randn(2, 12, 128, generator=torch.Generator().manual_seed(2))
+    low = torch.rand(2, 12, generator=torch.Generator().manual_seed(3)) < 0.5
+    one = scheme([g], 1, low=low)[0]
+    assert torch.equal(one[~low], g[~low]) and not torch.allclose(one[low], g[low])
+    mean = sum(scheme([g], s, low=low)[0] for s in range(3000)) / 3000
+    assert (mean - g).norm() < 0.1 * g.norm(), ((mean - g).norm() / g.norm()).item()
+
+    _, _, model, x, y = record_setup()
+    rows = cut_rows_data()
+    summary, tensors = ngram.tiers(model, rows[:4], rows[4:20])
+    shares = [summary[f'theta{t:g}']['tokens'] for t in ngram.THETAS]
+    assert shares == sorted(shares) and all(0 <= summary[f'theta{t:g}']['energy'] <= 1 for t in ngram.THETAS)
+    assert tensors['ngram_loss'].shape == (4, CUT_SEQ - 1) and len(summary['per_site']['theta2']) == 3
+    # what loud/gate.py reads from it (configs/e13/gate_theta*.yaml): the one entry named by the prefix
+    read = {site: v['energy'] for site, v in summary.items()
+            if isinstance(v, dict) and 'energy' in v and site.startswith('theta2')}
+    assert list(read) == ['theta2']
+
+
+def h8_variants_run(scratch):
+    """Complete H8 runs of each synthesis-mode experiment through loud/train.py, with their logs."""
+    from loud import h8
+    cut_module()
+    patch_sequences(length=CUT_SEQ, vocab=512)
+    for variant, args in (('clip', dict(clip_credit=True, compare_every=5)), ('agree', dict(agree=True)),
+                          ('runway', dict(runway=True)), ('budget', dict(budget_theta=6.5))):
+        spec = dict(experiment='cpu', variant=variant, seed=0, task='h8', args=dict(
+            preset='2m', sequences=72, heldout=32, batch=4, official_eval=False, **args))
+        out = Path(scratch) / variant
+        result = h8.run(spec, out)
+        records = [json.loads(line) for line in (out / 'metrics.jsonl').read_text().splitlines()]
+        assert result['complete'] and len(records) == 10, (variant, len(records))
+        cut = [r for r in records if r['phase'] == 'cut']
+        if variant == 'clip':
+            assert all(-1 <= r['cosine_to_identity'] <= 1 for r in cut if r['step'] % 5 == 0)
+        if variant == 'agree':
+            assert 0 <= records[-1]['agree_kept'] <= 1
+        if variant == 'runway':
+            assert 'runway' in records[-1] and len(records[-1]['runway']) == 3
+        if variant == 'budget':
+            assert all(0 <= r['low_tier'] <= 1 for r in cut) and any(r['low_tier'] > 0 for r in cut)
+
+
 if __name__ == '__main__':
     torch.set_num_threads(8)
     torch.manual_seed(0)

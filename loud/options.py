@@ -148,6 +148,11 @@ H8 = dict(
     nextlat_onset='handoff',    # E14: from the Boost -> Cut handoff ('handoff') or the first update ('start')
     latent_boost='none',        # E15: Boost's sublayers also ('plus') or only ('only') predict the teacher's latent
     latent_lambda=1.0,          # E15 'plus': the latent loss's weight beside the logit-lens readouts
+    # synthesis-mode experiments (loud/h8.py), at most one per run, each a fixed rule:
+    clip_credit=False,          # E10 (a): each token's credit norm at a site capped at 3x the site's batch median
+    agree=False,                # E10 (b): block weight-update entries kept where >= 70% of the tokens agree in sign
+    runway=False,               # E11: each token's credit at a site weighted by how far its loss keeps falling
+    budget_theta=0.0,           # E13: 64 rows per site where max(n-gram loss, model loss) <= theta nats (0: off)
 )
 
 IDENTITY = dict(
@@ -187,7 +192,7 @@ DIAGNOSE = dict(
     checkpoint=None,            # '<job id>:<file>' (e.g. e1.h8_synth.s0:ckpt_20.pt) or a path relative to the repo
     row=0,                      # the held-out sequence (0-31 of the 10M order's last 32) measured
 )
-TOOLS = ('cos_to_autograd', 'credit_dump', 'deep_readout_check', 'linearity_check', 'h8_validation')
+TOOLS = ('cos_to_autograd', 'credit_dump', 'deep_readout_check', 'linearity_check', 'h8_validation', 'ngram_tiers')
 
 
 def positive(o, *keys):
@@ -345,8 +350,15 @@ def h8_options(args):
         if o['rows'] & (o['rows'] - 1) or o['rows'] > width:
             raise ValueError(f'rows must be a power of two up to the width ({width})')
     scheme = o['rows'] not in (None, width) or o['prior'] != 'none'
-    if o['mode'] == 'cut' and (scheme or o['compare_every']):
-        raise ValueError('rows, prior and compare_every are synthesis-mode options')
+    changes = [key for key, on in (('rows/prior', scheme), ('clip_credit', o['clip_credit']), ('agree', o['agree']),
+                                   ('runway', o['runway']), ('budget_theta', o['budget_theta'] != 0)) if on]
+    if o['mode'] == 'cut' and (changes or o['compare_every']):
+        raise ValueError('rows, prior, clip_credit, agree, runway, budget_theta and compare_every are synthesis-mode '
+                         'options')
+    if len(changes) > 1:
+        raise ValueError(f'one change per arm: {changes} are separate experiments')
+    if o['budget_theta'] < 0:
+        raise ValueError('budget_theta must be >= 0 nats (0: off)')
     for key in ('row_assign',):
         if key in args and o['rows'] in (None, width):
             raise ValueError(f'{key} needs rows below the width')

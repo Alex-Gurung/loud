@@ -1,0 +1,19 @@
+# E13 in H8 synthesis mode, theta 3 nats: a token reads 64 Hadamard rows per site (token-assigned within the tier,
+# scaled by 512 / 64) when its loss under both a streaming n-gram model of the training stream so far (orders 1-4,
+# Witten-Bell, scored before each batch is added, held-out rows never added) and the network is at most theta;
+# otherwise the full cycle (the exact credit). The one knob: theta in {2, 3, 4}. metrics.jsonl logs the low tier's
+# share (low_tier). Against e1.h8_synth; gated by e13.gate_theta3. On the real chain later, as separate arms: the
+# row rule alone, and future-token draws only on copy tokens alone.
+experiment: e13
+variant: theta3
+task: h8
+seeds: [0, 1, 2]
+priority: 70
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0, e13.gate_theta3.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  mode: synthesis
+  budget_theta: 3.0
+  compare_every: 50
+  heldout_every: 100

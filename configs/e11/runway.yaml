@@ -1,0 +1,20 @@
+# E11, per-token runway weights in H8 synthesis mode: under the cut a token's loss can be evaluated at any distance
+# along its credit, so for each token and site the activation moves along -g/|g| by d x RMS per coordinate, d in
+# {0.01, 0.02, 0.04, 0.08} (reforward, keys and values held); alpha is the d with the lowest loss (0 if none is below
+# the clean loss), normalized to mean 1 per site, and weights the token's credit there before the weight gradients.
+# No knob beyond the fixed grid. metrics.jsonl logs the distribution of chosen moves per site every 10 updates. On the
+# real chain this is 4 probes per site per token against 512; in H8 it costs several synthesis updates (replays with
+# dense attention). Against e1.h8_synth: success is beating it by 0.02.
+experiment: e11
+variant: runway
+task: h8
+seeds: [0, 1, 2]
+priority: 70
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  mode: synthesis
+  runway: true
+  compare_every: 50
+  heldout_every: 100
