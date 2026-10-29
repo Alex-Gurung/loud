@@ -1,5 +1,5 @@
 # Runs before the long identity-path jobs: a complete short run (the 1M range, 57 updates) of PR #26's estimator on
-# the GPU through E6's windows (128 rows, one cycle per 4 updates), the drift check, H3, H4 and official scoring.
+# the GPU, through H3, H4 and official scoring.
 experiment: verify
 variant: identity_smoke
 task: identity
@@ -10,10 +10,6 @@ args:
   sequences: 1M
   heldout: 32
   batch: 8
-  rows: 128
-  row_offset_per_step: true
-  drift_every: 10
   heldout_every: 10
   checkpoints: true
-  means: true
 notes: Pipeline check only; its numbers are not a result.

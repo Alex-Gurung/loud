@@ -26,6 +26,7 @@ import torch
 from .checkpoints import MERGE_DECAYS, FractionCheckpoints, TrajectoryMeans
 from .data import SEQ, benchmark_split, load_split
 from .heldout import HeldoutScorer, mean_loss
+from .options import checkpoints_on
 from .runlog import Run
 from .score import score_in_subprocess
 
@@ -85,7 +86,7 @@ def train(spec, run_dir, o, build, method):
     trainer.reset()
 
     heldout = HeldoutScorer(split.heldout, run_dir / 'heldout.jsonl', dev)
-    checkpoints = FractionCheckpoints(run_dir, steps, dtype=o['checkpoint_dtype'], enabled=o['checkpoints'])
+    checkpoints = FractionCheckpoints(run_dir, steps, dtype=o['checkpoint_dtype'], enabled=checkpoints_on(o, seed))
     means = TrajectoryMeans(len(split.train), enabled=o['means'])
     val_rows = load_split('val.pt') if o['eval_every'] else None
 

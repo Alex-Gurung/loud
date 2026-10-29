@@ -106,15 +106,6 @@ def test_gpu_requirement(q, tmp_path):
     assert q.claim('w', 'NVIDIA H100 80GB HBM3')['id'] == 'x'
 
 
-def test_gpu_count_must_match_the_worker(q, tmp_path):
-    q.submit(dict(job('big', tmp_path, priority=1), spec=dict(gpus=8)))
-    q.submit(job('small', tmp_path, priority=2))
-    assert q.claim('w1', 'H100')['id'] == 'small'  # a one-GPU worker skips the 8-GPU job
-    assert q.claim('w8', 'H100', gpus=8)['id'] == 'big'
-    q.submit(job('small2', tmp_path))
-    assert q.claim('w8', 'H100', gpus=8) is None  # and an 8-GPU worker never takes a one-GPU job
-
-
 def test_heartbeat_keeps_lease(q, tmp_path):
     q.submit(job('x', tmp_path))
     claimed = q.claim('w')

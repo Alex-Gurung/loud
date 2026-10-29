@@ -1,19 +1,14 @@
-# Noise harness 8-GPU worker: one 8 x H100 node for E12's record runs (jobs with `gpus: 8`, run under torchrun). It
-# claims only 8-GPU jobs, so it never idles seven GPUs on a one-GPU job; start it only when such jobs are ready.
-# Otherwise as worker/gpu_worker.yaml (one H100), which runs queued jobs from /mnt/disk/loud/artifacts/queue one at a time.
-# The stylo worker pattern: launched by the user from the root node, shared PVC, pinned image, no package
-# installation or download at startup. Exits by itself after LOUD_IDLE_EXIT_SECONDS with nothing to run.
+# Noise harness GPU worker for a two-GPU pod: two workers, each pinned to one of the pod's H100s
+# (CUDA_VISIBLE_DEVICES) and running one-GPU jobs from /mnt/disk/loud/artifacts/queue one at a time, as two
+# gpu_worker.yaml pods would. Otherwise the same as gpu_worker.yaml (see there).
 #
-#   kubectl -n eidf107ns create -f worker/gpu_worker_8.yaml
+#   kubectl -n eidf107ns create -f worker/gpu_worker_2.yaml
 #
-# The image is stylo's vLLM 0.32.0 runtime (torch 2.13, Triton, PyYAML), used only for its PyTorch stack; every run
-# records the versions. Hardware is pinned to H100 80GB so wall-clocks are comparable across runs; see
-# gpu_worker_any.yaml to also accept H200 (collect.py flags variants whose seeds ran on mixed GPUs).
 # EIDF does not support ephemeral-storage requests or limits.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  generateName: alexgurung-loud-worker8-
+  generateName: alexgurung-loud-worker2-
   labels:
     eidf/user: alexgurung
     kueue.x-k8s.io/queue-name: eidf107ns-user-queue
@@ -53,6 +48,8 @@ spec:
               value: /mnt/disk/loud
             - name: LOUD_QUEUE_DIR
               value: /mnt/disk/loud/artifacts/queue
+            - name: LOUD_WORKERS_PER_POD
+              value: "2"
             - name: LOUD_IDLE_EXIT_SECONDS
               value: "1200"
             - name: LOUD_MIN_FREE_GB
@@ -63,13 +60,13 @@ spec:
               value: "false"
           resources:
             requests:
-              cpu: "32"
-              memory: 512Gi
-              nvidia.com/gpu: "8"
+              cpu: "16"
+              memory: 128Gi
+              nvidia.com/gpu: "2"
             limits:
-              cpu: "32"
-              memory: 512Gi
-              nvidia.com/gpu: "8"
+              cpu: "16"
+              memory: 128Gi
+              nvidia.com/gpu: "2"
           volumeMounts:
             - name: disk
               mountPath: /mnt/disk
@@ -82,4 +79,4 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 64Gi
+            sizeLimit: 32Gi

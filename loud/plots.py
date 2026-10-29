@@ -18,6 +18,7 @@ from .collect import counts, own_score, runs
 from .common import read_json, read_jsonl
 from .paths import ARTIFACTS, RUNS
 
+FULL_CYCLE = ('e1', 'h8_synth')  # E6's and E7's reference: H8 synthesis with all 512 rows (K = 1)
 SLOTS = ('#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948')
 INK, INK_2, MUTED, SURFACE, GRID = '#0b0b0b', '#52514e', '#8a8984', '#fcfcfb', '#e6e5e1'
 SITES = ['emb'] + [f'mid{i}' for i in range(8)]
@@ -124,31 +125,6 @@ def curves_plot(plt, by_variant, palette, out, title, window=25):
     fig.suptitle(title, x=0.01, ha='left', fontsize=10)
     fig.tight_layout()
     fig.savefig(out / 'curves.png')
-    plt.close(fig)
-
-
-def drift_plot(plt, by_variant, palette, out):
-    """E6: the cosine of a full-cycle estimate on a held-out sequence with the momentum ANVIL II steps along."""
-    fig, ax = plt.subplots(figsize=(6.4, 3.8))
-    drawn = False
-    for v in sorted(by_variant):
-        # the identity path steps along a blend of ANVIL II's momenta; PR #40's chain along the fast one alone
-        series = [{m['step']: m['drift'].get('blend', m['drift'].get('fast')) for m in metrics(r) if 'drift' in m}
-                  for r in by_variant[v]]
-        xs, ys = seed_mean([s for s in series if s])
-        if xs:
-            ax.plot(xs, ys, color=palette[v], marker='o', markersize=3, label=v)
-            drawn = True
-    if not drawn:
-        plt.close(fig)
-        return
-    ax.set_xlabel('update')
-    ax.set_ylabel('cosine')
-    ax.set_title('drift check: full-cycle estimate vs the momentum ANVIL II steps along (mean over seeds)', loc='left',
-                 fontsize=9)
-    ax.legend(fontsize=7.5)
-    fig.tight_layout()
-    fig.savefig(out / 'drift.png')
     plt.close(fig)
 
 
@@ -320,14 +296,14 @@ def e12_table(out, target=3.5):
     if not rows:
         return None
     text = markdown(['variant', 'n', 'val', 'val, plain weights', f'reaches {target}'], rows)
-    text += ('\nBoth the records and the backprop proxies (bp_*) run the record\'s end merge: compare val with val and '
-             'the plain weights with the plain weights.\n')
+    text += ('\nRuns with the record\'s end merge report val after it: compare val with val and the plain weights '
+             'with the plain weights.\n')
     (out / 'summary.md').write_text(text)
     return text
 
 
 def time_table(experiment, out, baseline=None):
-    """Equal loss at lower time (E6, E7, E11 on the Cut chain): per variant and for the baseline cell, the final
+    """Equal loss at lower time (E6's and E7's probe budgets): per variant and for the baseline cell, the final
     validation loss (after the end merge where there is one), the plain weights' and the training time."""
     cells = dict(counted(experiment))
     if baseline:
@@ -350,8 +326,8 @@ def time_table(experiment, out, baseline=None):
 
 
 def e7_tables(out):
-    """E7: its precondition (H6's credit_dump) and its criterion (loss and time against e6.cut_k1)."""
-    return '\n'.join(t for t in (e7_table(out), time_table('e7', out, ('e6', 'cut_k1'))) if t) or None
+    """E7: its precondition (H6's credit_dump) and its criterion (loss and time against the full cycle)."""
+    return '\n'.join(t for t in (e7_table(out), time_table('e7', out, FULL_CYCLE)) if t) or None
 
 
 def diagnostic(experiment, variant):
@@ -435,14 +411,16 @@ def e8_plot(plt, out):
     return True
 
 
-EXTRA = {'e3': [e3_plot], 'e4': [e4_plots], 'e6': [drift_plot], 'e12': [val_time_plot]}
-TABLES = {'e2': e2_table, 'e5': e5_table, 'e6': partial(time_table, 'e6'), 'e7': e7_tables, 'e8': e8_table,
-          'e11': partial(time_table, 'e11', baseline=('e6', 'cut_k1')), 'e12': e12_table,
+EXTRA = {'e3': [e3_plot], 'e4': [e4_plots], 'e12': [val_time_plot]}
+TABLES = {'e2': e2_table, 'e5': e5_table, 'e6': partial(time_table, 'e6', baseline=FULL_CYCLE), 'e7': e7_tables,
+          'e8': e8_table, 'e10': partial(time_table, 'e10', baseline=FULL_CYCLE),
+          'e11': partial(time_table, 'e11', baseline=FULL_CYCLE), 'e12': e12_table,
+          'e13': partial(time_table, 'e13', baseline=FULL_CYCLE),
           'e14': partial(gap_table, 'e14'), 'e15': partial(gap_table, 'e15')}
 # The plan's reference cell for experiments whose baseline lives in E1.
-BASELINES = {'e2': ('e1', 'bp_b8'), 'e4': ('e1', 'bp_b8'), 'e10': ('e1', 'bp_b8'), 'e3': ('e1', 'bp_b4'),
-             'e8': ('e1', 'bp_b4'), 'e9': ('e1', 'bp_b4'), 'e7': ('e6', 'cut_k1'), 'e11': ('e6', 'cut_k1'),
-             'e14': ('e1', 'h8_cut'), 'e15': ('e1', 'h8_cut')}
+BASELINES = {'e2': ('e1', 'bp_b8'), 'e4': ('e1', 'bp_b8'), 'e3': ('e1', 'bp_b4'), 'e8': ('e1', 'bp_b4'),
+             'e9': ('e1', 'bp_b4'), 'e6': FULL_CYCLE, 'e7': FULL_CYCLE, 'e10': FULL_CYCLE, 'e11': FULL_CYCLE,
+             'e13': FULL_CYCLE, 'e14': ('e1', 'h8_cut'), 'e15': ('e1', 'h8_cut')}
 FIGURES = {'e8': e8_plot}
 
 

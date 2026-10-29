@@ -11,4 +11,4 @@ args:
   heldout: 0
   batch: 8
 expect:
-  val_loss: [4.1772, 0.01]
+  val_loss: [4.1772, 0.02]  # v2's tolerance for verification 3

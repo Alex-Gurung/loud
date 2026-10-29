@@ -1,9 +1,5 @@
 """Task registry and option tables (no torch import, so submission checks run on the CPU pod)."""
-import json
 import re
-
-from .launch import settings_fields
-from .paths import PINS, REPO
 
 TASKS = {
     'proxy': ('loud.proxy', 'run'),               # H1 backprop proxy
@@ -75,7 +71,8 @@ TRAINING = dict(
     batch=8,                    # sequences per update
     preset='38m',               # model size; only '38m' is the benchmark model (the others are for smoke tests)
     stop_after=0,               # stop after this many updates, schedule unchanged (log matching); 0 = full epoch
-    checkpoints=False,          # H4 fraction checkpoints (ckpt_00/10/20/50/100.pt)
+    checkpoints=False,          # H4 fraction checkpoints (ckpt_00/10/20/50/100.pt): true, false, or the seeds that keep
+                                # them (e.g. [0]: only seed 0's, the ones the diagnostics read)
     checkpoint_dtype='bfloat16',
     checkpoint_optimizer=False, # also ANVIL II's state with each checkpoint (about 0.2 GB each), for H6 direction_stats
     means=False,                # H4: the record's nine trajectory means from 60%, scored on the held-out set at the end
@@ -158,12 +155,7 @@ H8 = dict(
     budget_theta=0.0,           # E13: 64 rows per site where max(n-gram loss, model loss) <= theta nats (0: off)
 )
 
-IDENTITY = dict(
-    TRAINING,
-    rows=None,                  # Hadamard rows per token in the top-stream probe (None: PR #26's full cycle, 512)
-    row_offset_per_step=False,  # E6: update s uses rows [(s mod K) * rows, ...), K = 512 / rows
-    drift_every=0,              # E6: every N updates, a full-cycle estimate on a held-out sequence vs the momentum
-)
+IDENTITY = dict(TRAINING)
 
 CUT = dict(
     TRAINING,
@@ -173,20 +165,13 @@ CUT = dict(
     end_merge=True,             # the record's end merge on the held-out sequences, timed with the training
     merge_batch=False,          # the merge scores its candidates in one batch, not rank by rank (bf16 rounding only)
     reverse_sum=False,          # the step's 8-way gradient sum in reversed rank order: calibrates its rounding
-    rows=None,                  # E6: Hadamard rows per token at each chain site (None: the full cycle, 512)
-    row_offset_per_step=False,  # E6: update s reads rows [(s mod K) * rows, ...) of a basis held for K updates
-    drift_every=0,              # E6: every N updates (Cut phase), a full-cycle estimate on a held-out row vs momentum
-    rows_tiled=False,           # E7's partial cycle at fixed rows: windows tiled across tokens, around the guess
-    rows_start=None,            # E7: rows per token at the first Cut update, ramped linearly up to the full cycle...
-    rows_full_at=None,          # ...reached at this fraction of the run's updates (tiled, as rows_tiled)
-    rows_check=0.0,             # E7's self-check: rows rise when the guess's relative error past them exceeds this
-    target_damping=0.0,         # E11: per-token targets, the writers' ridge fit (x mean diag A^T A); 0 = off
-    curvature_damping=0.0,      # E8: lambda, in squared ANVIL II steps (loud/curvature.py), Cut phase; 0 = off
-    damp_directions=16,         # E8: tracked top singular directions of each block matrix's pending update
-    damp_every=50,              # E8: Cut updates between refreshes of the directions and their curvature
+    rows=None,                  # Hadamard rows per token at each chain site in the Cut phase (None: the full cycle)
+    row_assign='token',         # 'time': all tokens read the same rows, rotating across updates; 'token': token t's
+                                # window starts at (t mod K) rows, so every update covers the basis (K = 512 / rows)
+    prior='none',               # 'identity' (E7): the mid sites measure the identity-path guess's residual
+    row_budget=None,            # E13: a loud.cut.ROW_BUDGETS strategy, each token's own row count (token windows)
 )
-CUT_SWITCH = 0.2                # PR #40's Boost fraction (Settings.switch): Cut, and its chain, start after it
-ROW_QUANTUM = 64                # E7's ramp moves in steps of 64 rows, so only a few chain shapes compile
+ROW_ASSIGNS, PRIORS = ('time', 'token'), ('none', 'identity')
 
 SCORE = dict(checkpoint=None, splits=['val'])
 
@@ -204,10 +189,20 @@ def positive(o, *keys):
             raise ValueError(f'{key} must be a positive integer')
 
 
+def checkpoints_on(o, seed):
+    """Whether this seed's run keeps H4's fraction checkpoints (the `checkpoints` option: true, false or seeds)."""
+    return o['checkpoints'] is True or (isinstance(o['checkpoints'], list) and seed in o['checkpoints'])
+
+
 def check_types(o, table):
-    """Each option has its default's type: booleans are booleans, counts are integers >= 0, numbers are numbers."""
+    """Each option has its default's type: booleans are booleans, counts are integers >= 0, numbers are numbers;
+    `checkpoints` may also be a list of seeds."""
     for key, default in table.items():
         value = o[key]
+        if key == 'checkpoints' and isinstance(value, list):
+            if not all(isinstance(s, int) and not isinstance(s, bool) for s in value):
+                raise ValueError(f'checkpoints must be true, false or a list of seeds, not {value!r}')
+            continue
         if isinstance(default, bool):
             ok = isinstance(value, bool)
         elif isinstance(default, int):
@@ -217,8 +212,8 @@ def check_types(o, table):
         else:
             continue  # strings and None defaults are checked by name below
         if not ok:
-            kind = 'true or false' if isinstance(default, bool) else 'an integer >= 0' if isinstance(default, int) \
-                else 'a number'
+            kind = ('true, false or a list of seeds' if key == 'checkpoints' else 'true or false') \
+                if isinstance(default, bool) else 'an integer >= 0' if isinstance(default, int) else 'a number'
             raise ValueError(f'{key} must be {kind}, not {value!r}')
 
 
@@ -394,19 +389,7 @@ def h8_options(args):
 
 
 def identity_options(args):
-    o = training_options(args, IDENTITY, 'identity')
-    if o['rows'] is not None:
-        positive(o, 'rows')
-        width = PRESETS[o['preset']][1]
-        if o['rows'] & (o['rows'] - 1) or o['rows'] > width:
-            raise ValueError(f'rows must be a power of two up to the width ({width}): a share of the Hadamard cycle')
-        if o['rows'] == width:
-            o['rows'] = None
-    if o['row_offset_per_step'] and o['rows'] is None:
-        raise ValueError('row_offset_per_step needs rows below the full cycle')
-    if o['drift_every'] and not o['heldout']:
-        raise ValueError('the drift check measures a held-out sequence: it needs heldout > 0')
-    return o
+    return training_options(args, IDENTITY, 'identity')
 
 
 def cut_options(args):
@@ -428,35 +411,15 @@ def cut_options(args):
             raise ValueError(f'rows must be a power of two from {split} (the GPUs of a sequence) to {width}')
         if o['rows'] == width:
             o['rows'] = None
-    if o['row_offset_per_step'] and o['rows'] is None:
-        raise ValueError('row_offset_per_step needs rows below the full cycle')
-    if (o['rows_start'] is None) != (o['rows_full_at'] is None):
-        raise ValueError('the E7 ramp needs both rows_start and rows_full_at')
-    if o['rows_start'] is not None:
-        if o['rows'] is not None:
-            raise ValueError('give rows (E6) or the rows_start ramp (E7), not both')
-        if (not isinstance(o['rows_start'], int) or isinstance(o['rows_start'], bool)
-                or o['rows_start'] % ROW_QUANTUM or not 0 < o['rows_start'] < width):
-            raise ValueError(f'rows_start must be a multiple of {ROW_QUANTUM} below {width}')
-        f = o['rows_full_at']
-        if not isinstance(f, (int, float)) or isinstance(f, bool) or not CUT_SWITCH < f <= 1:
-            raise ValueError(f'rows_full_at is a fraction of the run after the Boost phase ({CUT_SWITCH}, 1]')
-    if o['drift_every'] and not o['heldout']:
-        raise ValueError('the drift check measures a held-out sequence: it needs heldout > 0')
-    if o['rows_tiled'] and (o['rows'] is None or o['row_offset_per_step']):
-        raise ValueError("rows_tiled is E7's partial cycle at a fixed count: rows below the full cycle, no offset")
-    for key in ('rows_check', 'target_damping', 'curvature_damping'):
-        if o[key] < 0:
-            raise ValueError(f'{key} must be >= 0 (0 = off)')
-    if o['rows_check'] and not (o['rows_tiled'] or o['rows_start'] is not None):
-        raise ValueError("rows_check checks E7's guess: it needs tiled rows (rows_tiled or the rows_start ramp)")
-    if o['curvature_damping']:
-        positive(o, 'damp_directions', 'damp_every')
-        if o['damp_directions'] > width:
-            raise ValueError('damp_directions must be at most the width')
-        if not 2 <= batch <= world:
-            raise ValueError('curvature_damping takes its noise across the batch, one sequence per virtual GPU group: '
-                             '2 <= batch <= virtual_gpus')
+    if o['row_assign'] not in ROW_ASSIGNS or o['prior'] not in PRIORS:
+        raise ValueError(f'row_assign must be one of {ROW_ASSIGNS}, prior one of {PRIORS}')
+    if o['prior'] != 'none' and o['rows'] is None:
+        raise ValueError('prior acts on a partial cycle: it needs rows below the full cycle')
+    if o['row_budget'] is not None:
+        if not isinstance(o['row_budget'], str):
+            raise ValueError('row_budget names a loud.cut.ROW_BUDGETS strategy')
+        if o['rows'] is None or o['row_assign'] != 'token':
+            raise ValueError('row_budget gives each token its own count up to rows: it needs rows and token windows')
     return o
 
 
@@ -471,25 +434,12 @@ def score_options(args):
 
 
 def reference_options(args):
-    allowed = {'script', 'cwd', 'argv', 'result', 'settings', 'train_rows', 'script_seed'}
+    allowed = {'script', 'cwd', 'argv', 'result'}
     if set(args) - allowed or not isinstance(args.get('script'), list) or len(args['script']) != 2:
         raise ValueError(f'reference needs script: [repo, path] and accepts only {sorted(allowed)}')
     for arg in args.get('argv', []):
         if set(re.findall(r'{(\w*)}', arg)) - {'data', 'out', 'seed'}:
             raise ValueError(f'reference argv {arg!r}: the placeholders are {{data}}, {{out}} and {{seed}}')
-    if not isinstance(args.get('settings', {}), dict):
-        raise ValueError("reference settings: a mapping of the script's Settings fields to values")
-    if args.get('settings'):
-        repo, relpath = args['script']
-        script = REPO / json.loads(PINS.read_text())['repos'][repo]['path'] / relpath
-        unknown = set(args['settings']) - settings_fields(script)
-        if unknown:
-            raise ValueError(f'reference settings: {relpath} has no Settings field {sorted(unknown)}')
-    rows = args.get('train_rows', 0)
-    if not isinstance(rows, int) or isinstance(rows, bool) or not 0 <= rows <= RANGES['30M']:
-        raise ValueError(f'reference train_rows: a row count up to {RANGES["30M"]} (0: all of train.pt)')
-    if not isinstance(args.get('script_seed', False), bool):
-        raise ValueError('reference script_seed: true or false')
     return args
 
 

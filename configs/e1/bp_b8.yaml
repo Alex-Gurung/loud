@@ -1,5 +1,6 @@
-# E1: backprop proxy at batch 8 (the record's reference). The last 32 sequences of the order are held out (H3) in
-# every experiment cell, so baselines and variants train on the same 4,848 sequences.
+# E1: backprop proxy at 8 sequences per update, the anchor for 3.708 (about 3.71 here, with the last 32 sequences of
+# the order held out, as in every experiment cell). Seed 0 keeps the H4 checkpoints, with ANVIL II's state, for the
+# diagnostics run on backprop checkpoints.
 experiment: e1
 variant: bp_b8
 task: proxy
@@ -11,6 +12,6 @@ args:
   sequences: 10M
   heldout: 32
   batch: 8
-  means: true
   heldout_every: 50
-  checkpoints: true
+  checkpoints: [0]
+  checkpoint_optimizer: true
