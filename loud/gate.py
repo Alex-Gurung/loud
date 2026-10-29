@@ -1,14 +1,15 @@
 """Task 'gate': one of the plan's decision rules on finished diagnostics, as a check that other jobs can wait for.
-Each named value is one field of a diagnose run's summary file, taken at every site the file lists and reduced to the
-median over the sites; `expect` (with {min, max} bounds) passes or fails the gate, and a job with the gate in its
-`after` runs only if it passes. No GPU work.
+Each named value is one field of a diagnose run's summary file, taken at every site the file lists (or those whose
+name matches the optional glob pattern) and reduced to the median over the sites; `expect` (with {min, max} bounds)
+passes or fails the gate, and a job with the gate in its `after` runs only if it passes. No GPU work.
 
     args:
       values:
         early: [h6.credit_dump_c20.s0, credit_dump.json, median]        # job, its summary file, the field per site
-        mids: [h6.credit_dump_c20.s0, credit_dump.json, median, mid]    # optional: only the sites named mid*
+        mids: [h6.credit_dump_c20.s0, credit_dump.json, median, 'S[1-8]']  # optional: only the mid sites S1..S8
     expect: {early: {min: 0.9}}
 """
+from fnmatch import fnmatchcase
 import statistics
 
 from . import paths
@@ -23,7 +24,7 @@ def run_task(spec, run_dir):
         experiment, variant, seed = job.rsplit('.', 2)
         summary = read_json(paths.run_dir(experiment, variant, int(seed[1:])) / file)
         sites = {site: v[field] for site, v in summary.items()
-                 if isinstance(v, dict) and field in v and site.startswith(prefix[0] if prefix else '')}
+                 if isinstance(v, dict) and field in v and fnmatchcase(site, prefix[0] if prefix else '*')}
         if not sites:
             raise ValueError(f'{job}: {file} has no {field!r} at any site')
         result[name], result[f'{name}_sites'] = statistics.median(sites.values()), sites

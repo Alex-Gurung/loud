@@ -302,9 +302,10 @@ the worse end). Forward and backward cost one run; optimizer compute and state a
 **E8 and E9** change ANVIL II's orthogonalization through one hook (`loud/anvil.py`); a CPU test checks the hooked
 optimizer reproduces boost-cut's ANVIL II bit for bit, and with both off the proxy uses the original.
 - **E8** (`loud/snr.py`). The diagnostic is H6's `snr_spectrum` (below). The intervention (`snr_scaling`:
-  `control`, `snr`, `rate`; in `configs/followups/e8/`): polar's U Vᵀ becomes U diag(r) Vᵀ with r from the update's 8
-  per-sequence projections, ANVIL II's lane gain and renormalization off in every arm. One SVD per block matrix per
-  update. Its second setting is H8's (below).
+  `control`, `snr`, `rate`; in `configs/followups/e8/`): the step becomes U diag(r) Vᵀ, with U and V the singular
+  directions of ANVIL II's momentum as it stood before the batch and r from the batch's 8 per-sequence projections
+  onto them; ANVIL II's lane gain and renormalization are off in every arm. One SVD per block matrix per update. Its
+  second setting is H8's (below).
 - **E9** (`fisher`, `loud/fisher.py`; P3, in `configs/followups/e9/`): the momentum is left-preconditioned by
   (F + δI)^(−1/2), F the output-side Fisher from a backward with labels sampled from the model and δ = 1e-3 × its mean
   eigenvalue, before ANVIL II's unchanged orthogonalization. The control is `e1.bp_b8`. Run only if E8 shows that
@@ -334,7 +335,9 @@ order changes only the rounding). Differences from PR #40:
   mid sites the rows measure the residual of the identity-path guess (the top stream's credit carried down the
   residual scalars, as H6's `credit_dump` guesses it), and the guess is added back; the embedding site has no guess
   and keeps the plain estimate. `row_budget` (E13's hook) names a `loud.cut.ROW_BUDGETS` strategy that gives each token
-  its own count up to `rows`; the chain still evaluates the rows past a token's count, so it changes the estimate, not
+  its own count up to `rows`: `ngram` is E13's rule (64 rows where a streaming n-gram model of the stream so far and
+  the network both put the token's loss at most `budget_theta`, `rows` elsewhere; the table learns every update's
+  batch after it). The chain still evaluates the rows past a token's count, so a budget changes the estimate, not
   yet the cost. The full cycle runs the record's `chain_credits` itself. `chain_chunk` compiles one graph per site and
   moves per token (17 for one row count), all in the warmup, which fails if any planned graph is missing. CPU tests
   check that the full cycle is the record's, that the K time windows of one basis average to the full cycle (with the
@@ -360,9 +363,11 @@ cross-token patches nor its top-512 MLP routes, so H8 and backprop bracket the c
 - **Schemes** (synthesis): `rows` m reads m rows of a site's signed Hadamard basis per token, scaled by 512 / m
   (unbiased through the random column signs); `row_assign: time` (all tokens of update s share rows from
   (s mod K) m, K = 512 / m) or `token` (token t reads rows from (t mod K) m); `prior: identity` measures only the
-  residual of the identity-path guess (E7). Logs: every `compare_every` updates the cosine of the summed weight
-  gradient to the identity scheme's (`cosine_to_identity`), and every `rank_every` the stable rank of ANVIL II's
-  orthogonalization input per matrix type (`stable_rank`).
+  residual of the identity-path guess (E7) at the mid sites, as the chain does (S0 keeps the plain estimate). Logs:
+  every `compare_every` updates the cosine of the summed weight gradient to the identity scheme's
+  (`cosine_to_identity`), and every `rank_every` the stable rank of ANVIL II's orthogonalization input per matrix type
+  (`stable_rank`); both are timed apart and left out of the clock. Every Boost run logs the cut gradient's cosine to
+  backprop's at the handoff, and every run the effective ranks at 20% and 100% (E15's and E14's baselines).
 - **`reforward`** (`Replay`) reruns the network from a moved site with every key and value held, as the chain's
   probes run; E11 and H6's readout and linearity tools use it.
 - **Validation** (v2's bar before use): on CPU, synthesis with the identity scheme matches PR #40's Cut estimate
@@ -391,7 +396,8 @@ cross-token patches nor its top-512 MLP routes, so H8 and backprop bracket the c
   (`nextlat_target`), masked where the next token opens a document (`<|endoftext|>`, id 0), from the handoff or the
   first update (`nextlat_onset`). It trains the trunk and wte, never the head. Logged: its gradient's cosine to the
   next-token gradient at the top stream every 50 updates, and the effective ranks of the top latents and site credits
-  at 20% and 100%; the plots give the fraction of the `e1.h8_cut` to `e1.bp_b4` gap closed.
+  at 20% and 100%; the plots give the fraction of the gap from `e1.h8_cut` to `e1.bp_b4_pr40` (backprop on H8's
+  recipe and batch) closed.
 - **E15** (`latent_boost`): during Boost, per-sublayer predictors to the teacher's latent (1 − cosine) beside the
   logit-lens readouts (`plus`) or instead of them (`only`; the head then learns from the final readout alone);
   logged: per-sublayer readout and latent losses, and the cut gradient's cosine to backprop's at the handoff. The EMA
@@ -399,21 +405,26 @@ cross-token patches nor its top-512 MLP routes, so H8 and backprop bracket the c
 - **E8's H8 setting** (`snr_scaling` in synthesis mode, `configs/followups/e8/h8_*`): at 8 sequences per update on
   128 token rows (E6's best assignment at K = 4, to set before submitting), the Cut phase's ANVIL II becomes
   `ShapedBatchedAnvil` (PR #40's batched ANVIL II with the same hook; a CPU test checks it reproduces the original
-  bit for bit), with r from each sequence's synthesized gradient Gᵦᵀ Xᵦ. Boost keeps the record's optimizer: partial
+  bit for bit), with the momentum's directions from before the batch and r from each sequence's synthesized gradient
+  Gᵦᵀ Xᵦ. Boost keeps the record's optimizer: partial
   rows exist only in the Cut phase. `h8_exact_control` (every row, the control arm's optimizer) measures what the
   partial rows cost; the plots give the share SNR scaling recovers.
 - **E16** (`arch: ngram`, `loud/arch.py`): track-3 record #5's design, the pinned `train/arch/model.py` (12 × 1,024,
   value embeddings on every block plus per-block projections of hashed bigram, trigram and skip-bigram tables, 614M
   parameters), built with PR #40's init, under H8 cut mode (its n-gram embeddings flow through the cut graph, Boost and
-  reforward) and under the proxy with `recipe: pr40` at batch 4. The official scorer builds it from the same file, as
-  Noise scores track 3, so only the record's own shape (`preset: track3`, the default table rows) can be scored.
+  reforward) and under the proxy with `recipe: pr40` at batch 4. PR #40's optimizer has no rule for the n-gram tables,
+  so they join wte's Adam group (300× the base rate), record #5's own rule (`arch.embedding_rates`). The official
+  scorer builds the model from the same file, as Noise scores track 3, so only the record's own shape
+  (`preset: track3`, the default table rows) can be scored. The fixed model's backprop arm is `e1.bp_b4_pr40`.
 
 **H6, the diagnostic toolkit** (task `diagnose`, `loud/diagnostics.py`), offline on H4 checkpoints, one held-out
 sequence unless noted. Exact credits are the cut graph's in float32; probes run through `reforward` in bf16 where the
 chain does.
 - `credit_dump`: per site, the exact credit, the identity-path guess, their per-token cosine and E7's variance ratio
   ‖g − p‖² / ‖g‖².
-- `cos_to_autograd`: PR #26's estimate of the weight gradient against autograd's, per matrix type, block and group.
+- `cos_to_autograd`: an estimator's weight gradient against autograd's, per matrix type, block and group:
+  `estimator: identity` (PR #26), `h8` (H8 synthesis; also, per site, the cut graph's credit against the full
+  graph's: how much cross-token credit the cut drops) or `cut` (PR #40's Cut at the record's settings).
 - `linearity_check`: per site and probe size, how far each token's loss response to +v and −v is from linear.
 - `deep_readout_check` (E5): one 512-probe signed Hadamard cycle launched at S1, read at S2 to S8: per site the
   512 × 512 system's median condition number and the median cosine of its solution to the exact credit (plain, and
@@ -445,9 +456,8 @@ finding is triaged in [review/LEDGER.md](review/LEDGER.md). See [review/README.m
 
 ## Differences from the handoff found so far
 
-- The live track-1 record is now **3.338** (PR #46, a forward readout of cross-token credit, 56 min on 8×H100), not
-  3.409. Track 2 is now **3.499 in 8 min 20 s** (PR #44, the identity path, then Cut-lite at 8 rows per update); the
-  speedrun record is 22.9 s (PR #52).
+- The speedrun record (track 2) is now 22.9 s (PR #52), whose difficulty-balanced order stratifies whole sequences
+  across batches; it does not give tokens different probe budgets, so E13 stands.
 - The pod image ships torch 2.13. Noise pins torch 2.10.0, and the published runs used 2.10.
   `verify.score_record` (scoring) and the verification runs (training) show whether that matters.
 - The backprop target is boost-cut's ledger, 3.70835 at seed 0. The handoff's 3.708 is the same run rounded.
@@ -457,4 +467,11 @@ finding is triaged in [review/LEDGER.md](review/LEDGER.md). See [review/README.m
   also holds the measured sequences' own gradient: directions chosen from the same sequences make their noise look like
   signal (a pure-noise check showed SNR ~100 along them). It measures training sequences, since the held-out set has
   only 32.
-- E16's backprop arms use PR #40's recipe at batch 4, the same as H8's arms, so the comparison isolates the trainer.
+- E16's backprop arms, and the backprop end of E14's and E15's gap (`e1.bp_b4_pr40`), use PR #40's recipe at batch 4,
+  the same as H8's arms, so the comparison isolates the trainer.
+- E8's intervention takes its directions from the momentum before the batch, as its diagnostic does: the update
+  itself holds the batch's gradient at weight 0.14 to 0.21, and directions taken from it put a pure-noise batch's mean
+  r at 0.85 instead of 0.18 (review round 7). The batch enters the step only through r.
+- E6's mechanism ("each writer's gradient has rank at most m on its output side") holds per sequence: the record
+  draws fresh signs per sequence, so a batch of B time-assigned sequences spans up to B·m directions (measured 413,
+  252, 128 at m = 128, 64, 32 and batch 4). The stable-rank log shows how much of the effect survives.

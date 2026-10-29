@@ -9,8 +9,8 @@ priority: 30
 after_done: [h6.credit_dump_c50.s0, h6.credit_dump_c100.s0]
 args:
   values:
-    c50: [h6.credit_dump_c50.s0, credit_dump.json, variance_ratio, S]
-    c100: [h6.credit_dump_c100.s0, credit_dump.json, variance_ratio, S]
+    c50: [h6.credit_dump_c50.s0, credit_dump.json, variance_ratio, 'S[1-8]']  # the mid sites, where E7's prior acts
+    c100: [h6.credit_dump_c100.s0, credit_dump.json, variance_ratio, 'S[1-8]']
 expect:
   c50: {max: 0.5}
   c100: {max: 0.5}

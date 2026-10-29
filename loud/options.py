@@ -174,7 +174,9 @@ CUT = dict(
     row_assign='token',         # 'time': all tokens read the same rows, rotating across updates; 'token': token t's
                                 # window starts at (t mod K) rows, so every update covers the basis (K = 512 / rows)
     prior='none',               # 'identity' (E7): the mid sites measure the identity-path guess's residual
-    row_budget=None,            # E13: a loud.cut.ROW_BUDGETS strategy, each token's own row count (token windows)
+    row_budget=None,            # E13: a loud.cut.ROW_BUDGETS strategy, each token's own row count (token windows):
+                                # 'ngram', LOW_ROWS where the n-gram model and the network agree a token is easy
+    budget_theta=0.0,           # E13 'ngram': the low tier is max(n-gram loss, model loss) <= theta nats
 )
 ROW_ASSIGNS, PRIORS = ('time', 'token'), ('none', 'identity')
 
@@ -187,6 +189,7 @@ DIAGNOSE = dict(
     sequences=64,               # snr_spectrum: the training sequences measured (the run's next, after the checkpoint)
     batch=8,                    # snr_spectrum: the update batch the SNR is stated at (and the checkpoint run's)
     estimators=['backprop', 'synthesis', 'time_k4', 'token_k4'],  # snr_spectrum: per-sequence gradients (ESTIMATORS)
+    estimator='identity',       # cos_to_autograd: 'identity' (PR #26), 'h8' (H8 synthesis) or 'cut' (PR #40's Cut)
 )
 TOOLS = ('cos_to_autograd', 'credit_dump', 'deep_readout_check', 'linearity_check', 'h8_validation', 'ngram_tiers',
          'snr_spectrum', 'synth_vs_real')
@@ -377,9 +380,10 @@ def h8_options(args):
         raise ValueError(f'one change per arm: {changes} are separate experiments')
     if o['budget_theta'] < 0:
         raise ValueError('budget_theta must be >= 0 nats (0: off)')
-    for key in ('row_assign',):
-        if key in args and o['rows'] in (None, width):
-            raise ValueError(f'{key} needs rows below the width')
+    if ('row_assign' in args or o['prior'] != 'none') and o['rows'] in (None, width):
+        raise ValueError('row_assign and prior need rows below the width (with every row they change nothing)')
+    if o['checkpoint_optimizer']:
+        raise ValueError("checkpoint_optimizer reads boost-cut's ANVIL II state; PR #40's batched one is not checked")
     if o['nextlat'] < 0 or o['latent_lambda'] < 0:
         raise ValueError('nextlat and latent_lambda must be >= 0')
     if o['nextlat_target'] not in ('ema', 'live') or o['nextlat_onset'] not in ('handoff', 'start'):
@@ -425,7 +429,7 @@ def cut_options(args):
         positive(o, 'rows')
         if o['rows'] & (o['rows'] - 1) or not split <= o['rows'] <= width:
             raise ValueError(f'rows must be a power of two from {split} (the GPUs of a sequence) to {width}')
-        if o['rows'] == width:
+        if o['rows'] == width and o['row_budget'] is None:  # a budget's high tier reads every row of its window
             o['rows'] = None
     if o['row_assign'] not in ROW_ASSIGNS or o['prior'] not in PRIORS:
         raise ValueError(f'row_assign must be one of {ROW_ASSIGNS}, prior one of {PRIORS}')
@@ -436,6 +440,8 @@ def cut_options(args):
             raise ValueError('row_budget names a loud.cut.ROW_BUDGETS strategy')
         if o['rows'] is None or o['row_assign'] != 'token':
             raise ValueError('row_budget gives each token its own count up to rows: it needs rows and token windows')
+    if (o['row_budget'] == 'ngram') != (o['budget_theta'] > 0) or o['budget_theta'] < 0:
+        raise ValueError("row_budget 'ngram' needs budget_theta > 0 nats, and budget_theta acts only with it")
     return o
 
 
@@ -483,6 +489,8 @@ def diagnose_options(args):
     snr = [k for k in ('sequences', 'batch', 'estimators') if o[k] != DIAGNOSE[k]]
     if snr and o['tool'] != 'snr_spectrum':
         raise ValueError(f'{snr} apply to snr_spectrum only')
+    if o['estimator'] not in ('identity', 'h8', 'cut') or (o['estimator'] != 'identity' and o['tool'] != 'cos_to_autograd'):
+        raise ValueError("estimator ('identity', 'h8' or 'cut') applies to cos_to_autograd only")
     positive(o, 'sequences', 'batch')
     names = o['estimators']
     if not names or set(names) - set(ESTIMATORS) or len(set(names)) < len(names):
@@ -496,7 +504,7 @@ def gate_options(args):
     values = args.get('values')
     if set(args) != {'values'} or not isinstance(values, dict) or not values or not all(
             isinstance(v, list) and len(v) in (3, 4) and all(isinstance(x, str) for x in v) for v in values.values()):
-        raise ValueError('gate needs values: {name: [job id, summary file, field, optional site prefix]}')
+        raise ValueError('gate needs values: {name: [job id, summary file, field, optional site pattern]}')
     return args
 
 

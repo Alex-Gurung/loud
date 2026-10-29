@@ -1,0 +1,13 @@
+# H6 item 1 on e1.h8_synth.s0's 20% checkpoint, one held-out sequence: H8 synthesis (identity scheme)'s weight gradient
+# against autograd's, per matrix type, block and group, and per site the per-token cosine of the cut graph's credit to
+# the full graph's: how much cross-token credit the cut drops, site by site.
+experiment: h6
+variant: cos_to_autograd_h8_c20
+task: diagnose
+seeds: [0]
+priority: 30
+after: [e1.h8_synth.s0]
+args:
+  tool: cos_to_autograd
+  estimator: h8
+  checkpoint: e1.h8_synth.s0:ckpt_20.pt

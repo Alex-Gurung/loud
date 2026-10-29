@@ -1,0 +1,16 @@
+# E1: backprop at batch 4 with PR #40's recipe (its rates, betas and warmdown to 30%, without the end merge): the
+# matched backprop end for the H8 experiments, which train with that recipe at that batch. E14 and E15 report the
+# share of the gap from e1.h8_cut to this cell that they close; seeds 0-1 are E16's fixed-model backprop arm.
+experiment: e1
+variant: bp_b4_pr40
+task: proxy
+seeds: [0, 1, 2]
+priority: 50
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0]
+args:
+  final_dtype: float32  # exact: verifications and baselines keep their scored weights
+  recipe: pr40
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  heldout_every: 100

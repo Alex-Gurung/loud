@@ -68,7 +68,7 @@ def metrics(run):
     return read_jsonl(Path(run['run_dir']) / 'metrics.jsonl')
 
 
-def final_plot(plt, by_variant, palette, out, title, baseline=None):
+def final_plot(plt, by_variant, palette, out, title, baseline=None, name='final.png'):
     """baseline: (label, its runs), the plan's reference cell from another experiment, drawn in muted ink with a line
     at its mean - 0.02 (the plan's success margin)."""
     variants = sorted(by_variant, key=lambda v: statistics.fmean(r['val_loss'] for r in by_variant[v]))
@@ -96,7 +96,7 @@ def final_plot(plt, by_variant, palette, out, title, baseline=None):
     ax.set_xlabel('final validation loss (official scorer), lower is better')
     ax.set_title(title, loc='left', fontsize=10)
     fig.tight_layout()
-    fig.savefig(out / 'final.png')
+    fig.savefig(out / name)
     plt.close(fig)
 
 
@@ -278,22 +278,31 @@ def e8_table(out):
     return text
 
 
-def gap_table(experiment, out, low=('e1', 'bp_b4'), high=('e1', 'h8_cut')):
-    """E14 (and E15): each variant's final validation loss and the fraction of the gap between H8's cut-mode
-    Boost -> Cut (e1.h8_cut) and backprop at batch 4 (e1.bp_b4) it closes, means over seeds."""
+def gap_table(experiment, out, low=('e1', 'bp_b4_pr40'), high=('e1', 'h8_cut'), also=(), extra=()):
+    """E14 and E15: each variant's final validation loss and the fraction of the gap between H8's cut-mode
+    Boost -> Cut (e1.h8_cut) and backprop on the same recipe and batch (e1.bp_b4_pr40) it closes, means over seeds,
+    with the reference cells (and `also`, cells from elsewhere the plan compares against) as rows; `extra` adds the
+    experiment's own columns (header, function of a cell's runs)."""
     means = {}
     for name, (source, variant) in (('low', low), ('high', high)):
         found = counted(source).get(variant)
         means[name] = statistics.fmean(r['val_loss'] for r in found) if found else None
+    cells = [(v, runs_) for v, runs_ in sorted(counted(experiment).items())]
+    if not cells:
+        return None
+    cells += [(f'reference {source}.{variant}', counted(source).get(variant, []))
+              for source, variant in (high, *also, low)]
     rows = []
-    for v, runs_ in sorted(counted(experiment).items()):
+    for v, runs_ in cells:
+        if not runs_:
+            rows.append([v, 0, '-', '-'] + ['-' for _ in extra])
+            continue
         val = statistics.fmean(r['val_loss'] for r in runs_)
         closed = ('-' if None in means.values() or means['high'] == means['low']
                   else f'{(means["high"] - val) / (means["high"] - means["low"]):+.2f}')
-        rows.append([v, len(runs_), f'{val:.4f}', closed])
-    if not rows:
-        return None
-    text = markdown(['variant', 'n', 'val', f'gap closed ({high[0]}.{high[1]} -> {low[0]}.{low[1]})'], rows)
+        rows.append([v, len(runs_), f'{val:.4f}', closed] + [f(runs_) for _, f in extra])
+    text = markdown(['variant', 'n', 'val', f'gap closed ({high[0]}.{high[1]} -> {low[0]}.{low[1]})']
+                    + [h for h, _ in extra], rows)
     (out / 'gap.md').write_text(text)
     return text
 
@@ -328,15 +337,23 @@ def val_stats(runs_):
     return statistics.fmean(vals), (statistics.stdev(vals) if len(vals) > 1 else 0.0)
 
 
-def delta_table(experiment, out, baseline, extra=None):
+def delta_table(experiment, out, baseline, extra=None, also=()):
     """Each variant's final validation loss (mean +- sd over seeds) and its difference from the plan's reference cell
-    (negative: better). extra(runs) adds the experiment's own columns (header, function)."""
+    (negative: better). extra(runs) adds the experiment's own columns (header, function); `also` adds cells from
+    other experiments the plan compares against (E7: E6's matching arms without the prior)."""
     source, variant = baseline
     reference = counted(source).get(variant, [])
     base = val_stats(reference)[0] if reference else None
     header = ['variant', 'n', 'val', f'minus {source}.{variant}'] + ([h for h, _ in extra] if extra else [])
     rows = []
-    for v, runs_ in sorted(counted(experiment).items()):
+    cells = sorted(counted(experiment).items())
+    if not cells:
+        return None
+    cells += [(f'{e}.{v}', counted(e).get(v, [])) for e, v in also]
+    for v, runs_ in cells:
+        if not runs_:
+            rows.append([v, 0, '-', '-'] + ['-' for _ in extra or ()])
+            continue
         mean, sd = val_stats(runs_)
         rows.append([v, len(runs_), f'{mean:.4f} ± {sd:.4f}', '-' if base is None else f'{mean - base:+.4f}']
                     + [f(runs_) for _, f in extra or ()])
@@ -351,30 +368,33 @@ def delta_table(experiment, out, baseline, extra=None):
     return text
 
 
-def logged_mean(key, sub=None):
-    """A column: the mean over a cell's runs and logged updates of metrics field `key` (its `sub` entry)."""
+def logged_mean(key, sub=None, phase=None):
+    """A column: the mean over a cell's runs and logged updates (of `phase` only, if given) of metrics field `key`
+    (its `sub` entry)."""
     def column(runs_):
         values = [m[key] if sub is None else m[key][sub] for r in runs_ for m in metrics(r)
-                  if key in m and (sub is None or sub in m[key])]
+                  if key in m and (sub is None or sub in m[key]) and (phase is None or m.get('phase') == phase)]
         return f'{statistics.fmean(values):.4f}' if values else '-'
     return column
 
 
 def stable_rank_mean(runs_):
-    """E6's stable rank of the orthogonalization's input, the median over matrix types of the mean over updates."""
-    ranks = [m['stable_rank'] for r in runs_ for m in metrics(r) if 'stable_rank' in m]
+    """E6's stable rank of the orthogonalization's input, the median over matrix types of the mean over the Cut
+    phase's logged updates (Boost's are the same in every arm)."""
+    ranks = [m['stable_rank'] for r in runs_ for m in metrics(r) if 'stable_rank' in m and m.get('phase') == 'cut']
     if not ranks:
         return '-'
     kinds = sorted(ranks[0])
     return f'{statistics.median(statistics.fmean(x[k] for x in ranks if k in x) for k in kinds):.1f}'
 
 
-E6_COLUMNS = [('cosine to K = 1', logged_mean('cosine_to_identity')), ('stable rank', stable_rank_mean)]
+E6_COLUMNS = [('cosine to K = 1', logged_mean('cosine_to_identity', phase='cut')), ('stable rank', stable_rank_mean)]
+E7_ALSO = (('e6', 'token_k8'), ('e6', 'token_k4'))  # the same token rows (m = 64, 128) without the prior
 
 
 def e7_tables(out):
     """E7: its precondition (H6's credit_dump) and its criterion (loss against the full cycle)."""
-    return '\n'.join(t for t in (e7_table(out), delta_table('e7', out, FULL_CYCLE, E6_COLUMNS)) if t) or None
+    return '\n'.join(t for t in (e7_table(out), delta_table('e7', out, FULL_CYCLE, E6_COLUMNS, E7_ALSO)) if t) or None
 
 
 def e13_tables(out):
@@ -405,7 +425,7 @@ def tiers_table(out):
 def e16_table(out):
     """E16: the four arms (fixed and track-3 models, each under backprop and H8 cut-mode Boost -> Cut, PR #40's recipe
     at batch 4, seeds 0-1), whether H8 orders the two models as backprop does, and the gaps."""
-    cells = {('backprop', 'fixed'): counted('e16').get('bp_fixed', []),
+    cells = {('backprop', 'fixed'): [r for r in counted('e1').get('bp_b4_pr40', []) if r['seed'] in (0, 1)],
              ('backprop', 'track3'): counted('e16').get('bp_track3', []),
              ('H8', 'fixed'): [r for r in counted('e1').get('h8_cut', []) if r['seed'] in (0, 1)],
              ('H8', 'track3'): counted('e16').get('h8_track3', [])}
@@ -463,6 +483,51 @@ def e5_table(out, ridge=1e-3):
     return text
 
 
+def h6_tables(out):
+    """H6's diagnostics as tables: H8's validation against PR #40 (the gate of every H8 experiment), the identity path's
+    cosine to autograd per parameter group, how linear each site's loss response is at the chain's probe size, and H8
+    synthesis against the real chain's partial-row estimate per site. credit_dump is E7's table, snr_spectrum E8's."""
+    texts = []
+    valid = diagnostic('h6', 'h8_validation')
+    if valid:
+        cos = valid['cosines']
+        texts.append(f'H8 validation (e1.bp_b8.s0, 50%): {len(cos)} matrices, min cosine {min(cos.values()):.4f}; '
+                     f'below 0.99: {", ".join(valid["below_099"]) or "none"}.\n')
+    found = {f'{name} {c}%': diagnostic('h6', f'cos_to_autograd{suffix}_c{c}')
+             for name, suffix in (('identity', ''), ('H8', '_h8'), ('Cut', '_cut')) for c in (20, 100)}
+    groups = [g for g in ('all', 'block_matrices', 'attn.c_q', 'attn.c_k', 'attn.c_v', 'attn.c_proj', 'mlp.c_fc',
+                          'mlp.c_proj', 'wte', 'value_embeds', 'lm_head') if any(x and g in x for x in found.values())]
+    if groups:
+        rows = [[g] + [f'{x[g]:.4f}' if x and g in x else '-' for x in found.values()] for g in groups]
+        texts.append('Estimators against autograd (identity path, H8 synthesis, PR #40\'s Cut), cosine of the weight '
+                     'gradient\n\n' + markdown(['group'] + list(found), rows))
+    sites = {c: (diagnostic('h6', f'cos_to_autograd_h8_c{c}') or {}).get('sites') for c in (20, 100)}
+    if any(sites.values()):
+        rows = [[site] + [f'{x[site]["median"]:.3f}' if x and site in x else '-' for x in sites.values()]
+                for site in SITES]
+        texts.append('Cut graph against the full graph: median per-token cosine of the credit per site\n\n'
+                     + markdown(['site'] + [f'{c}%' for c in sites], rows))
+    found = {c: diagnostic('h6', f'linearity_check_c{c}') for c in (20, 100)}
+    if any(found.values()):
+        keys = [f'{p} 0.01' for p in ('float32', 'bf16')]
+        rows = [[site] + [f'{x[site][k]["nonlinearity"]["median"]:.3g}' if x and site in x and k in x[site] else '-'
+                          for x in found.values() for k in keys] for site in SITES]
+        texts.append('Nonlinearity |L+ + L- - 2 L0| / |L+ - L-| at the chain\'s probe size (0.01), median over '
+                     'tokens\n\n' + markdown(['site'] + [f'{c}%: {k}' for c in found for k in keys], rows))
+    found = {c: diagnostic('h6', f'synth_vs_real_c{c}') for c in (20, 100)}
+    variants = sorted({k for x in found.values() if x for k in x if k != 'settings'})
+    if variants:
+        rows = [[site] + [f'{x[v][site]["real_vs_synth"]["median"]:.3f}' if x and v in x and site in x[v] else '-'
+                          for x in found.values() for v in variants] for site in SITES]
+        texts.append('H8 synthesis against the real chain, same rows and signs: median per-token cosine\n\n'
+                     + markdown(['site'] + [f'{c}%: {v}' for c in found for v in variants], rows))
+    if not texts:
+        return None
+    text = '\n'.join(texts)
+    (out / 'h6.md').write_text(text)
+    return text
+
+
 def e7_table(out):
     """E7's diagnostic (H6 credit_dump on e1.h8_synth's checkpoints): per site and checkpoint, the variance ratio
     |g - p|^2 / |g|^2 of the exact credit against the identity-path guess (the control variate's variance relative to
@@ -485,12 +550,18 @@ TABLES = {'e2': e2_table, 'e5': e5_table, 'e6': partial(delta_table, 'e6', basel
           'e7': e7_tables, 'e8': e8_table, 'e10': partial(delta_table, 'e10', baseline=FULL_CYCLE, extra=[
               ('entries kept', logged_mean('agree_kept'))]),
           'e11': partial(delta_table, 'e11', baseline=FULL_CYCLE), 'e12': e12_table, 'e13': e13_tables,
-          'e14': partial(gap_table, 'e14'), 'e15': partial(gap_table, 'e15'), 'e16': e16_table}
+          'e14': partial(gap_table, 'e14', extra=[('top cosine to the token loss',
+                                                    logged_mean('nextlat', 'top_cosine'))]),
+          'e15': partial(gap_table, 'e15', also=[('e1', 'h8_cut_noboost')],
+                         extra=[('handoff cosine', logged_mean('handoff_cut_cosine'))]),
+          'e16': e16_table, 'h6': lambda out: h6_tables(out)}
 # The plan's reference cell for experiments whose baseline lives elsewhere (drawn in final.png).
 BASELINES = {'e2': ('e1', 'bp_b8'), 'e3': ('e1', 'bp_b8'), 'e4': ('e1', 'bp_b8'), 'e8': ('e1', 'bp_b8'),
              'e9': ('e1', 'bp_b8'), 'e6': FULL_CYCLE, 'e7': FULL_CYCLE, 'e10': FULL_CYCLE, 'e11': FULL_CYCLE,
              'e13': FULL_CYCLE, 'e14': ('e1', 'h8_cut'), 'e15': ('e1', 'h8_cut'), 'e16': ('e1', 'h8_cut')}
 FIGURES = {}
+# Experiments with a second setting drawn apart against its own reference: variant prefix, reference, file.
+SPLIT = {'e8': ('h8_', ('e8', 'h8_exact_control'), 'final_h8.png')}
 
 
 def plot(experiment):
@@ -508,7 +579,17 @@ def plot(experiment):
             source, variant = BASELINES[experiment]
             found = counted(source).get(variant)
             baseline = (f'baseline {source}.{variant}', found) if found else None
-        final_plot(plt, by_variant, palette, out, title, baseline)
+        prefix, (source, variant), name = SPLIT.get(experiment, (None, (None, None), None))
+        main = {v: r for v, r in by_variant.items() if not (prefix and v.startswith(prefix))}
+        second = {v: r for v, r in by_variant.items()
+                  if prefix and v.startswith(prefix) and (experiment, v) != (source, variant)}
+        if main:
+            final_plot(plt, main, palette, out, title, baseline)
+        if second:
+            found = counted(source).get(variant)
+            final_plot(plt, second, palette, out, f'{title}: the {prefix.rstrip("_")} setting',
+                       (f'baseline {source}.{variant}', found) if found else None, name)
+            made.append(name)
         curves_plot(plt, by_variant, palette, out, title)
         for extra in EXTRA.get(experiment, []):
             extra(plt, by_variant, palette, out)

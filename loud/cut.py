@@ -29,7 +29,8 @@ full cycle runs the record's chain_credits itself.
     (1 / m) sum_j (v_j . (g - guess)) v_j, unbiased like the plain estimate, with a variance that shrinks with the
     guess's error. The embedding site S0 has no guess (PR #26 measures it with its own cycle) and keeps the plain
     estimate.
-  - row_budget (E13's hook): a strategy from ROW_BUDGETS gives each token its own row count up to `rows` (token
+  - row_budget (E13's hook; 'ngram' is E13's rule, NGramBudget): a strategy from ROW_BUDGETS gives each token its
+    own row count up to `rows` (token
     windows of its count); the rows past a token's count are left out of its decode. The chain still evaluates them,
     so a budget changes the estimate, not yet the chain's cost: grouping tokens by count is the step that saves time.
 Differences from PR #40, all deliberate: the job's seed replaces the module's SEED (seed 0 is the record's); the shared
@@ -49,12 +50,33 @@ from .identity import attach
 from .options import PRESETS, cut_options
 from .train import current_rates, rate_labels, train
 
-# E13's per-token row budgets, by name (the row_budget option). ROW_BUDGETS[name](o) is built by every reset, so the
-# run's own comes after the warmup. Its rows(capture) returns each token's row count [n] (a power of two up to
+# E13's per-token row budgets, by name (the row_budget option). ROW_BUDGETS[name](o, vocab) is built by every reset,
+# so the run's own comes after the warmup. Its rows(capture) returns each token's row count [n] (a power of two up to
 # o['rows']) for the sequence the capture holds (capture.x, capture.y and capture.clean_loss, the clean forward's
-# per-token loss), and its observe(batch) sees each Cut update's batch after the update, so a statistic such as
-# E13's n-gram counts learns only from data already trained on.
-ROW_BUDGETS = {}
+# per-token loss), and its observe(batch) sees every update's batch after the update, so a statistic such as E13's
+# n-gram counts learns only from data already trained on.
+class NGramBudget:
+    """E13's rule on the chain ('ngram'): a token whose loss under the streaming Witten-Bell n-gram model of the
+    training stream so far (loud/ngram.py) and under the network (the clean forward) are both at most budget_theta
+    nats reads LOW_ROWS rows, the rest `rows` (the full cycle at 512), as H8's budget_theta."""
+
+    def __init__(self, o, vocab):
+        from .h8 import LOW_ROWS
+        from .ngram import NGram
+        self.theta, self.high, self.low = o['budget_theta'], o['rows'], min(LOW_ROWS, o['rows'])
+        self.table = NGram(vocab)
+
+    def rows(self, capture):
+        row = torch.cat([capture.x.flatten(), capture.y.flatten()[-1:]]).cpu().numpy()[None]
+        ngram = torch.from_numpy(self.table.losses(row)[0]).float()
+        low = torch.maximum(ngram, capture.clean_loss.flatten().float().cpu()) <= self.theta
+        return torch.where(low, self.low, self.high)
+
+    def observe(self, batch):
+        self.table.insert(batch.cpu().numpy())
+
+
+ROW_BUDGETS = {'ngram': NGramBudget}
 
 
 class Turns:
@@ -379,7 +401,7 @@ class CutChain:
         m, s = self.m, self.settings
         self.phase = phase or self.schedule[0][0]
         budget = self.o['row_budget']
-        self.budget = None if budget is None else ROW_BUDGETS[budget](self.o)
+        self.budget = None if budget is None else ROW_BUDGETS[budget](self.o, s.model.vocab_size)
         self.model = m.make_model(self.device, self.seed, s.model, s.projection_std, s.head_std)
         self.named = list(self.model.named_parameters())
         self.optimizer = m.make_optimizer(self.model, s, self.horizons[self.phase])
@@ -457,7 +479,7 @@ class CutChain:
             p.grad = total[offset:offset + p.numel()].view_as(p).to(p.dtype)
             offset += p.numel()
         self.optimizer.step()
-        if phase == 'cut' and self.budget is not None:
+        if self.budget is not None:  # every update's batch, after it, as H8's E13 table learns the stream
             self.budget.observe(batch)
         return sum(losses) / len(losses), fields  # average_ranks: the all-reduced sum over the GPUs, divided by them
 

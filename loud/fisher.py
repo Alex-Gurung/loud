@@ -78,15 +78,8 @@ class FisherFactor:
     def direction(self, p, pending, before=None):
         return self.polar(self.R[self.index[id(p)]] @ pending)
 
-    def after_step(self, model, batch, pergrad=None):
-        pass
-
     def report(self, step):
         return {}
-
-    def close(self):
-        for hook in self.hooks:
-            hook.remove()
 
 
 def inverse_root(fisher):

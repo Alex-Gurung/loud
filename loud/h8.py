@@ -46,6 +46,7 @@ probes) nor its top-512 MLP routes (it uses every unit), so H8 and backprop brac
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 import sys
+import time
 
 import torch
 from torch import nn
@@ -144,7 +145,8 @@ def own_path_attention(attn, x, cos_sin, window, ve=None):
         v = v + gate.unsqueeze(-1) * ve.detach().view_as(v)
     v = v.transpose(1, 2)
     kd, vd = k.detach(), v.detach()
-    scores = q @ kd.transpose(-1, -2) + torch.diag_embed((q * (k - kd)).sum(-1))
+    scores = q @ kd.transpose(-1, -2)
+    scores.diagonal(dim1=-2, dim2=-1).add_((q * (k - kd)).sum(-1))  # in place: no second T x T map
     i = torch.arange(T, device=x.device)
     allowed = (i[:, None] >= i[None, :]) & (i[:, None] - i[None, :] <= window[0])
     p = (scores / attn.head_dim ** 0.5).masked_fill(~allowed, float('-inf')).softmax(-1)
@@ -358,7 +360,8 @@ class Scheme:
                 elif self.tiers:
                     out.append(self.read_tiers(g, low))
                 else:
-                    p = guess[k].float() if self.prior == 'identity' else None
+                    # E7's prior at the mid sites only: the chain's (cut.py) S0 keeps the plain estimate
+                    p = guess[k].float() if self.prior == 'identity' and k > 0 else None
                     out.append(self.read(g if p is None else g - p, step) + (0 if p is None else p))
         return out
 
@@ -471,9 +474,6 @@ class SequenceGrads:
     def stack(self, name):
         return self.by_name[name]
 
-    def __len__(self):
-        return len(next(iter(self.by_name.values()), []))
-
 
 def runway_weights(model, idx, targets, sites, credits):
     """E11: per site and token, the move along -g/|g| of d x RMS(h) per coordinate (length d x RMS(h) x sqrt(W)), d in
@@ -506,8 +506,33 @@ def hadamard(d, device):
     return H
 
 
+class Untimed:
+    """Logging work inside an update (E6's cosine and stable ranks, E14's gradient cosine), timed apart so that
+    loud/train.py leaves it out of the clock, as it does the paused work between updates."""
+
+    def __init__(self, device):
+        self.device, self.seconds = device, 0.0
+
+    @contextmanager
+    def __call__(self):
+        sync = self.device.type == 'cuda'
+        if sync:
+            torch.cuda.synchronize()
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            if sync:
+                torch.cuda.synchronize()
+            self.seconds += time.perf_counter() - start
+
+    def take(self):
+        seconds, self.seconds = self.seconds, 0.0
+        return seconds
+
+
 def synthesis_gradients(model, idx, targets, scheme, step, freeze_queries=False, compare=False, agree=False,
-                        runway=False, tiers=None, log=False, each=None):
+                        runway=False, tiers=None, log=False, each=None, untimed=nullcontext):
     """Synthesis mode's parameter gradients (module docstring), the model's token losses and metrics fields: with
     `compare`, the cosine of the summed block-local weight gradient to the identity's (E6's log); E10 (b) `agree`
     (the share of entries kept logged when `log`); E11 `runway` (its distribution logged when `log`); E13 `tiers`, a
@@ -562,11 +587,12 @@ def synthesis_gradients(model, idx, targets, scheme, step, freeze_queries=False,
     if agree and log:
         fields['agree_kept'] = round(torch.stack(kept).mean().item(), 6)  # entries kept, mean over block weights
     if compare and (not scheme.identity or agree or runway):
-        exact = block_local(credits, False)
-        keys = list(exact)  # block-local only: the head and scalars are the cut graph's in both
-        a = torch.cat([grads[k].float().flatten() for k in keys])
-        b = torch.cat([exact[k].float().flatten() for k in keys])
-        fields['cosine_to_identity'] = float(a @ b / (a.norm() * b.norm()).clamp_min(1e-30))
+        with untimed():
+            exact = block_local(credits, False)
+            keys = list(exact)  # block-local only: the head and scalars are the cut graph's in both
+            a = torch.cat([grads[k].float().flatten() for k in keys])
+            b = torch.cat([exact[k].float().flatten() for k in keys])
+            fields['cosine_to_identity'] = float(a @ b / (a.norm() * b.norm()).clamp_min(1e-30))
     return grads, losses, fields
 
 
@@ -581,6 +607,7 @@ class H8:
         m = self.m = refs.trainer_module('pr40')
         self.o, self.device, self.seed, self.steps = o, device, seed, steps
         self.model_file = arch.model_file() if o['arch'] == 'ngram' else None  # what the official scorer builds
+        self.untimed = Untimed(device)  # loud/train.py takes it off the clock after each update
         self.probe = heldout[:PROBE_ROWS].to(device) if len(heldout) else None  # E14/E15's untimed logs
         self.settings = s = record_settings(m, o['preset'], o['batch'])
         if not o['boost']:
@@ -679,7 +706,8 @@ class H8:
                 each = {} if self.shaper is not None else None
                 grads, losses, extra = synthesis_gradients(self.model, x, y, self.scheme, step, o['freeze_queries'],
                                                            compare, o['agree'], o['runway'], tiers,
-                                                           log=step % RUNWAY_EVERY == 0, each=each)
+                                                           log=step % RUNWAY_EVERY == 0, each=each,
+                                                           untimed=self.untimed)
                 fields.update(extra)
                 if each is not None:
                     self.shaper.before_step(step, SequenceGrads(self.model, each))
@@ -689,8 +717,9 @@ class H8:
                     aux = o['nextlat'] * latent.nextlat_loss(self.dynamics, h, embedding, x,
                                                              h.detach() if teacher is None else teacher)
                     if step % AUX_LOG_EVERY == 0:
-                        fields['nextlat'] = dict(loss=aux.item() / o['nextlat'], top_cosine=gradient_cosine(
-                            loss, aux, top))
+                        with self.untimed():
+                            fields['nextlat'] = dict(loss=aux.item() / o['nextlat'], top_cosine=gradient_cosine(
+                                loss, aux, top))
                     loss = loss + aux
                 found = torch.autograd.grad(loss, self.params + aux_params, allow_unused=True)
                 grads = dict(zip(map(id, self.params + aux_params), found))
@@ -701,7 +730,8 @@ class H8:
             g = grads.get(id(p))
             p.grad = torch.zeros_like(p) if g is None else g.to(p.dtype)
         if o['rank_every'] and step % o['rank_every'] == 0:
-            fields['stable_rank'] = stable_ranks(self.model, self.optimizer)
+            with self.untimed():
+                fields['stable_rank'] = stable_ranks(self.model, self.optimizer)
         self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
         if self.shaper is not None and phase == 'cut':
@@ -724,7 +754,7 @@ class H8:
         if self.probe is None:
             return record
         x, y = self.probe[:, :-1].contiguous(), self.probe[:, 1:].contiguous()
-        if self.o['nextlat'] and step in (round(0.2 * self.steps), self.steps):
+        if step in (round(0.2 * self.steps), self.steps):  # every run, so E14's arms have their baseline's
             record['effective_rank'] = effective_ranks(self.model, x, y, self.device)
         handoff = next((i for i, b in enumerate(self.schedule, 1) if b[0] == 'cut'), None)
         if handoff is not None and step == handoff - 1:  # every Boost run: E15's arms and their baseline, e1.h8_cut

@@ -1,0 +1,13 @@
+# H6 item 1 on e1.h8_synth.s0's 100% checkpoint, one held-out sequence: PR #40's Cut estimate at the record's settings
+# against autograd, per matrix type, block and group: the real chain's distance from backprop beside H8's
+# (cos_to_autograd_h8).
+experiment: h6
+variant: cos_to_autograd_cut_c100
+task: diagnose
+seeds: [0]
+priority: 30
+after: [e1.h8_synth.s0]
+args:
+  tool: cos_to_autograd
+  estimator: cut
+  checkpoint: e1.h8_synth.s0:ckpt_100.pt

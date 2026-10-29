@@ -151,8 +151,6 @@ class Backprop:
         if self.shaper is not None:
             self.shaper.before_step(step, self.pergrad)
         self.optimizer.step()
-        if self.shaper is not None:
-            self.shaper.after_step(self.model, batch, self.pergrad)
         self.optimizer.zero_grad(set_to_none=True)
         if self.control is not None:
             fields.update(self.control.judge(step))

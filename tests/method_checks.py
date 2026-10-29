@@ -442,14 +442,15 @@ def cut_run(scratch):
 def cut_budget(scratch):
     """E13's hook through the trainer: a ROW_BUDGETS strategy is built fresh by every reset (the run's never sees the
     warmup's random tokens), gives each Cut estimate's tokens their counts (once per GPU of the sequence) and sees
-    each Cut update's batch after the update; Boost never asks it."""
+    every update's batch after the update; Boost never asks it. E13's own rule ('ngram'): the low tier is the tokens
+    both the n-gram table and the network find easy, and the table learns the batches it observes."""
     cut_module()
     import loud.cut
     from loud.options import cut_options
     built = []
 
     class Recorder:
-        def __init__(self, o):
+        def __init__(self, o, vocab):
             self.count, self.asked, self.observed = o['rows'] // 2, 0, []
             built.append(self)
 
@@ -467,14 +468,23 @@ def cut_budget(scratch):
     first_cut = next(step for step, (phase, *_) in enumerate(chain.schedule, 1) if phase == 'cut')
     chain.warmup(data[-1:])
     warm = built[-1]
-    assert warm.asked == 2 and len(warm.observed) == 1, 'the Cut warmup update did not use its budget'
+    assert warm.asked == 2 and len(warm.observed) == 1, 'the Cut warmup update did not use and feed its budget'
     chain.reset()
     fresh = built[-1]
     assert fresh is not warm and fresh.asked == 0 and not fresh.observed, 'the run inherits the warmup budget'
     for step in range(1, first_cut + 2):
         chain.update(step, data[step - 1:step])
-    assert fresh.asked == 4 and len(fresh.observed) == 2, (fresh.asked, len(fresh.observed))
-    assert all(torch.equal(seen, data[s - 1:s]) for seen, s in zip(fresh.observed, (first_cut, first_cut + 1)))
+    assert fresh.asked == 4 and len(fresh.observed) == first_cut + 1, (fresh.asked, len(fresh.observed))
+    from types import SimpleNamespace
+    budget = loud.cut.NGramBudget(cut_options(dict(preset='2m', rows=128, row_budget='ngram', budget_theta=3.0)), 64)
+    row = torch.arange(65) % 8  # a repeating pattern: unknown to the empty table, easy once it has seen it
+    capture = SimpleNamespace(x=row[:-1], y=row[1:], clean_loss=torch.zeros(64))
+    assert budget.rows(capture).tolist() == [128] * 64  # the n-gram model cannot know an unseen stream
+    budget.observe(row[None])
+    assert budget.rows(capture).tolist() == [64] * 64  # seen: every token is easy for both, so the low tier
+    capture.clean_loss = torch.full((64,), 9.0)  # the network finds every token hard: the full cycle everywhere
+    assert budget.rows(capture).tolist() == [128] * 64
+    assert all(torch.equal(seen, data[s:s + 1]) for s, seen in enumerate(fresh.observed))  # each batch, in order
     try:
         loud.cut.CutChain(dict(o, row_budget='missing'), torch.device('cpu'), 0, 10, data[-8:])
     except ValueError as exc:

@@ -6,8 +6,10 @@ Sites are H8's: S0, the raw embedding (wte's output), and S1..S8, block i's mid 
 a site is the cut graph's (loud/h8.py): what the chain measures there, every key and value held, each token's own
 query live. Probes run through H8's reforward (Replay), as the chain runs them.
 
-    cos_to_autograd     the identity path's estimate (PR #26) of the weight gradient against autograd's: cosine per
-                        matrix type, block and parameter group (check_relay.py's comparison)
+    cos_to_autograd     an estimator's weight gradient against autograd's (check_relay.py's comparison), cosine per
+                        matrix type, block and parameter group: `estimator` identity (PR #26's), h8 (H8 synthesis,
+                        identity scheme; also per site, the cut graph's credit against the full graph's) or cut
+                        (PR #40's Cut at the record's settings)
     credit_dump         per site: the exact credit, the identity path's guess p (the top-stream credit carried down
                         the residual scalars), their per-token cosine and E7's variance ratio |g - p|^2 / |g|^2
     deep_readout_check  E5: per token, the 512 probes of one signed Hadamard cycle launched at S1 (bf16 forward
@@ -17,7 +19,8 @@ query live. Probes run through H8's reforward (Replay), as the chain runs them.
     linearity_check     per site and probe size: how far each token's loss response to +v and -v is from linear,
                         float32 and bf16
     h8_validation       H8 synthesis (identity scheme) against PR #40's Cut estimate with its cross-token patches off,
-                        no future draws and every MLP unit routed: per-matrix cosine (v2's bar: 0.99)
+                        no future draws, every MLP unit routed and every own-query key logit rerun: per-matrix cosine
+                        (v2's bar: 0.99)
     ngram_tiers         E13: the credit energy and token share of the low tier (max(n-gram loss, model loss) <= theta)
                         on the held-out sequences, the n-gram table built from the training stream up to the checkpoint
                         (loud/ngram.py)
@@ -112,24 +115,50 @@ class Toolkit:
             grads = torch.autograd.grad(losses.sum(), sites + [top])
         return model.requires_grad_(False), [s.detach() for s in sites], list(grads[:-1]), grads[-1]
 
-    def cos_to_autograd(self):
-        """PR #26's FastRelay on this sequence against autograd of the summed loss, both on the checkpoint."""
-        m = self.m
-        hidden = 4 * self.model.config.n_embd
-        settings = m.Settings(fc_k=hidden // 8, route_k=hidden // 4, fast_mlp_mode='all', no_chain=True,
-                              value_path=False, skip_mid=True)  # PR #26's main() defaults
+    def cos_to_autograd(self, estimator='identity'):
+        """An estimator's weight gradient on this sequence against autograd of the summed loss, both on the checkpoint
+        (identity: PR #26's FastRelay at its main() defaults; h8: H8 synthesis with the identity scheme, plus per site
+        the per-token cosine of the cut graph's credit to the full graph's; cut: PR #40's Cut, the record's settings)."""
+        m, summary = self.m, {}
         ref = copy.deepcopy(self.model).float().requires_grad_(True)
         with exact():
             ref(self.x, self.y, loss_reduction='sum').backward()
         reference = {n: (torch.zeros_like(p) if p.grad is None else p.grad).float() for n, p in ref.named_parameters()}
-        estimator = m.FastRelay(self.model, settings, 0, 0, 1)
-        try:
-            estimate = estimator.estimate(self.x, self.y)
-        finally:
-            estimator.close()
-        flat = lambda d, ns: torch.cat([d[n].flatten().float() for n in ns])
-        return {g: cosine(flat(estimate, ns), flat(reference, ns))
-                for g, ns in groups(list(reference), self.n_layer).items() if ns}, {}
+        if estimator == 'identity':
+            hidden = 4 * self.model.config.n_embd
+            settings = m.Settings(fc_k=hidden // 8, route_k=hidden // 4, fast_mlp_mode='all', no_chain=True,
+                                  value_path=False, skip_mid=True)  # PR #26's main() defaults
+            relay = m.FastRelay(self.model, settings, 0, 0, 1)
+            try:
+                estimate = relay.estimate(self.x, self.y)
+            finally:
+                relay.close()
+        elif estimator == 'h8':
+            from .options import H8
+            model = copy.deepcopy(self.model).float().requires_grad_(True)
+            scheme = h8.Scheme(dict(H8), model.config.n_embd, self.x.device, 0)
+            with exact():
+                synth, _, _ = h8.synthesis_gradients(model, self.x, self.y, scheme, 1)
+                estimate = {n: synth[id(p)] for n, p in model.named_parameters() if id(p) in synth}
+                full = h8.cut_forward(model, self.x, self.y, held=False)
+                cut = h8.cut_forward(model, self.x, self.y)
+                full_credit = torch.autograd.grad(full[0].sum(), full[1])
+                cut_credit = torch.autograd.grad(cut[0].sum(), cut[1])
+            summary['sites'] = {name: quantiles(per_token_cosine(c[0], f[0]))
+                                for name, c, f in zip(site_names(self.n_layer), cut_credit, full_credit)}
+        elif estimator == 'cut':
+            from .cut import record_settings
+            from .options import PRESETS
+            config = self.model.config
+            preset = next(p for p, shape in PRESETS.items() if shape == (config.n_layer, config.n_embd))
+            estimate = m.Cut(self.model, record_settings(m, preset, 4), 0, 0, 1, 1, None).estimate(self.x, self.y)
+        else:
+            raise ValueError(f'unknown estimator {estimator!r}')
+        flat = lambda d, ns: torch.cat([(d[n] if d.get(n) is not None else torch.zeros_like(reference[n]))
+                                        .flatten().float() for n in ns])
+        summary.update({g: cosine(flat(estimate, ns), flat(reference, ns))
+                        for g, ns in groups(list(reference), self.n_layer).items() if ns})
+        return summary, {}
 
     def credit_dump(self):
         model, sites, credits, g_top = self.exact_credits()
@@ -222,6 +251,7 @@ class Toolkit:
         s = record_settings(m, preset, 4)
         s.value_path = s.path_scalars = s.gate_path = False
         s.key_path_draws, s.future_draws, s.route_k = 0, 0, 4 * config.n_embd
+        s.query_keys = 0  # every key logit of the own query, as H8's live query has (the record caps them at 256)
         model = self.model.requires_grad_(True)
         params = dict(model.named_parameters())
         scheme = h8.Scheme(dict(H8), config.n_embd, self.x.device, 0)  # the defaults: the identity scheme
@@ -265,8 +295,8 @@ class Toolkit:
         for assign in ('token', 'time'):
             for routes in ('record', 'all'):
                 s = record_settings(m, preset, 4)
-                if routes == 'all':
-                    s.route_k = 4 * config.n_embd
+                if routes == 'all':  # every MLP unit and every own-query key logit, as H8 has them
+                    s.route_k, s.query_keys = 4 * config.n_embd, 0
                 estimator = Kept(self.model, s, 0, 0, 1, 1, None)
                 estimator.rows, estimator.start = rows, (0 if assign == 'time' else None)
                 estimator.estimate(self.x, self.y)
@@ -281,10 +311,6 @@ class Toolkit:
                                      synth_vs_exact=quantiles(per_token_cosine(synth, g)),
                                      real_vs_exact=quantiles(per_token_cosine(real, g)))
         return summary, {}
-
-TOOL_MODULES = {'cos_to_autograd': 'pr26'}  # the reference trainer a tool needs (default PR #40's); both import the
-# fixed utils/model.py, and one process may load only one
-
 
 def load(checkpoint, device, key):
     """The fixed model with a checkpoint's weights, in float32; the shape comes from the state dict (the benchmark's
@@ -354,7 +380,10 @@ def run_task(spec, run_dir):
     o = diagnose_options(spec['args'])
     device = torch.device('cuda', 0) if torch.cuda.is_available() else torch.device('cpu')
     checkpoint = checkpoint_path(o['checkpoint'])
-    m, model = load(checkpoint, device, TOOL_MODULES.get(o['tool'], 'pr40'))
+    # the reference trainer: PR #26's for its identity path, else PR #40's (both import the fixed utils/model.py, and
+    # one process may load only one)
+    identity = o['tool'] == 'cos_to_autograd' and o['estimator'] == 'identity'
+    m, model = load(checkpoint, device, 'pr26' if identity else 'pr40')
     split = benchmark_split('10M', heldout=32)
     rows = split.heldout[o['row']:o['row'] + 1].to(device)
     x, y = rows[:, :-1].contiguous(), rows[:, 1:].contiguous()
@@ -366,7 +395,8 @@ def run_task(spec, run_dir):
     elif o['tool'] == 'snr_spectrum':  # E8's: training sequences after the checkpoint
         summary, tensors = snr_tool(model, split, checkpoint, o)
     else:
-        summary, tensors = getattr(Toolkit(m, model, x, y), o['tool'])()
+        kwargs = dict(estimator=o['estimator']) if o['tool'] == 'cos_to_autograd' else {}
+        summary, tensors = getattr(Toolkit(m, model, x, y), o['tool'])(**kwargs)
     (run_dir / f'{o["tool"]}.json').write_text(json.dumps(summary, indent=1) + '\n')
     if tensors:
         torch.save(tensors, run_dir / f'{o["tool"]}.pt')

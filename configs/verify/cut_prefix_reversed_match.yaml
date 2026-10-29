@@ -6,7 +6,7 @@ experiment: verify
 variant: cut_prefix_reversed_match
 task: compare
 seeds: [0]
-priority: 11
+priority: 66
 after_done: [verify.cut_prefix.s0, verify.cut_prefix_reversed.s0]
 args:
   a: verify.cut_prefix_reversed.s0

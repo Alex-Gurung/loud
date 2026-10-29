@@ -1,6 +1,6 @@
 # E16: track-3 record #5's design (12 x 1,024 with hashed n-gram value embeddings) under backprop, with PR #40's
 # recipe at 4 sequences per update: the backprop side of the architecture ranking that e16.h8_track3 and e1.h8_cut
-# must reproduce.
+# must reproduce; the fixed model's backprop arm is e1.bp_b4_pr40.
 experiment: e16
 variant: bp_track3
 task: proxy

@@ -6,7 +6,7 @@ experiment: verify
 variant: cut_smoke
 task: cut
 seeds: [0]
-priority: 3
+priority: 66
 after: [verify.smoke.s0]
 args:
   sequences: 96

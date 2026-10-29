@@ -50,18 +50,23 @@ export PYTHONPATH="$LOUD_WORKER_CODE" LOUD_CODE_DIR="$LOUD_WORKER_CODE"
 cd "$LOUD_WORKER_CODE"
 
 phase worker
-LOUD_WORKERS_PER_POD="${LOUD_WORKERS_PER_POD:-1}"
-if [[ $LOUD_WORKERS_PER_POD == 1 ]]; then
+LOUD_WORKERS_PER_POD="${LOUD_WORKERS_PER_POD:-1}"  # GPUs in the pod (gpu_worker_2.yaml: 2)
+LOUD_JOBS_PER_GPU="${LOUD_JOBS_PER_GPU:-1}"        # workers sharing each GPU: the small jobs leave an H100 mostly idle
+if [[ $LOUD_WORKERS_PER_POD == 1 && $LOUD_JOBS_PER_GPU == 1 ]]; then
   exec "$LOUD_PYTHON" -u -m loud.worker --queue "$LOUD_QUEUE_DIR"
 fi
-# One worker per GPU (gpu_worker_2.yaml), each pinned to its own and claiming one-GPU jobs. A pod deletion's SIGTERM
-# is passed to every worker, which gives its job back; the pod ends when all have exited.
+# LOUD_JOBS_PER_GPU workers per GPU, each pinned to its GPU, sharing its CPUs and claiming only jobs whose declared
+# memory (gpu_memory_gb) fits beside the others' on that GPU. A pod deletion's SIGTERM is passed to every worker,
+# which gives its job back; the pod ends when all have exited.
 trap - EXIT
 pids=()
+threads=$(( ${OMP_NUM_THREADS:-8} / (LOUD_WORKERS_PER_POD * LOUD_JOBS_PER_GPU) ))
 for ((gpu = 0; gpu < LOUD_WORKERS_PER_POD; gpu++)); do
-  CUDA_VISIBLE_DEVICES=$gpu "$LOUD_PYTHON" -u -m loud.worker --queue "$LOUD_QUEUE_DIR" \
-    --worker-id "$(hostname)-gpu$gpu" &
-  pids+=($!)
+  for ((slot = 0; slot < LOUD_JOBS_PER_GPU; slot++)); do
+    CUDA_VISIBLE_DEVICES=$gpu OMP_NUM_THREADS=$(( threads > 0 ? threads : 1 )) LOUD_GPU_SLOT="$(hostname)-gpu$gpu" \
+      "$LOUD_PYTHON" -u -m loud.worker --queue "$LOUD_QUEUE_DIR" --worker-id "$(hostname)-gpu$gpu-$slot" &
+    pids+=($!)
+  done
 done
 trap 'kill -TERM "${pids[@]}" 2>/dev/null || true' TERM INT
 status=0

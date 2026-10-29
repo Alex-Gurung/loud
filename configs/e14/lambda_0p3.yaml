@@ -3,12 +3,13 @@
 # position's final-norm latent from the current one and the next token's embedding; smooth-L1 against the EMA
 # teacher's latent, from the Boost -> Cut handoff (loud/latent.py). This sweep sets lambda once (0.3, 1, 3); the 2 x 2
 # of target x onset at the best lambda is in configs/followups/e14/. Report: the fraction of the gap between e1.h8_cut
-# and e1.bp_b4 closed (python3 -m loud.plots e14). Success: closes at least half the gap, or beats e1.h8_cut by 0.02.
+# and e1.bp_b4_pr40 (backprop on the same recipe and batch) closed (python3 -m loud.plots e14). Success: closes at
+# least half the gap, or beats e1.h8_cut by 0.02.
 experiment: e14
 variant: lambda_0p3
 task: h8
 seeds: [0, 1, 2]
-priority: 60
+priority: 55
 after: [verify.score_record.s0, verify.nextlat_smoke.s0, h6.h8_validation.s0]
 args:
   sequences: 10M

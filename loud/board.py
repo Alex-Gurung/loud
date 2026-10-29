@@ -23,7 +23,7 @@ from .paths import ARTIFACTS, QUEUE, REPO, RUNS
 from .submit import plan
 
 OUT = ARTIFACTS / 'board'
-SYNTH, CUT, BP8, BP4 = 'e1.h8_synth', 'e1.h8_cut', 'e1.bp_b8', 'e1.bp_b4'
+SYNTH, CUT, BP8, BP4 = 'e1.h8_synth', 'e1.h8_cut', 'e1.bp_b8', 'e1.bp_b4_pr40'  # BP4: H8's recipe and batch
 COMMON = {'sequences', 'heldout', 'heldout_every', 'final_dtype', 'checkpoints', 'checkpoint_optimizer', 'recipe',
           'compare_every', 'rank_every'}  # run options every arm shares, or logs only
 
@@ -58,7 +58,7 @@ EXPERIMENTS = [
     dict(id='e14', name='E14 NextLat latent consistency', priority='P1', reference=CUT,
          question='Does a next-latent prediction loss beside the token loss close the gap to backprop?',
          setup='H8 cut mode, EMA target, onset at the handoff; lambda 0.3, 1, 3.',
-         success='Closes at least half the gap from e1.h8_cut to e1.bp_b4, or beats e1.h8_cut by 0.02.',
+         success='Closes at least half the gap from e1.h8_cut to e1.bp_b4_pr40, or beats e1.h8_cut by 0.02.',
          gate='H8 validation.'),
     dict(id='e15', name='E15 Boost with a latent target', priority='P1', reference=CUT,
          question='Is Boost\'s logit-lens objective a crutch?',
@@ -175,7 +175,7 @@ def verdict(e, by_key):
         return ('met' if ok else 'not met'), \
             f'Best arm {best["variant"]} at {best["val_mean"] - base:+.4f}, closing {closed:.0%} of the gap to backprop.'
     if e['id'] == 'e16':
-        four = [cells.get('bp_fixed'), cells.get('bp_track3'), by_key.get(CUT), cells.get('h8_track3')]
+        four = [by_key.get(BP4), cells.get('bp_track3'), by_key.get(CUT), cells.get('h8_track3')]
         if any(a is None or a.get('val_mean') is None for a in four):
             return 'waiting', 'Waiting for the four arms.'
         bp, h8 = four[0]['val_mean'] - four[1]['val_mean'], four[2]['val_mean'] - four[3]['val_mean']
@@ -249,9 +249,11 @@ def build(configs=REPO / 'configs', queue_root=QUEUE, runs_root=RUNS, out=OUT):
                 a['delta'] = None if base is None or a['val_mean'] is None else a['val_mean'] - base
         state, sentence = verdict(e, by_key)
         mine = [a for a in arms if a['experiment'] == e['id']]
+        label, title = e['name'].split(' ', 1) if e['id'][0] in 'eh' else ('Checks', e['name'])
         n = state_counts.get(e['id'], {})
         experiments.append(dict(
-            id=e['id'], order=order, name=e['name'], priority=e['priority'], question=e['question'],
+            id=e['id'], order=order, name=e['name'], label=label, title=title[:1].upper() + title[1:],
+            priority=e['priority'], question=e['question'],
             followup=bool(mine) and all(a['followup'] for a in mine),
             setup=e['setup'], success=e['success'], gate=e['gate'], reference=e.get('reference') or '',
             reference_val=ref['val_mean'] if ref else None, reference_n=ref['counted'] if ref else 0,

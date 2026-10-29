@@ -101,9 +101,6 @@ class SNRScaling:
     def before_step(self, step, pergrad):
         self.pergrad, self.ratios = pergrad, {}
 
-    def after_step(self, model, batch, pergrad):
-        pass
-
     def direction(self, p, pending, before=None):
         basis = pending if before is None or not before.any() else before
         u, _, vh = torch.linalg.svd(basis, full_matrices=False)

@@ -53,6 +53,8 @@ spec:
               value: /mnt/disk/loud/artifacts/queue
             - name: LOUD_IDLE_EXIT_SECONDS
               value: "1200"
+            - name: LOUD_JOBS_PER_GPU
+              value: "4"  # jobs sharing each GPU (1: one at a time, for wall-clock comparisons)
             - name: LOUD_MIN_FREE_GB
               value: "15"  # headroom for the other projects on this volume
             - name: OMP_NUM_THREADS

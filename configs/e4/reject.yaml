@@ -7,7 +7,7 @@ experiment: e4
 variant: reject
 task: proxy
 seeds: [0, 1, 2]
-priority: 62
+priority: 55
 after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0,
         verify.step_control_smoke.s0]
 args:

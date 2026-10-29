@@ -100,9 +100,16 @@ def h8_schemes(scratch):
         assert (mean - g).norm() < 0.1 * g.norm(), (assign, ((mean - g).norm() / g.norm()).item())
         one = scheme.read(g, 0)
         assert not torch.allclose(one, g)
-    full = Scheme(h8_options(dict(preset='2m', rows=128, prior='identity')), W, torch.device('cpu'), 0)
-    guess = [torch.randn_like(g)]
-    assert torch.allclose(full([g], 0, guess)[0], g, atol=1e-5)
+    from loud.options import H8
+    full = Scheme(dict(H8, rows=128, prior='identity'), W, torch.device('cpu'), 0)  # every row: the prior is exact
+    out = full([g, g], 0, [torch.randn_like(g), torch.randn_like(g)])  # S0 keeps the plain read, S1 the prior
+    assert all(torch.allclose(o, g, atol=1e-5) for o in out)
+    try:
+        h8_options(dict(preset='2m', rows=128, prior='identity'))  # an arm that changes nothing is refused
+    except ValueError as e:
+        assert 'rows below the width' in str(e)
+    else:
+        raise AssertionError('a prior with every row was accepted')
 
 
 def h8_reforward(scratch):
@@ -159,6 +166,12 @@ def h6_tools(scratch):
                for n in names)
     valid, _ = tools.h8_validation()
     assert not valid['below_099'], valid
+    synth, _ = tools.cos_to_autograd('h8')  # H8's estimate is the cut graph's: close to autograd, short of 1
+    assert set(synth['sites']) == set(names) and 0.5 < synth['all'] < 1, synth
+    medians = [synth['sites'][n]['median'] for n in names]  # the top site, with the least above it, misses the least
+    assert medians[-1] == max(medians) and medians[0] < 1, medians
+    record, _ = tools.cos_to_autograd('cut')
+    assert 0.5 < record['all'] < 1 and abs(record['block_matrices'] - synth['block_matrices']) < 0.1, (record, synth)
 
 
 def h8_run(scratch):

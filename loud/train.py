@@ -7,6 +7,7 @@ A method supplies a trainer with
     diagnose(step)             untimed per-update diagnostics; returns fields for the record
     describe()                 what config.json records about the method
 and optionally
+    untimed                    logging work inside update() timed apart (take() -> seconds), left out of the clock
     warmup(batch)              the untimed compilation on random tokens (default: update(1, batch))
     finish                     None, or finish(means, heldout): work after the last update of a complete run that
                                is timed with the training and may change the weights (the record's end merge, its
@@ -107,6 +108,8 @@ def train(spec, run_dir, o, build, method):
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
     paused(0)
+    if getattr(trainer, 'untimed', None) is not None:
+        trainer.untimed.take()  # what the warmup's updates logged
     start, pause_total = time.perf_counter(), 0.0  # the clock starts at the first update, as in the benchmark
     elapsed = previous = 0.0
     for step in range(1, last + 1):
@@ -116,6 +119,9 @@ def train(spec, run_dir, o, build, method):
         loss = loss.item()  # also waits for the update, so the step time is the GPU's
         if not math.isfinite(loss):
             raise FloatingPointError(f'non-finite training loss at update {step}')
+        untimed = getattr(trainer, 'untimed', None)  # logging work inside the update (H8), off the clock
+        if untimed is not None:
+            pause_total += untimed.take()
         elapsed = time.perf_counter() - start - pause_total
         record = dict(step=step, seqs=first + o['batch'], tokens=(first + o['batch']) * (SEQ - 1), train_loss=loss,
                       step_seconds=round(elapsed - previous, 4), train_seconds=round(elapsed, 2), **fields)
