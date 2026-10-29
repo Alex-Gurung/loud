@@ -142,6 +142,12 @@ H8 = dict(
     prior='none',               # 'identity': read only the residual from the identity path's guess (E7)
     compare_every=0,            # every N updates, the cosine of the block-local gradient to the identity scheme's (E6)
     rank_every=0,               # every N updates, the stable rank of ANVIL II's orthogonalization input (E6)
+    # latent objectives (loud/latent.py), cut mode, one per run:
+    nextlat=0.0,                # E14: lambda of NextLat's latent-consistency loss (0: off)
+    nextlat_target='ema',       # E14: the target latent, 'ema' (H4's teacher) or 'live' (the network's, detached)
+    nextlat_onset='handoff',    # E14: from the Boost -> Cut handoff ('handoff') or the first update ('start')
+    latent_boost='none',        # E15: Boost's sublayers also ('plus') or only ('only') predict the teacher's latent
+    latent_lambda=1.0,          # E15 'plus': the latent loss's weight beside the logit-lens readouts
 )
 
 IDENTITY = dict(
@@ -346,6 +352,23 @@ def h8_options(args):
     for key in ('row_assign',):
         if key in args and o['rows'] in (None, width):
             raise ValueError(f'{key} needs rows below the width')
+    if o['nextlat'] < 0 or o['latent_lambda'] < 0:
+        raise ValueError('nextlat and latent_lambda must be >= 0')
+    if o['nextlat_target'] not in ('ema', 'live') or o['nextlat_onset'] not in ('handoff', 'start'):
+        raise ValueError("nextlat_target must be 'ema' or 'live', nextlat_onset 'handoff' or 'start'")
+    if o['latent_boost'] not in ('none', 'plus', 'only'):
+        raise ValueError("latent_boost must be 'none', 'plus' or 'only'")
+    latent = [k for k, on in (('nextlat', o['nextlat'] > 0), ('latent_boost', o['latent_boost'] != 'none')) if on]
+    if len(latent) > 1:
+        raise ValueError('nextlat (E14) and latent_boost (E15) are separate experiments')
+    if latent and o['mode'] != 'cut':
+        raise ValueError(f'{latent[0]} runs in cut mode (the plan\'s E14 and E15)')
+    if latent and not o['boost'] and (o['latent_boost'] != 'none' or o['nextlat_onset'] == 'handoff'):
+        raise ValueError(f'{latent[0]} needs the Boost phase (boost: true)')
+    for key, on in (('nextlat_target', o['nextlat'] > 0), ('nextlat_onset', o['nextlat'] > 0),
+                    ('latent_lambda', o['latent_boost'] == 'plus')):
+        if key in args and not on:
+            raise ValueError(f'{key} acts only with ' + ('nextlat' if key != 'latent_lambda' else 'latent_boost: plus'))
     return o
 
 

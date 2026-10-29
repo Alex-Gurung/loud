@@ -1,0 +1,21 @@
+# E14 (plan v2): NextLat's latent-consistency loss beside the next-token loss, in H8 cut mode with Boost -> Cut (E1's
+# e1.h8_cut is the matching baseline). The dynamics model (one GELU hidden layer of 1,024) predicts the next
+# position's final-norm latent from the current one and the next token's embedding; smooth-L1 against the EMA
+# teacher's latent, from the Boost -> Cut handoff (loud/latent.py). This sweep sets lambda once (0.3, 1, 3); the 2 x 2
+# of target x onset at the best lambda is in configs/followups/e14/. Report: the fraction of the gap between e1.h8_cut
+# and e1.bp_b4 closed (python3 -m loud.plots e14). Success: closes at least half the gap, or beats e1.h8_cut by 0.02.
+experiment: e14
+variant: lambda_1
+task: h8
+seeds: [0, 1, 2]
+priority: 65
+after: [verify.score_record.s0, verify.nextlat_smoke.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  mode: cut
+  heldout_every: 100
+  nextlat: 1.0
+  nextlat_target: ema
+  nextlat_onset: handoff

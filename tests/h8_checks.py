@@ -154,6 +154,105 @@ def h8_run(scratch):
             assert set(phases) == {'cut'}
 
 
+def h8_latent(scratch):
+    """E14's dynamics model and loss, the document mask, E15's predictors, the EMA teacher, and where E14's gradient
+    reaches, each against a direct computation."""
+    import torch.nn.functional as F
+    from tokenizers import Tokenizer
+    from loud import h8, latent, paths
+    from loud.ema import EMAWeights
+    tokenizer = Tokenizer.from_file(str(paths.REPO / 'external' / 'noise' / 'tokenizer' / 'tokenizer.json'))
+    assert latent.EOT == tokenizer.token_to_id('<|endoftext|>')
+
+    gen = torch.Generator().manual_seed(4)
+    B, T, W = 2, 9, 16
+    h, e, target = (torch.randn(B, T, W, generator=gen) for _ in range(3))
+    idx = torch.randint(1, 50, (B, T), generator=gen)
+    idx[0, 3], idx[1, 7] = latent.EOT, latent.EOT  # two documents open: targets at those positions are masked
+    dynamics = latent.Dynamics(W)
+    fc, proj = dynamics.mlp[0].weight, dynamics.mlp[2].weight
+    pred = h[:, :-1] + F.gelu(F.layer_norm(torch.cat([e[:, 1:], h[:, :-1]], -1), (2 * W,)) @ fc.T) @ proj.T
+    diff = (pred - target[:, 1:]).abs()
+    elem = torch.where(diff < 1, 0.5 * diff ** 2, diff - 0.5)
+    keep = (idx[:, 1:] != latent.EOT).float().unsqueeze(-1)
+    direct = (elem * keep).sum() / (keep.sum() * W)
+    assert torch.allclose(latent.nextlat_loss(dynamics, h, e, idx, target), direct, atol=1e-6)
+    moved = target.clone()
+    moved[0, 3] += 10
+    assert torch.equal(latent.nextlat_loss(dynamics, h, e, idx, moved), latent.nextlat_loss(dynamics, h, e, idx, target))
+    assert fc.shape == (latent.HIDDEN, 2 * W) and proj.shape == (W, latent.HIDDEN)
+
+    targets = latent.LatentTargets(2, W, lens=True, weight=0.5)
+    assert len(targets.predictors) == 3  # every sublayer of 2 blocks but the last
+    targets.target = target
+    stream = torch.randn(B, T, W, generator=gen, requires_grad=True)
+    miss = 1 - F.cosine_similarity(targets.predictors[1](stream), target, dim=-1)
+    assert torch.allclose(targets(1, stream), 0.5 * miss.sum())
+    own = targets(0, stream, own=True)
+    grads = torch.autograd.grad(own, [stream] + list(targets.predictors[0].parameters()), allow_unused=True)
+    assert grads[0] is not None and all(g is None for g in grads[1:]), "the embedding's path trains no predictor"
+
+    student = torch.nn.Linear(3, 3).bfloat16()
+    teacher = EMAWeights(student, steps=100)
+    assert teacher.model.weight.dtype == torch.float32
+    assert abs(teacher.decay(0) - 0.996) < 1e-12 and abs(teacher.decay(100) - 0.9995) < 1e-12
+    assert abs(teacher.decay(50) - (0.996 + 0.9995) / 2) < 1e-12
+    before = teacher.model.weight.clone()
+    with torch.no_grad():
+        student.weight.add_(1.0)
+    teacher.update(50)
+    d = teacher.decay(50)
+    assert torch.allclose(teacher.model.weight, d * before + (1 - d) * student.weight.float(), atol=1e-7)
+
+    # E14's gradient in the cut graph: the trunk and wte (through x0 and the next token's embedding), not the head
+    m, s, model, x, y = record_setup()
+    model.requires_grad_(True)
+    _, sites, top, _, _ = h8.cut_forward(model, x, y)
+    hidden = h8.um().norm(top)
+    dynamics = latent.Dynamics(s.model.n_embd)
+    aux = latent.nextlat_loss(dynamics, hidden, sites[0], x, hidden.detach())
+    named = dict(model.named_parameters())
+    reach = dict(zip(named, torch.autograd.grad(aux, list(named.values()), retain_graph=True, allow_unused=True)))
+    assert reach['lm_head.weight'] is None or not reach['lm_head.weight'].any()
+    for n in ('transformer.wte.weight', 'transformer.h.0.mlp.c_fc.weight', 'transformer.h.1.attn.c_q.weight',
+              'resid_lambdas', 'x0_lambdas'):
+        assert reach[n] is not None and reach[n].any(), n
+    assert all(g.any() for g in torch.autograd.grad(aux, list(dynamics.parameters())))
+
+
+def h8_latent_run(scratch):
+    """Complete tiny runs of E14 (EMA target from the first update; the live target from the handoff) and E15 (the
+    latent target beside the readouts, and alone), with their logs."""
+    from loud import h8
+    cut_module()
+    patch_sequences(length=CUT_SEQ, vocab=512)
+    h8.AUX_LOG_EVERY, h8.LATENT_LOG_EVERY = 2, 1
+    arms = {'nextlat_ema_start': dict(nextlat=1.0, nextlat_onset='start'),
+            'nextlat_live': dict(nextlat=0.3, nextlat_target='live'),
+            'latent_plus': dict(latent_boost='plus'),
+            'latent_only': dict(latent_boost='only')}
+    for variant, args in arms.items():
+        spec = dict(experiment='cpu', variant=variant, seed=0, task='h8', args=dict(
+            preset='2m', sequences=72, heldout=32, batch=4, mode='cut', official_eval=False, **args))
+        out = Path(scratch) / variant
+        result = h8.run(spec, out)
+        records = [json.loads(line) for line in (out / 'metrics.jsonl').read_text().splitlines()]
+        assert result['complete'] and len(records) == 10, variant
+        by_step = {r['step']: r for r in records}
+        if 'nextlat' in args:
+            logged = [r['step'] for r in records if 'nextlat' in r]
+            first = 2 if args.get('nextlat_onset') == 'start' else 4  # the handoff is at update 3
+            assert logged and logged[0] == first and all(-1 <= r['nextlat']['top_cosine'] <= 1
+                                                          for r in records if 'nextlat' in r), (variant, logged)
+            assert {'top', 'S0', 'S2'} <= set(by_step[2]['effective_rank']) and 'effective_rank' in by_step[10]
+        else:
+            boost = [r for r in records if r['phase'] == 'boost']
+            kinds = {'latent', 'readout'}
+            assert all(set(r['latent_boost']) == {'0', '1', '2'} for r in boost), boost
+            assert all(set(v) == kinds for r in boost for v in r['latent_boost'].values())
+            assert -1 <= by_step[2]['handoff_cut_cosine'] <= 1
+
+
 if __name__ == '__main__':
     torch.set_num_threads(8)
     torch.manual_seed(0)

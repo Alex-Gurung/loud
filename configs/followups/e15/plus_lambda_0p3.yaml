@@ -1,0 +1,16 @@
+# E15's lambda sweep (plan v2), only if latent_plus_lens beats e1.h8_cut (arm (a)) by 0.02: the latent target beside
+# the logit-lens readouts at another lambda. Submit by name.
+experiment: e15
+variant: plus_lambda_0p3
+task: h8
+seeds: [0, 1, 2]
+priority: 65
+after: [verify.score_record.s0, verify.latent_boost_smoke.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  mode: cut
+  heldout_every: 100
+  latent_boost: plus
+  latent_lambda: 0.3
