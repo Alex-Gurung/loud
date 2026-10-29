@@ -1,0 +1,19 @@
+"""H8 on CPU (tiny models, PR #40 run eagerly as the reference), each check in its own process: see h8_checks.py."""
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[1]
+CHECKS = ('h8_gradients', 'h8_boost', 'h8_schemes', 'h8_reforward', 'h8_run')
+
+
+@pytest.mark.parametrize('check', CHECKS)
+def test_h8(check, tmp_path):
+    env = dict(os.environ, PYTHONPATH=str(REPO), LOUD_ARTIFACTS=str(tmp_path / 'artifacts'),
+               LOUD_QUEUE_DIR=str(tmp_path / 'queue'), PYTHONDONTWRITEBYTECODE='1')
+    proc = subprocess.run([sys.executable, str(REPO / 'tests' / 'h8_checks.py'), check, str(tmp_path)], cwd=REPO,
+                          env=env, capture_output=True, text=True, timeout=1200)
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-6000:]

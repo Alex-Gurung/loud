@@ -8,6 +8,7 @@ from .paths import PINS, REPO
 TASKS = {
     'proxy': ('loud.proxy', 'run'),               # H1 backprop proxy
     'identity': ('loud.identity', 'run'),         # H5 identity-path forward-only estimator (PR #26)
+    'h8': ('loud.h8', 'run'),                     # H8 autograd emulation of Boost and Cut (development only)
     'population': ('loud.population', 'run'),     # E3: copies of the backprop proxy on split data
     'cut': ('loud.cut', 'run'),                   # H5 the record's Boost -> Cut chain (PR #40)
     'score': ('loud.score', 'run_task'),          # official rescoring of a checkpoint
@@ -26,7 +27,7 @@ CHECKPOINT_DTYPES = ('bfloat16', 'float32')
 
 # What each task's result.json holds that `expect` may check.
 TRAINING_RESULTS = ('val_loss', 'test_loss', 'heldout_loss', 'train_seconds', 'train_loss_last', 'peak_cuda_gb')
-RESULTS = {'proxy': TRAINING_RESULTS, 'identity': TRAINING_RESULTS, 'population': TRAINING_RESULTS,
+RESULTS = {'proxy': TRAINING_RESULTS, 'identity': TRAINING_RESULTS, 'h8': TRAINING_RESULTS, 'population': TRAINING_RESULTS,
            'cut': TRAINING_RESULTS + ('val_loss_plain', 'test_loss_plain', 'holdout_plain', 'holdout_merged',
                                       'merge_seconds'),
            'score': ('val_loss', 'test_loss'),
@@ -127,6 +128,21 @@ POPULATION = dict(
 )
 POPULATION_FREE = ('sequences', 'heldout', 'batch', 'preset', 'test', 'official_eval', 'recipe', 'micro_batch',
                    'lr_mult', 'branch', 'copies', 'rule', 'every', 'checkpoints', 'checkpoint_dtype')
+
+# H8 (loud/h8.py) on PR #40's recipe: Boost for the first 20% of updates, then Cut, 4 sequences per update.
+H8 = dict(
+    TRAINING,
+    batch=4,                    # PR #40's, in both phases
+    mode='synthesis',           # the Cut phase: 'synthesis' (credits at the sites, a probing scheme, block-local
+                                # gradients) or 'cut' (one backward of the cut graph)
+    boost=True,                 # PR #40's Boost phase first (false: Cut from the first update)
+    freeze_queries=False,       # also detach the query's input: record #9's Cut, without own queries
+    rows=None,                  # synthesis: Hadamard rows per token per site in the Cut phase (None: all 512)
+    row_assign='token',         # 'time' (all tokens share rows, rotating across updates) or 'token' (offset by t mod K)
+    prior='none',               # 'identity': read only the residual from the identity path's guess (E7)
+    compare_every=0,            # every N updates, the cosine of the block-local gradient to the identity scheme's (E6)
+    rank_every=0,               # every N updates, the stable rank of ANVIL II's orthogonalization input (E6)
+)
 
 IDENTITY = dict(
     TRAINING,
@@ -313,6 +329,26 @@ def branch_rows(o):
     return prefix, n - prefix * o['batch']
 
 
+def h8_options(args):
+    o = training_options(args, H8, 'h8')
+    width = PRESETS[o['preset']][1]
+    if o['mode'] not in ('synthesis', 'cut'):
+        raise ValueError("mode must be 'synthesis' or 'cut'")
+    if o['row_assign'] not in ('time', 'token') or o['prior'] not in ('none', 'identity'):
+        raise ValueError("row_assign must be 'time' or 'token', prior 'none' or 'identity'")
+    if o['rows'] is not None:
+        positive(o, 'rows')
+        if o['rows'] & (o['rows'] - 1) or o['rows'] > width:
+            raise ValueError(f'rows must be a power of two up to the width ({width})')
+    scheme = o['rows'] not in (None, width) or o['prior'] != 'none'
+    if o['mode'] == 'cut' and (scheme or o['compare_every']):
+        raise ValueError('rows, prior and compare_every are synthesis-mode options')
+    for key in ('row_assign',):
+        if key in args and o['rows'] in (None, width):
+            raise ValueError(f'{key} needs rows below the width')
+    return o
+
+
 def identity_options(args):
     o = training_options(args, IDENTITY, 'identity')
     if o['rows'] is not None:
@@ -454,7 +490,7 @@ def noop_options(args):
     return args
 
 
-VALIDATE = {'proxy': proxy_options, 'identity': identity_options, 'population': population_options,
+VALIDATE = {'proxy': proxy_options, 'identity': identity_options, 'h8': h8_options, 'population': population_options,
             'cut': cut_options, 'score': score_options,
             'reference': reference_options, 'compare': compare_options, 'diagnose': diagnose_options,
             'gate': gate_options, 'noop': noop_options}
