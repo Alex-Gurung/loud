@@ -42,7 +42,8 @@ Not built, on purpose:
 
 Nothing has run on a GPU yet. Every config together is 184 one-GPU jobs, roughly 55 GPU-hours by the estimates in
 the configs (most of it the Cut chain, about 35 minutes per 1M-slice run; a 10M proxy run is about 8 minutes), so
-about 14 hours on four workers or 7 on eight. E12's record runs need one 8-GPU node for about 16 hours (18 runs of 35
+about 14 hours on four workers or 7 on eight. They write about 95 GB (the final weights, about 0.15 GB, and the H4
+checkpoints, about 0.4 GB, per training run); workers pause when the shared volume has 15 GB left. E12's record runs need one 8-GPU node for about 16 hours (18 runs of 35
 to 56 minutes). All estimates scale the published 8×H100 times; the first runs measure them.
 
 ## Running on GPUs
@@ -157,7 +158,8 @@ is when they are needed to tell a port error from an environment difference.
 
   A submission is checked in full first: duplicate ids, unknown `after` ids and conflicts stop it before anything is
   written.
-- **Disk.** Workers pause when the shared volume has less than `LOUD_MIN_FREE_GB` free (default 2), and `loud.status`
+- **Disk.** Workers pause when the shared volume has less than `LOUD_MIN_FREE_GB` free (default 15, headroom for the
+  other projects on the volume), and `loud.status`
   says so.
 - Nothing is ever deleted: attempts, superseded runs, snapshots and job history all stay.
 

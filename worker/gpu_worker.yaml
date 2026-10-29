@@ -54,7 +54,7 @@ spec:
             - name: LOUD_IDLE_EXIT_SECONDS
               value: "1200"
             - name: LOUD_MIN_FREE_GB
-              value: "2"
+              value: "15"  # headroom for the other projects on this volume
             - name: OMP_NUM_THREADS
               value: "8"
             - name: TOKENIZERS_PARALLELISM

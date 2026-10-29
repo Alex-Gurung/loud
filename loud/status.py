@@ -30,7 +30,7 @@ def main():
     now = time.time()
     disk = shutil.disk_usage(REPO)
     print(f'shared disk: {disk.free / 1e9:.1f} GB free of {disk.total / 1e9:.0f} GB (workers pause below '
-          f'LOUD_MIN_FREE_GB, default 2)')
+          f'LOUD_MIN_FREE_GB, default 15)')
 
     workers = [w for w in q.jobs('workers') if now - w['seen'] < RECENT]
     print(f'\nworkers seen in the last day ({len(workers)}):')

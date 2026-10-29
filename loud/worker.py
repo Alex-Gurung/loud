@@ -200,7 +200,7 @@ def main():
     parser.add_argument('--worker-id', default=socket.gethostname())
     parser.add_argument('--idle-exit', type=float, default=float(os.environ.get('LOUD_IDLE_EXIT_SECONDS', 1200)))
     parser.add_argument('--poll', type=float, default=15)
-    parser.add_argument('--min-free-gb', type=float, default=float(os.environ.get('LOUD_MIN_FREE_GB', 2)))
+    parser.add_argument('--min-free-gb', type=float, default=float(os.environ.get('LOUD_MIN_FREE_GB', 15)))
     parser.add_argument('--python', default=sys.executable, help='Interpreter for the jobs.')
     args = parser.parse_args()
     worker = Worker(JobQueue(args.queue), args.worker_id, args.idle_exit, args.poll, args.min_free_gb, args.python)
