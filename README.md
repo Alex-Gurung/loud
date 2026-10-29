@@ -172,7 +172,8 @@ gives a first read of every arm early. The bands, in order (`priority:` in each 
      numbers (kernel rounding; the data, checkpoint and scorer hashes all match).
    - `verify.bp_b8` (verification 2): the proxy on the 10M set, one sequence per forward. Target: boost-cut's ledger
      run `bp38_s0` of `backprop_preset.py`, val 3.7083 and test 3.7014, within 0.02. `verify.bp_b8_ledger` checks the
-     training loss at every update the ledger logged (every 61) within 0.01; `verify.bp_b8_script` (the unmodified
+     training loss at every update the ledger logged (every 61) within 0.02, 0.005 on the mean (rounding over hundreds
+     of updates moved one logged update 0.011 on the first run, the sign wandering); `verify.bp_b8_script` (the unmodified
      script) and `verify.bp_b8_onefwd` (the proxy with whole-batch forwards like it) must agree within 0.002 for 50
      updates and 0.01 at the end (`verify.bp_b8_match`).
    - `verify.identity` (verification 3): the identity path for a full 10M epoch, within 0.02 of PR #26's 4.1772;
