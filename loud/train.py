@@ -23,6 +23,7 @@ import math
 import time
 
 import torch
+import torch._functorch.config
 
 from .checkpoints import MERGE_DECAYS, FractionCheckpoints, TrajectoryMeans, shrink_final
 from .data import SEQ, benchmark_split, load_split
@@ -30,6 +31,11 @@ from .heldout import HeldoutScorer, mean_loss
 from .options import checkpoints_on
 from .runlog import Run
 from .score import score_in_subprocess
+
+# utils/model.py compiles flex attention, whose compiled backward donates its buffers by default and then refuses a
+# second backward through the same graph; H8 (per-sublayer gradients, E14's cosine) and E9's Fisher backward take
+# several (retain_graph). Off for every method, before anything compiles.
+torch._functorch.config.donated_buffer = False
 
 
 def set_rate(optimizer, step, steps, warmdown, final=0.0):
