@@ -424,3 +424,33 @@ def test_board_tables_from_configs_queue_and_runs(tmp_path):
     assert experiments['e6']['verdict'] == 'waiting' and experiments['e6']['reference_val'] == arms['e1.h8_synth']['val_mean']
     assert experiments['e8']['followup'] and not experiments['e6']['followup']
     assert {c['arm'] for c in read('curves')} == {'e1.h8_synth', 'e6.token_k4'}
+
+
+def test_prune_keeps_what_is_read(tmp_path):
+    """loud.prune: a finished run's weights go; E1's seed 0, the verifications, files a config reads, unfinished runs
+    and diagnostic tensors stay."""
+    from loud import prune
+    runs, configs = tmp_path / 'runs', tmp_path / 'configs'
+    configs.mkdir()
+    (configs / 'a.yaml').write_text('args:\n  checkpoint: e7.arm.s1:ckpt_20.pt\n')
+
+    def run(path, files, complete=True):
+        d = runs / path
+        d.mkdir(parents=True)
+        for f in files:
+            (d / f).write_bytes(b'x')
+        if complete is not None:
+            (d / 'result.json').write_text(json.dumps({'complete': complete}))
+        return d
+    run('e1/h8_cut/s0', ['final.pt'])
+    run('e1/h8_cut/s1', ['final.pt'])
+    run('verify/bp_b8/s0', ['final.pt'])
+    run('e7/arm/s1', ['final.pt', 'ckpt_20.pt', 'ckpt_20.optim.pt', 'ckpt_50.pt', 'snr_spectrum.pt'])
+    run('e7/arm/s2', ['final.pt'], complete=None)  # still running
+    original = prune.checkpoints_read
+    prune.checkpoints_read = lambda: original(configs)
+    try:
+        gone = sorted(str(f.relative_to(runs)) for f in prune.candidates(runs))
+    finally:
+        prune.checkpoints_read = original
+    assert gone == ['e1/h8_cut/s1/final.pt', 'e7/arm/s1/ckpt_50.pt', 'e7/arm/s1/final.pt'], gone

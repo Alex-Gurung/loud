@@ -4,9 +4,9 @@ work reads. Every deletion is appended to artifacts/deleted_weights.txt; scores,
     python3 -m loud.prune              # what it would delete
     python3 -m loud.prune --delete     # delete it
 
-Kept: E1's runs (the baselines every comparison and diagnostic reads), the verifications that score their weights
-(verify.bp_b8*, verify.identity), and the H4 checkpoints a config reads (`checkpoint: <job>:<file>` in any config,
-with the .optim.pt beside it). A run is pruned only when its result.json says complete (or it failed its check), so a
+Kept: E1's seed-0 runs (the baselines' weights and H4 checkpoints the diagnostics read; E1's other seeds are scored
+and their weights go), the verifications that score their weights (verify.bp_b8*, verify.identity), and any file a
+config reads (`checkpoint: <job>:<file>` in any config, with the .optim.pt beside it). A run is pruned only when its result.json says complete (or it failed its check), so a
 running or crashed attempt is never touched; attempt and superseded directories are pruned the same way.
 """
 import argparse
@@ -17,7 +17,7 @@ import time
 from .common import read_json
 from .paths import ARTIFACTS, REPO, RUNS
 
-KEEP_EXPERIMENTS = {'e1'}
+KEEP_SEED0 = {'e1'}  # experiments whose seed-0 weights stay whole
 KEEP_RUNS = {('verify', 'bp_b8'), ('verify', 'bp_b8_onefwd'), ('verify', 'identity'), ('verify', 'score_record')}
 MANIFEST = ARTIFACTS / 'deleted_weights.txt'
 
@@ -37,7 +37,7 @@ def candidates(runs=RUNS):
     keep = checkpoints_read()
     for run in sorted(Path(runs).glob('*/*/s*')):
         experiment, variant = run.parent.parent.name, run.parent.name
-        if experiment in KEEP_EXPERIMENTS or (experiment, variant) in KEEP_RUNS:
+        if (experiment in KEEP_SEED0 and run.name.split('.')[0] == 's0') or (experiment, variant) in KEEP_RUNS:
             continue
         result = run / 'result.json'
         if not result.exists():

@@ -301,9 +301,13 @@ gives a first read of every arm early. The bands, in order (`priority:` in each 
   A submission is checked in full first: duplicate ids, unknown `after` ids, conflicts and config errors stop it
   before anything is written.
 - **Disk.** Workers pause below `LOUD_MIN_FREE_GB` free; see Disk under Running on GPUs.
-- The harness deletes nothing: attempts, superseded runs, snapshots and job history all stay. Weights are deleted only
-  by hand and listed in `artifacts/deleted_weights.txt`. On 2026-10-30, with the volume at 5 GB free, that was the
-  smoke runs' weights, E16's track-3 finals and the finals of finished arms E2-E15; every score stays in its run.
+- The queue deletes nothing: attempts, superseded runs, snapshots and job history all stay. Weights go through
+  `python3 -m loud.prune --delete` (without `--delete` it lists what it would remove): the weights (final*, ckpt_*,
+  means*) of every finished run except E1's seed 0, the verifications that score theirs, and any file a config reads
+  (`checkpoint: <job>:<file>`); scores, logs and diagnostic tensors stay. Every deletion is listed in
+  `artifacts/deleted_weights.txt`. On 2026-10-30, with the shared volume at 5 GB free, the first deletions were the
+  smoke runs', E16's and the finished arms' finals; since then the autonomous loop runs the prune every few minutes,
+  and E1's seeds 1-2 (scored, read by nothing) went when the volume fell to 15 GB. This project holds about 3.6 GB.
 
 ### When a job fails or is blocked
 
