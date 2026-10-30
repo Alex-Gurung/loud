@@ -462,6 +462,14 @@ def cut_key_blocks(scratch):
     keys = [n for n in record if n.endswith('attn.c_k.weight')]
     assert all(torch.allclose(record[n], one[n], atol=1e-6) for n in keys)
     assert not all(torch.allclose(record[n], one[n], atol=1e-6) for n in record)
+    none = grads(key_probes=False)  # no probes: c_k as the record's, the K-branch input credit gone
+    assert all(torch.allclose(record[n], none[n], atol=1e-6) for n in keys)
+    assert not all(torch.allclose(record[n], none[n], atol=1e-6) for n in record)
+    try:
+        cut_options(dict(preset='2m', key_probes=False, key_blocks=[1]))
+        raise AssertionError('accepted key_blocks without key probes')
+    except ValueError:
+        pass
     for bad in ([2], [0, 0], 'all'):
         try:
             cut_options(dict(preset='2m', key_blocks=bad))

@@ -1,0 +1,15 @@
+# E17 on the real chain (added): PR #40 without its input-key probes (key_path_draws 0; c_k keeps the key errors the
+# record uses without them), seed 0, against e17.chain_record. In H8 the key path carries 71% of the cut's 0.160 gap
+# to backprop; this measures what the record's own key probes are worth, so H8's shares can be read on the chain.
+experiment: e17
+variant: chain_nokeys
+task: cut
+seeds: [0]
+priority: 31
+gpu_memory_gb: 24  # the Cut chain: 18 GB at its peak
+after: [verify.cut_prefix_match.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  key_probes: false

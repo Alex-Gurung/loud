@@ -377,6 +377,8 @@ class CutChain:
         m = self.m = refs.trainer_module('pr40')
         self.o, self.device, self.seed, self.steps, self.heldout = o, device, seed, steps, heldout
         self.settings = s = record_settings(m, o['preset'], o['batch'])
+        if not o['key_probes']:  # E17: the record without its input-key probes (path_credits skips them)
+            s.key_path_draws = 0
         self.width = s.model.n_embd
         self.world = o['virtual_gpus']
         self.split = max(1, self.world // o['batch'])  # GPUs per sequence, as train_stages
