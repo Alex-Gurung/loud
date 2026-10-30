@@ -1,0 +1,17 @@
+# E17 timing (added): key_transport, stopped after 262 updates (Boost and 20 Cut updates), seed 0, with a GPU to
+# itself, against e5.time_record (the record, the same way): the Cut step time without input-key probes.
+experiment: e17
+variant: time_key_transport
+task: cut
+seeds: [0]
+priority: 20
+gpu_memory_gb: 72  # the GPU to itself, for a clean time
+after: [verify.cut_prefix_match.s0]
+args:
+  final_dtype: bfloat16
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  key_transport: true
+  stop_after: 262
+  official_eval: false

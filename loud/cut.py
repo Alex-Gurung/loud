@@ -253,6 +253,7 @@ def estimator_classes(m):
         budget = None   # E13: the run's ROW_BUDGETS strategy (token windows of each token's own count)
         key_blocks = None  # E17: the blocks whose input-key probes run (None: every block, the record's)
         deep = False    # E5: one S1 launch reads S2..S8 (deep_chain_credits)
+        transport = False  # E17: the K-branch input credit from the raw key errors through c_k, no probes
         top = None      # this estimate's top-stream credit (the guess E7 carries down)
 
         @torch.no_grad()
@@ -264,6 +265,8 @@ def estimator_classes(m):
         def key_input_credits(self, targets):
             """The record's input-key probes at key_blocks only; the other blocks' K-branch input credit is zero, and
             their c_k weights take the key errors the record uses without these probes (exact_key_errors)."""
+            if self.transport:
+                return self.transported_key_credits(targets)
             if self.key_blocks is None:
                 return super().key_input_credits(targets)
             chosen = {i: t for i, t in targets.items() if i in self.key_blocks}
@@ -274,6 +277,27 @@ def estimator_classes(m):
             d = self.capture
             zero = torch.zeros(d.batch * d.length, self.width, device=self.device)
             return {i: credits.get(i, zero) for i in targets}
+
+        def transported_key_credits(self, targets):
+            """E17's key transport: from the block input x the K branch is RMSNorm, then c_k (linear) to the raw key,
+            so the input's credit along it is the raw key's credit (the record's single-key experiments, which its
+            c_k weights use anyway; this GPU's share of each head's coordinates) times c_k's weight, through one
+            forward RMSNorm step (norm_move, the record's value-path convention), summed over the sequence's GPUs as
+            the probes' estimate is. No input-key probes run."""
+            d, credits, errors = self.capture, {}, {}
+            for i, target in targets.items():
+                raw = torch.empty(d.batch, d.length, self.width, device=self.device)
+                for r in range(d.batch):
+                    context = self.key_context(i, r, target)
+                    raw[r] = self.key_errors_from_context(i, context).transpose(0, 1).reshape(d.length, self.width)
+                w_key = self.model.transformer.h[i].attn.c_k.weight.float()
+                # through the K branch's RMSNorm as the record's value path goes (PR #23's norm_move: a central
+                # forward response of the norm along the credit, which its symmetric Jacobian makes the pullback)
+                credits[i] = self.group_sum(m.norm_move(d.blocks[i].float().flatten(0, 1),
+                                                        (raw @ w_key).flatten(0, 1)))
+                errors[f'transformer.h.{i}.attn.c_k'] = raw
+            self._input_key_errors = errors
+            return credits
 
         def probe(self, x, y, mix=None, probed=None):
             """The record's probe; Cut calls it once, for the top stream's credit (E7's guess carries it down)."""
@@ -564,7 +588,7 @@ class CutChain:
                     virtual_gpus=self.world, gpus_per_sequence=self.split,
                     boost_updates=sum(phase == 'boost' for phase, *_ in self.schedule),
                     chain_rows=self.o['rows'] or self.width, row_assign=self.o['row_assign'], prior=self.o['prior'],
-                    row_budget=self.o['row_budget'], key_blocks=self.o['key_blocks'] or 'all', deep_readout=self.o['deep_readout'], merge_batch=self.o['merge_batch'],
+                    row_budget=self.o['row_budget'], key_blocks=self.o['key_blocks'] or 'all', key_transport=self.o['key_transport'], deep_readout=self.o['deep_readout'], merge_batch=self.o['merge_batch'],
                     reverse_sum=self.o['reverse_sum'], chain_graphs=len(self.graphs),
                     recompile_limit=self.recompile_limit)
 
@@ -645,6 +669,7 @@ class CutChain:
                     estimator.prior, estimator.budget = self.o['prior'] == 'identity', self.budget
                     estimator.key_blocks = set(self.o['key_blocks']) if self.o['key_blocks'] else None
                     estimator.deep = self.o['deep_readout']
+                    estimator.transport = self.o['key_transport']
             fields['chain_rows'] = self.o['rows'] or self.width
             if start is not None:
                 fields['chain_window'] = [start, start + self.o['rows']]

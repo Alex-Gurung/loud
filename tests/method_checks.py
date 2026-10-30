@@ -441,7 +441,8 @@ def cut_run(scratch):
 
 def cut_key_blocks(scratch):
     """E17's key_blocks: every block listed is the record itself; a subset leaves the other blocks' c_k gradients as
-    the record's (exact key errors, which its probes also measure) and changes the rest."""
+    the record's (exact key errors, which its probes also measure) and changes the rest. key_transport (the raw key
+    errors through c_k and one forward norm step, no probes) gives the record's gradient; no probes keep c_k's."""
     cut_module()
     import loud.cut
     from loud.options import cut_options
@@ -462,14 +463,21 @@ def cut_key_blocks(scratch):
     keys = [n for n in record if n.endswith('attn.c_k.weight')]
     assert all(torch.allclose(record[n], one[n], atol=1e-6) for n in keys)
     assert not all(torch.allclose(record[n], one[n], atol=1e-6) for n in record)
+    transported = grads(key_transport=True)  # the raw key errors through c_k and one norm step: the probes' estimate
+    cos = lambda a, b: float(a.flatten() @ b.flatten() / (a.norm() * b.norm()))
+    assert all(cos(record[n], transported[n]) > 0.99999 for n in record), \
+        {n: cos(record[n], transported[n]) for n in record}
+    assert all(abs(transported[n].norm() / record[n].norm() - 1) < 1e-3 for n in record if record[n].norm() > 0)
     none = grads(key_probes=False)  # no probes: c_k as the record's, the K-branch input credit gone
     assert all(torch.allclose(record[n], none[n], atol=1e-6) for n in keys)
     assert not all(torch.allclose(record[n], none[n], atol=1e-6) for n in record)
-    try:
-        cut_options(dict(preset='2m', key_probes=False, key_blocks=[1]))
-        raise AssertionError('accepted key_blocks without key probes')
-    except ValueError:
-        pass
+    for bad in (dict(key_probes=False, key_blocks=[1]), dict(key_transport=True, key_blocks=[1]),
+                dict(key_transport=True, key_probes=False)):
+        try:
+            cut_options(dict(preset='2m', **bad))
+            raise AssertionError(f'accepted {bad}')
+        except ValueError:
+            pass
     for bad in ([2], [0, 0], 'all'):
         try:
             cut_options(dict(preset='2m', key_blocks=bad))

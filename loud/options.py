@@ -191,6 +191,7 @@ CUT = dict(
     budget_theta=0.0,           # E13 'ngram': the low tier is max(n-gram loss, model loss) <= theta nats
     key_blocks=[],              # E17: the blocks whose input-key probes run (empty: all, the record's)
     key_probes=True,            # E17: false runs no input-key probes (key_path_draws 0; c_k keeps its key errors)
+    key_transport=False,        # E17: the K-branch input credit = the raw key errors times c_k's weight, no probes
     deep_readout=False,         # E5: one S1 cycle reads S2..S8 by a per-token solve (loud/cut.py)
 )
 ROW_ASSIGNS, PRIORS = ('time', 'token'), ('none', 'identity')
@@ -490,6 +491,8 @@ def cut_options(args):
         raise ValueError('key_blocks: distinct block indices of this preset (empty: every block)')
     if o['deep_readout'] and (o['rows'] is not None or o['row_budget'] is not None):
         raise ValueError('deep_readout solves full cycles: not with rows or a row budget')
+    if o['key_transport'] and (blocks or not o['key_probes']):
+        raise ValueError('key_transport replaces every block\'s key probes: not with key_blocks or key_probes false')
     if blocks and not o['key_probes']:
         raise ValueError('key_blocks chooses blocks for the key probes: not with key_probes false')
     return o

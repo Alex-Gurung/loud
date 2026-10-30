@@ -1,0 +1,18 @@
+# E17 on the real chain (added): PR #40 with its input-key probes (512 central pairs per token at every block)
+# replaced by key_transport: the raw key errors the record measures anyway (its single-key experiments, which its c_k
+# weights use) times c_k's weight, through one forward RMSNorm step (norm_move, as the record's value path). The K
+# branch is RMSNorm then a linear map, so this is what the probes measure: on the CPU test model the two estimates
+# agree to 1e-4 and the gradients at cosine 0.999999. Against e17.chain_record: the loss (expected the same) and the
+# time per Cut update the probes cost.
+experiment: e17
+variant: chain_key_transport
+task: cut
+seeds: [0]
+priority: 29
+gpu_memory_gb: 24  # the Cut chain: 18 GB at its peak
+after: [verify.cut_prefix_match.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  key_transport: true

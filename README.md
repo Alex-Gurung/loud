@@ -90,6 +90,11 @@ has every arm.
   30M keys recover 71% of the (smaller) gap on both seeds. Running on the real chain: PR #40 unchanged at full
   length and with its key probes at blocks 3, 5, 7 or at block 5 only (`key_blocks`): Cut updates already take
   about 18% less time with them restricted.
+  **Key transport:** the record's input-key probes (512 central pairs per token per block) measure the K branch's
+  input credit, and that branch is an RMSNorm then c_k, a linear map, so the raw key errors the record already
+  measures for c_k's own gradient, times c_k's weight, through one forward norm step (`norm_move`, the record's
+  value-path convention), give the same estimate: on the CPU test model to 1e-4 and the gradients at cosine
+  0.999999 (`key_transport`, check `cut_key_blocks`). Queued on the real chain at full length, and timed.
 - **E18, 30M:** H8 cut's gap to matched backprop shrinks from 0.160 to 0.123 (two seeds, 0.126 and 0.120); E6's
   partial-row cost holds or grows (K = 4 by token +0.158, by time +0.188, against +0.150 and +0.184 at 10M);
   NextLat helps more with the longer run: -0.005 at lambda 0.3, -0.008 at 1 and -0.007 at 3 (two seeds each; at 10M
