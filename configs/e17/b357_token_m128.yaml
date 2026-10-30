@@ -1,0 +1,17 @@
+# E17 (added): the cheapest key path the sweeps point to: keys live in blocks 3, 5 and 7 only (67% of the cut's gap on
+# seed 0, against 71% with every block), each read through 128 token-assigned Hadamard rows (every block at m = 128:
+# 55%). Together: 3/8 of the blocks at 128/512 of the probes, 3/16 or less of the record's key-probe budget.
+experiment: e17
+variant: b357_token_m128
+task: h8
+seeds: [0, 1, 2]
+priority: 37
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  mode: cut
+  live_paths: [keys]
+  live_blocks: [3, 5, 7]
+  key_draws: 128
+  key_assign: token

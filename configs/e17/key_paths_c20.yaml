@@ -1,0 +1,13 @@
+# E17's diagnostic (added) at 20% of training (e1.h8_synth.s0's ckpt_20.pt, the handoff from Boost), one held-out
+# sequence: whether the key path's credit already sits in blocks 3, 5 and 7 when Cut begins (at the end of the cut
+# model's training: block 5 54%, block 3 23%, block 7 10% of the cut gradient's error, the other five under 1%).
+experiment: e17
+variant: key_paths_c20
+task: diagnose
+seeds: [0]
+priority: 36
+gpu_memory_gb: 16  # ten float32 gradients of one 2048-token sequence on the 8 x 512 model
+after: [e1.h8_synth.s0]
+args:
+  tool: key_paths
+  checkpoint: e1.h8_synth.s0:ckpt_20.pt
