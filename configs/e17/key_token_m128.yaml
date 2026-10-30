@@ -1,0 +1,17 @@
+# E17 (added): key_draws_m128 with the rows assigned by token (key_assign: token): each block's basis, permuted, split
+# into 512 / 128 blocks of 128 rows, token t reading block t mod K, so neighbouring tokens' errors are uncorrelated (E6:
+# token assignment costs less than shared rows). Shared rows, as the record draws them, recover 0% (m = 32), 31%
+# (64) and 51% (128) of the cut's gap on seed 0, against 69% with all 512.
+experiment: e17
+variant: key_token_m128
+task: h8
+seeds: [0, 1, 2]
+priority: 37
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  mode: cut
+  live_paths: [keys]
+  key_draws: 128
+  key_assign: token

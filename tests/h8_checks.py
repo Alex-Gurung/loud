@@ -651,6 +651,15 @@ def h8_knobs(scratch):
         x0 = torch.zeros_like(g, requires_grad=True)
         reads.append(torch.autograd.grad(h8.ReadCredit.apply(x0, rows), x0, g)[0])
     one, mean = reads[0], torch.stack(reads).mean(0)
+    perm = H[torch.randperm(W)] * signs  # by token: K blocks of m rows; K tokens in a row read the whole basis
+    blocks = perm.view(8, W // 8, W).double()
+    x0 = torch.zeros(1, 8, W, dtype=torch.float64, requires_grad=True)
+    g8 = torch.randn(1, 8, W, dtype=torch.float64)
+    read = torch.autograd.grad(h8.ReadCredit.apply(x0, blocks), x0, g8)[0]
+    for t in range(8):  # (in float32, as the record decodes)
+        assert torch.allclose(read[0, t], (g8[0, t] @ blocks[t].T) @ blocks[t] / (W // 8), atol=1e-4)
+    whole = sum((g8[0, 0] @ blocks[k].T) @ blocks[k] for k in range(8)) / W  # the K blocks together: the whole basis
+    assert torch.allclose(whole, g8[0, 0])
     assert (mean - g).norm() < 0.25 * (one - g).norm(), ((mean - g).norm(), (one - g).norm())
     partial = [r[:W // 8] for r in full]
     assert not torch.allclose(gw(held=True, live=['keys'], key_rows=partial), every, atol=1e-5)
@@ -658,6 +667,10 @@ def h8_knobs(scratch):
     trainer = h8.H8(o, torch.device('cpu'), 0, 10, torch.zeros(0, CUT_SEQ, dtype=torch.long))
     rows = trainer.key_rows()
     assert len(rows) == L and rows[0].shape == (W // 4, W) and torch.allclose(rows[0] @ rows[0].T, W * torch.eye(W // 4))
+    o = h8_options(dict(preset='2m', mode='cut', live_paths=['keys'], key_draws=W // 4, key_assign='token'))
+    rows = h8.H8(o, torch.device('cpu'), 0, 10, torch.zeros(0, CUT_SEQ, dtype=torch.long)).key_rows()
+    assert rows[0].shape == (4, W // 4, W) and torch.allclose(rows[0].flatten(0, 1).T @ rows[0].flatten(0, 1),
+                                                              W * torch.eye(W))
     rates = lambda **kw: [g['lr'] for g in h8.H8(h8_options(dict(preset='2m', **kw)), torch.device('cpu'), 0, 10,
                                                  torch.zeros(0, CUT_SEQ, dtype=torch.long)).optimizer.param_groups]
     assert all(abs(b - 2 * a) < 1e-12 for a, b in zip(rates(), rates(lr_mult=2.0)))  # E19: every group's rate scales
@@ -669,7 +682,9 @@ def h8_knobs(scratch):
     assert h8.RUNWAY == (0.1, 0.4) and h8.CLIP == 3.0
     for bad in (dict(live_paths=['keys']), dict(clip_factor=2.0), dict(mode='cut', live_paths=['queries']),
                 dict(mode='cut', key_draws=64), dict(mode='cut', live_paths=['values'], key_draws=64),
-                dict(mode='cut', live_paths=['keys'], key_draws=10 ** 6), dict(lr_mult=0.0)):
+                dict(mode='cut', live_paths=['keys'], key_draws=10 ** 6), dict(lr_mult=0.0),
+                dict(mode='cut', live_paths=['keys'], key_draws=48, key_assign='token'),
+                dict(mode='cut', live_paths=['keys'], key_assign='token')):
         try:
             h8_options(dict(preset='2m', **bad))
         except ValueError:

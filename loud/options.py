@@ -167,6 +167,7 @@ H8 = dict(
     live_blocks=[],             # with live_paths: only these blocks' paths (empty: every block)
     key_draws=0,                # with keys live: each block's key-input credit read through this many random
                                 # Hadamard rows, the record's input-key probes (0: exact; the record: 512)
+    key_assign='shared',        # with key_draws: 'shared' (every token the same rows, the record's) or 'token'
     snr_scaling='none',         # E8's H8 setting: 'control', 'snr' or 'rate' in place of ANVIL II's polar factor in the
                                 # Cut phase, from each sequence's synthesized gradients (loud/snr.py)
 )
@@ -397,6 +398,8 @@ def h8_options(args):
     draws = o['key_draws']
     if type(draws) is not int or not 0 <= draws <= width or (draws and 'keys' not in o['live_paths']):
         raise ValueError(f'key_draws: 0 (exact) or 1..{width} rows, with the keys live')
+    if o['key_assign'] not in ('shared', 'token') or (o['key_assign'] == 'token' and (not draws or width % draws)):
+        raise ValueError("key_assign: 'shared' or 'token' (token: key_draws dividing the width)")
     if not (o['clip_factor'] > 0 and 0 <= o['agree_share'] <= 1):
         raise ValueError('clip_factor must be > 0 and agree_share in [0, 1]')
     grid = o['runway_grid']

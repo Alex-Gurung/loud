@@ -1,0 +1,15 @@
+# E17 (added): keys live in blocks 3, 5 and 7 together. On seed 0 one block's key path alone recovers 59% (block 3),
+# 62% (5) or 48% (7) of the cut's gap to backprop and the other five about 0%, against 71% with every block. If these
+# three reach the 71%, the record's input-key probes (512 per token at all eight blocks) are needed at three.
+experiment: e17
+variant: live_keys_b357
+task: h8
+seeds: [0, 1, 2]
+priority: 37
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  mode: cut
+  live_paths: [keys]
+  live_blocks: [3, 5, 7]

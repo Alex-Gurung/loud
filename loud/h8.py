@@ -94,7 +94,8 @@ def token_losses(model, x, targets, head=None):
 
 class ReadCredit(torch.autograd.Function):
     """The identity forward; backward passes on only the partial-row read of the incoming credit g [B, T, W]:
-    (g R^T) R / m for the m rows R (+-1 entries, E[R^T R / m] = I), in float32. What m probes per token would measure."""
+    (g R^T) R / m for the m rows R (+-1 entries, E[R^T R / m] = I), in float32. What m probes per token would measure.
+    Rows [m, W] are every token's; rows [K, m, W] give token t block t mod K (E6's token assignment)."""
 
     @staticmethod
     def forward(ctx, x, rows):
@@ -105,8 +106,14 @@ class ReadCredit(torch.autograd.Function):
     def backward(ctx, g):
         rows, = ctx.saved_tensors
         with torch.autocast(g.device.type, enabled=False):
-            r = rows.float()
-            read = (g.float() @ r.T) @ r / r.shape[0]
+            r, g32 = rows.float(), g.float()
+            if r.dim() == 2:
+                read = (g32 @ r.T) @ r / r.shape[0]
+            else:
+                K, m = r.shape[:2]
+                read = torch.empty_like(g32)
+                for k in range(K):
+                    read[:, k::K] = (g32[:, k::K] @ r[k].T) @ r[k] / m
         return read.to(g.dtype), None
 
 
@@ -799,15 +806,20 @@ class H8:
 
     def key_rows(self):
         """E17's key draws: for each block, key_draws rows of the Hadamard basis chosen at random with random column
-        signs, fresh each update and shared by its tokens, as the record draws them (key_input_credits). None: exact."""
+        signs, fresh each update, as the record draws them (key_input_credits). key_assign 'shared' (the record's):
+        every token reads the same rows; 'token': the block's basis, permuted, split into K = width / m blocks of m
+        rows, token t reading block t mod K, so neighbouring tokens' errors are uncorrelated. None: exact."""
         m = self.o['key_draws']
         if not m:
             return None
         W, H, out = self.settings.model.n_embd, self.scheme.hadamard, []
         for _ in range(self.settings.model.n_layer):
-            chosen = torch.randperm(W, device=self.device, generator=self.key_generator)[:m]
+            order = torch.randperm(W, device=self.device, generator=self.key_generator)
             signs = torch.randint(0, 2, (W,), device=self.device, generator=self.key_generator).float() * 2 - 1
-            out.append(H[chosen] * signs)
+            if self.o['key_assign'] == 'token':
+                out.append((H[order] * signs).view(W // m, m, W))
+            else:
+                out.append(H[order[:m]] * signs)
         return out
 
     def describe(self):
