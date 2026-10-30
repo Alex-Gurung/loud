@@ -11,7 +11,7 @@ CHECKS = ('proxy_gradient', 'proxy_run', 'proxy_merge', 'identity_step', 'identi
           'variants_blur', 'variants_control', 'variants_control_pr40', 'variants_run',
           'anvil_hook', 'batched_anvil_hook', 'snr_scaling', 'snr_diagnostic', 'fisher_factor', 'population_rules',
           'population_run',
-          'cut_ranks', 'cut_windows', 'cut_run', 'cut_budget', 'cut_key_blocks', 'cut_compile_plan')
+          'cut_ranks', 'cut_windows', 'cut_run', 'cut_budget', 'cut_key_blocks', 'cut_deep_readout', 'cut_compile_plan')
 
 
 @pytest.mark.parametrize('check', CHECKS)

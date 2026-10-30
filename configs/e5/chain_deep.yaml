@@ -1,0 +1,18 @@
+# E5's implementation (added): PR #40's Cut chain with one launch at S1 reading S2..S8 (deep_readout: S1's full cycle
+# through a copy of the chain kernel that keeps each move's change at the later mid sites, a per-token 512 x 512
+# solve with v2's ridge toward the identity path's guess; S0 keeps its cycle, the mixing scalars their moves), the
+# full 10M schedule, seed 0. Against e17.chain_record (the record unchanged on the same seed): the loss, and the
+# time per Cut update (v2: about 2.75x less on the stream cycles; the key, gate, query and future probes unchanged).
+# Rules: the solved credits feed queries, keys and MLP units, not only linear consumers (v2 Section 7).
+experiment: e5
+variant: chain_deep
+task: cut
+seeds: [0]
+priority: 30
+gpu_memory_gb: 32  # the Cut chain (18 GB at its peak) and S1's changes at 7 sites with their solves
+after: [e5.chain_deep_smoke.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  deep_readout: true

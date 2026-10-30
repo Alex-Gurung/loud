@@ -197,8 +197,12 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
         low = {c: min(v.values()) for c, v in found.items()}
         failing = {c: sorted(k for k, x in v.items() if x < 0.95) for c, v in found.items()}
         if not any(failing.values()):
-            return 'met', (f'Every site at median cosine 0.95 or more (lowest {low["c20"]:.4f} at 20%, '
-                           f'{low["c100"]:.4f} at 100%): build it, under the linear-consumer question.')
+            note = (f'Every site at median cosine 0.95 or more (lowest {low["c20"]:.4f} at 20%, {low["c100"]:.4f} at '
+                    f'100%): build it, under the linear-consumer question.')
+            deep, ref = by_key.get('e5.chain_deep', {}).get('val_mean'), by_key.get('e17.chain_record', {})
+            if deep is not None and ref.get('val_mean') is not None:
+                note += f' On the chain (seed 0): {deep - ref["val_mean"]:+.4f} against the record unchanged.'
+            return 'met', note
         return 'not met', f'Sites under 0.95: {failing}.'
     if e['id'] == 'e9':  # gated on E8's intervention, which did not help
         return 'skipped', 'Its gate (E8 shows per-direction scaling matters) did not pass: E8 is not met.'

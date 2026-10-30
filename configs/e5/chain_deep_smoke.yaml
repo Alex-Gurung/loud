@@ -1,0 +1,16 @@
+# E5's implementation (added; its diagnostic passed: every site at median cosine 0.997 or more in bf16 deltas): the
+# Cut chain with deep_readout, stopped after 252 of 1,212 updates (all 242 Boost updates and 10 Cut ones), seed 0:
+# that its kernel compiles and runs on the GPU and how long a Cut update takes, before the full run.
+experiment: e5
+variant: chain_deep_smoke
+task: cut
+seeds: [0]
+priority: 20
+gpu_memory_gb: 32  # the Cut chain (18 GB at its peak) and S1's changes at 7 sites with their solves
+after: [verify.cut_prefix_match.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  deep_readout: true
+  stop_after: 252

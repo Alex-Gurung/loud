@@ -478,6 +478,59 @@ def cut_key_blocks(scratch):
         raise AssertionError(f'accepted key_blocks={bad!r}')
 
 
+def cut_deep_readout(scratch):
+    """E5's deep readout on the 2-layer model (two virtual GPUs on one sequence): S0's and S1's credits are the
+    record's own (the same cycles), the mixing scalars' too (the same moves), S2's solved credit is the record's
+    measured one up to the model's nonlinearity, and the update's gradient follows; the plan has S0's cycle and the
+    later sites' scalar moves only."""
+    cut_module()
+    import loud.cut
+    from loud.options import cut_options
+    patch_sequences(length=CUT_SEQ, vocab=CUT_VOCAB)
+    batch = cut_rows_data()[:1]
+    seen = {}
+
+    def run(tag, **kw):
+        args = dict(preset='2m', sequences=20, heldout=8, batch=1, virtual_gpus=2, official_eval=False, **kw)
+        chain = loud.cut.CutChain(cut_options(args), torch.device('cpu'), 0, 12, torch.zeros(8, CUT_SEQ,
+                                                                                             dtype=torch.long))
+        step = next(i for i, b in enumerate(chain.schedule, 1) if b[0] == 'cut')
+        chain.reset('cut')
+        with torch.no_grad():  # a few updates in: the init's zero writers would make every credit trivial
+            for p in chain.model.parameters():
+                p.add_(0.02 * torch.randn(p.shape, generator=torch.Generator().manual_seed(p.numel())))
+        original = chain.Cut.chain_credits
+
+        def kept(self, *args):
+            credits = original(self, *args)
+            seen.setdefault(tag, credits)  # part 0's (group-summed: the sequence's)
+            return credits
+        chain.Cut.chain_credits = kept
+        try:
+            chain.update(step, batch)
+        finally:
+            chain.Cut.chain_credits = original
+        return chain, {n: p.grad.clone() for n, p in chain.named}
+
+    _, record = run('record')
+    chain, deep = run('deep', deep_readout=True)
+    a, b = seen['record'], seen['deep']
+    assert torch.allclose(a['emb'], b['emb'], atol=1e-6) and torch.allclose(a[0], b[0], atol=1e-6)
+    for k in range(2):
+        assert torch.allclose(a['lam', k], b['lam', k], rtol=1e-4, atol=1e-6), (k, a['lam', k], b['lam', k])
+    per_token = torch.nn.functional.cosine_similarity(a[1], b[1], dim=-1)
+    assert per_token.median() > 0.99 and per_token.quantile(0.1) > 0.98, per_token.quantile(torch.tensor([.1, .5]))
+    cos = lambda x, y: float(x.flatten() @ y.flatten() / (x.norm() * y.norm()))
+    assert all(cos(record[n], deep[n]) > 0.99 for n in record), {n: cos(record[n], deep[n]) for n in record}
+    assert chain.graphs == {(-1, 64), (1, 4)}, chain.graphs
+    for bad in (dict(rows=64), dict(rows=64, row_budget='ngram', budget_theta=1.0)):
+        try:
+            cut_options(dict(preset='2m', deep_readout=True, **bad))
+        except ValueError:
+            continue
+        raise AssertionError(f'accepted deep_readout with {bad}')
+
+
 def cut_budget(scratch):
     """E13's hook through the trainer: a ROW_BUDGETS strategy is built fresh by every reset (the run's never sees the
     warmup's random tokens), gives each Cut estimate's tokens their counts (once per GPU of the sequence) and sees

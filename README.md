@@ -95,6 +95,9 @@ has every arm.
   NextLat at 0.3 gives -0.005 on both seeds (10M: -0.001), steady but under the 0.02 bar.
 - **E10:** a binding clip (1x the median) costs +0.233 and agreement at 55% keeps 9.8% of the entries and costs
   +0.78: neither rule helps once it acts.
+- **The last 9% of E17:** keys and values live with Boost off lands on matched backprop to 0.0001 (three seeds),
+  so H8's machinery is exact and the rest of the gap that keys and values leave is Boost's first 20%, which costs
+  about 0.019 when the remainder is backprop (in the cut setting Boost is neutral).
 - **E11:** with the runway grid widened to 0.08-1.28 the rule acts (79-93% of tokens per site take the largest
   move) and costs +0.289 (three seeds, +0.26 to +0.30): weighting credit by runway hurts.
 - **E4:** a 16-row judge moves `adapt_nowd` from +0.355 to +0.337: the judge's noise is not what fails.
@@ -105,6 +108,12 @@ has every arm.
   at 20% and 0.9999 at 100% (float32: the same to 3 decimals; whole bf16 copies: 0.01-0.05, which is the rounding of
   that method, not of the chain). The 10th percentile at S7-S8 at 20% (0.65-0.71; float32 0.78-0.84) is the
   model's nonlinearity early on. By v2's rule this means implement, with the linear-consumer question open.
+  **Built** (`deep_readout` in the Cut chain, loud/cut.py): S1's full cycle runs through a copy of the record's chain
+  kernel that keeps each move's change at S2-S8, each token's 512 x 512 system is solved with v2's ridge, and the
+  cycles at S2-S8 are skipped; S0's cycle and every mixing scalar's 4 moves stay. On the CPU test model S0, S1 and
+  the scalars equal the record's and S2's solved credit matches its measured one per token (median cosine > 0.99).
+  The solved credit is least sure along the stream itself, so the scalars keep their moves (with v2's ridge the
+  residual scalar's credit came out 3x off). Queued: a GPU smoke, then the full 10M run against `e17.chain_record`.
 - **E8:** in H8, SNR scaling makes partial rows worse (it recovers -92% of their cost) and trails the plain rate
   control; E9, gated on E8, does not run.
 - **E19, the rate check:** PR #40's rates are about the best for both estimators: H8 cut at 0.5/0.7/1.4/2x costs

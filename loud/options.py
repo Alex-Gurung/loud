@@ -191,6 +191,7 @@ CUT = dict(
     budget_theta=0.0,           # E13 'ngram': the low tier is max(n-gram loss, model loss) <= theta nats
     key_blocks=[],              # E17: the blocks whose input-key probes run (empty: all, the record's)
     key_probes=True,            # E17: false runs no input-key probes (key_path_draws 0; c_k keeps its key errors)
+    deep_readout=False,         # E5: one S1 cycle reads S2..S8 by a per-token solve (loud/cut.py)
 )
 ROW_ASSIGNS, PRIORS = ('time', 'token'), ('none', 'identity')
 
@@ -487,6 +488,8 @@ def cut_options(args):
     if not isinstance(blocks, list) or not all(isinstance(b, int) and 0 <= b < PRESETS[o['preset']][0]
                                                for b in blocks) or len(set(blocks)) < len(blocks):
         raise ValueError('key_blocks: distinct block indices of this preset (empty: every block)')
+    if o['deep_readout'] and (o['rows'] is not None or o['row_budget'] is not None):
+        raise ValueError('deep_readout solves full cycles: not with rows or a row budget')
     if blocks and not o['key_probes']:
         raise ValueError('key_blocks chooses blocks for the key probes: not with key_probes false')
     return o
