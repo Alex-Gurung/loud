@@ -156,6 +156,10 @@ def h6_tools(scratch):
         assert summary[name]['cosine']['p10'] > 0.999 and summary[name]['variance_ratio'] < 1e-4, (name, summary[name])
     assert tensors['S1']['exact'].shape == (x.shape[1], s.model.n_embd)
     tools = Toolkit(m, model, x, y)
+    keys, _ = tools.key_paths()  # E17's: the cut removes none of its own error; all paths live would remove all of it
+    assert keys['cut']['all']['removed'] == 0 and keys['cut']['all']['cosine'] < 1
+    assert set(keys) == {'cut', 'keys_all', 'values_all'} | {f'keys_b{i}' for i in range(s.model.n_layer)}
+    assert all(-10 < keys[k]['all']['removed'] <= 1 for k in keys) and keys['keys_all']['all']['removed'] > 0
     deep, _ = tools.deep_readout_check(sigma=1e-3, chunk=8)
     assert tools.deep_readout_check(sigma=1e-3, chunk=8, precision='float32')[0]['settings']['precision'] == 'float32'
     delta, _ = tools.deep_readout_check(sigma=1e-3, chunk=8, precision='bf16_delta')

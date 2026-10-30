@@ -89,6 +89,11 @@ has every arm.
 - **E4:** a 16-row judge moves `adapt_nowd` from +0.355 to +0.337: the judge's noise is not what fails.
 - **E7:** the identity prior at m = 64 costs +0.149 and at m = 128 +0.086; it helps (E6's m = 128 costs +0.150)
   but not to 0.02.
+- **E5 (diagnostic): passes.** Read with the chain's way of differencing in bf16 (`readout_delta`, each change
+  carried as bf16 products), one probe cycle at S1 recovers every later site's credit at median cosine 0.997 or more
+  at 20% and 0.9999 at 100% (float32: the same to 3 decimals; whole bf16 copies: 0.01-0.05, which is the rounding of
+  that method, not of the chain). The 10th percentile at S7-S8 at 20% (0.65-0.71; float32 0.78-0.84) is the
+  model's nonlinearity early on. By v2's rule this means implement, with the linear-consumer question open.
 - **E8:** in H8, SNR scaling makes partial rows worse (it recovers -92% of their cost) and trails the plain rate
   control; E9, gated on E8, does not run.
 - **E19 (queued), the rate check:** H8 cut at 0.5-2x every rate and E6's K = 4 at 0.35-1.4x, to see whether any

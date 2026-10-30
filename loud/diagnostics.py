@@ -162,6 +162,39 @@ class Toolkit:
                         for g, ns in groups(list(reference), self.n_layer).items() if ns})
         return summary, {}
 
+    def key_paths(self):
+        """E17's diagnostic: the cut graph's weight gradient of the summed loss with one block's key path live (each
+        block alone, then all eight), against autograd's (the full graph's). Per group: the cosine to autograd, and
+        the share of the cut gradient's error it removes, 1 - |g - full|^2 / |cut - full|^2 (the cut's own row has
+        cosine and share 0 by definition of the latter)."""
+        model = copy.deepcopy(self.model).float().requires_grad_(True)
+        names, params = zip(*model.named_parameters())
+
+        def gradient(**kw):
+            with exact():
+                losses = h8.cut_forward(model, self.x, self.y, **kw)[0]
+                found = torch.autograd.grad(losses.sum(), params, allow_unused=True)
+            return {n: torch.zeros_like(p) if g is None else g for n, p, g in zip(names, params, found)}
+
+        full, cut = gradient(held=False), gradient(held=True)
+        flat = lambda d, ns: torch.cat([d[n].flatten().double() for n in ns])
+        parts = {g: ns for g, ns in groups(list(names), self.n_layer).items() if ns}
+        miss = {g: (flat(cut, ns) - flat(full, ns)).square().sum().item() for g, ns in parts.items()}
+
+        def score(d):
+            out = {}
+            for g, ns in parts.items():
+                err = (flat(d, ns) - flat(full, ns)).square().sum().item()
+                out[g] = dict(cosine=round(cosine(flat(d, ns), flat(full, ns)), 5),
+                              removed=round(1 - err / miss[g], 5) if miss[g] > 0 else None)
+            return out
+
+        summary = dict(cut=score(cut), keys_all=score(gradient(held=True, live=['keys'])))
+        for i in range(self.n_layer):
+            summary[f'keys_b{i}'] = score(gradient(held=True, live=['keys'], live_blocks=[i]))
+        summary['values_all'] = score(gradient(held=True, live=['values']))
+        return summary, {}
+
     def credit_dump(self):
         model, sites, credits, g_top = self.exact_credits()
         guess = h8.identity_guess(model, sites, g_top)

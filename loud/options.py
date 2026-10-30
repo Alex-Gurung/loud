@@ -205,8 +205,8 @@ DIAGNOSE = dict(
     precision='bf16',           # h8_validation, deep_readout_check: 'float32' runs without bf16; deep_readout_check
                                 # 'bf16_delta': changes carried in bf16 products, as the chain's kernels do
 )
-TOOLS = ('cos_to_autograd', 'credit_dump', 'deep_readout_check', 'linearity_check', 'h8_validation', 'ngram_tiers',
-         'snr_spectrum', 'synth_vs_real')
+TOOLS = ('cos_to_autograd', 'credit_dump', 'deep_readout_check', 'key_paths', 'linearity_check', 'h8_validation',
+         'ngram_tiers', 'snr_spectrum', 'synth_vs_real')
 # snr_spectrum's per-sequence gradients: autograd through the whole model, or H8 synthesis reading width / K rows
 # per token, assigned by time or by token (K = 1: the exact credits; E6's two assignments at E8's K = 4).
 ESTIMATORS = {'backprop': None, 'synthesis': (1, 'time'), 'time_k4': (4, 'time'), 'token_k4': (4, 'token')}

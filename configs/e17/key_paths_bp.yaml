@@ -1,0 +1,14 @@
+# E17's diagnostic (added) on matched backprop's trained model (e1.bp_b4_pr40.s0), one held-out sequence: the cut graph's weight gradient
+# with one block's key path live (each block alone, all eight, and the values) against autograd's, as the cosine and
+# the share of the cut gradient's error it removes. Training put the key path's credit in blocks 3, 5 and 7 (seed 0:
+# 59%, 62%, 48% of the gap each, the other blocks about 0%); this says whether one gradient shows the same split.
+experiment: e17
+variant: key_paths_bp
+task: diagnose
+seeds: [0]
+priority: 36
+gpu_memory_gb: 16  # ten float32 gradients of one 2048-token sequence on the 8 x 512 model
+after: [e1.bp_b4_pr40.s0]
+args:
+  tool: key_paths
+  checkpoint: e1.bp_b4_pr40.s0:final.pt

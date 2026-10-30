@@ -172,13 +172,28 @@ def seed_mean(runs_, seeds):
     return statistics.fmean(vals) if vals else None
 
 
-def verdict(e, by_key, by_arm=None):
+def verdict(e, by_key, by_arm=None, runs_root=RUNS):
     """(state, sentence) for an experiment from its arms' means (by_key: arm key -> arm row; by_arm: arm key -> its
     runs): 'waiting' until every arm has a counted run; 'null' when every arm's rule never acted."""
     by_arm = by_arm or {}
     if e['id'] == 'verify':
         return 'n/a', 'Checks: each passes or fails on its own (see the jobs).'
     # an experiment's own arms, and its follow-ups once they have run (E14's second stage)
+    if e['id'] == 'e5':  # v2's decision, on the chain's way of differencing in bf16 (readout_delta)
+        found = {}
+        for c in ('c20', 'c100'):
+            path = Path(runs_root) / 'e5' / f'readout_delta_{c}' / 's0' / 'deep_readout_check.json'
+            if path.exists():
+                sites = {k: v['cosine ridge 0.0']['median'] for k, v in read_json(path).items() if k.startswith('S')}
+                found[c] = sites
+        if len(found) < 2:
+            return 'waiting', 'Waiting for the bf16 delta readouts at 20% and 100%.'
+        low = {c: min(v.values()) for c, v in found.items()}
+        failing = {c: sorted(k for k, x in v.items() if x < 0.95) for c, v in found.items()}
+        if not any(failing.values()):
+            return 'met', (f'Every site at median cosine 0.95 or more (lowest {low["c20"]:.4f} at 20%, '
+                           f'{low["c100"]:.4f} at 100%): build it, under the linear-consumer question.')
+        return 'not met', f'Sites under 0.95: {failing}.'
     # (gates and diagnostics have no loss: they never hold a verdict back)
     own = [a for a in by_key.values() if a['experiment'] == e['id'] and a['task'] not in NO_LOSS]
     cells = {a['variant']: a for a in own if not a['followup'] or a['val_mean'] is not None}
@@ -349,7 +364,7 @@ def build(configs=REPO / 'configs', queue_root=QUEUE, runs_root=RUNS, out=OUT):
                 base = ref['val_mean'] if ref else None
                 a['reference'] = e.get('reference') or ''
                 a['delta'] = None if base is None or a['val_mean'] is None else a['val_mean'] - base
-        state, sentence = verdict(e, by_key, by_arm)
+        state, sentence = verdict(e, by_key, by_arm, runs_root)
         mine = [a for a in arms if a['experiment'] == e['id']]
         own = [j for j in jobs if j['experiment'] == e['id'] and not j['followup']
                and j['task'] not in ('diagnose', 'gate', 'compare')]
