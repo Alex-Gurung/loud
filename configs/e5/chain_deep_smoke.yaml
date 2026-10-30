@@ -6,7 +6,7 @@ variant: chain_deep_smoke
 task: cut
 seeds: [0]
 priority: 20
-gpu_memory_gb: 32  # the Cut chain (18 GB at its peak) and S1's changes at 7 sites with their solves
+gpu_memory_gb: 26  # the Cut chain (18 GB at its peak), S1's changes at 7 sites (2 GB) and a site's solve (1.5 GB); 26 fits beside two chain runs
 after: [verify.cut_prefix_match.s0]
 args:
   sequences: 10M
