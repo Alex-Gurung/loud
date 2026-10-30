@@ -7,7 +7,7 @@ variant: synth_b16
 task: h8
 seeds: [0, 1, 2]
 priority: 37
-gpu_memory_gb: 26  # batch 4 peaks near 10 GB, mostly activations, which scale with the batch; 26 fits beside two chain runs
+gpu_memory_gb: 44  # Boost's readouts at batch 16 overflow 26 GB; 44 fits beside one chain run
 after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
 args:
   sequences: 10M

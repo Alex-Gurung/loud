@@ -117,9 +117,9 @@ EXPERIMENTS = [
          success='Our reading: the best rate per estimator and the gap left there (cut to e1.bp_b4_pr40, K = 4 to '
                  'e1.h8_synth).',
          gate='H8 validation.'),
-    dict(id='e20', name='E20 the batch check (added)', priority='P1', reference='e20.synth_b16',
+    dict(id='e20', name='E20 the batch check (added)', priority='P1', reference='e20.synth_b8',
          question='Does E6\'s partial-row cost shrink with a larger batch (more tokens averaged per update)?',
-         setup='H8 synthesis at batch 16 (303 updates on 10M) with every row and with K = 4 by token; three seeds.',
+         setup='H8 synthesis at batch 8 and 16 (606 and 303 updates on 10M), every row and K = 4 by token; three seeds.',
          success='Our reading: K = 4\'s cost at batch 16 against +0.150 at batch 4 (E6\'s bar: 0.02).',
          gate='H8 validation.'),
     dict(id='e8', name='E8 SNR-scaled steps (follow-up)', priority='P1', reference=BP8,
@@ -225,6 +225,31 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
                                                if v != 'chain_record') + ' against chain_record.'
         left = len(mine) - len(done)
         return 'n/a', out + (f' ({left} arms still running or queued.)' if left else '')
+    if e['id'] == 'e19':
+        cells19 = {a['variant']: a for a in by_key.values() if a['experiment'] == 'e19' and a['val_mean'] is not None}
+        out = []
+        for prefix, one, target in (('cut_lr', CUT, BP4), ('token_k4_lr', 'e6.token_k4', SYNTH)):
+            arms = {v: a['val_mean'] for v, a in cells19.items() if v.startswith(prefix)}
+            if one in by_key and by_key[one]['val_mean'] is not None:
+                arms[prefix + '1'] = by_key[one]['val_mean']
+            if len(arms) < 2 or target not in by_key:
+                continue
+            v, best = min(arms.items(), key=lambda kv: kv[1])
+            rate = v[len(prefix):].replace('p', '.')
+            out.append(f'{prefix[:-3]}: best at {rate}x ({best - arms.get(prefix + "1", best):+.4f} '
+                       f'against 1x), {best - by_key[target]["val_mean"]:+.3f} from {target}')
+        return ('n/a', '; '.join(out) + '.') if out else ('waiting', 'Waiting for the first rates.')
+    if e['id'] == 'e20':  # read each batch as its two arms land
+        found = []
+        for batch in (8, 16):
+            a, b = by_key.get(f'e20.token_k4_b{batch}', {}), by_key.get(f'e20.synth_b{batch}', {})
+            if a.get('val_mean') is not None and b.get('val_mean') is not None:
+                found.append((batch, a['val_mean'] - b['val_mean'], b['val_mean'] - by_key[SYNTH]['val_mean']))
+        if not found:
+            return 'waiting', 'Waiting for a batch\'s two arms.'
+        text = '; '.join(f'at batch {n} K = 4 costs {c:+.4f} (every row there: {d:+.4f} from batch 4)'
+                         for n, c, d in found)
+        return ('met' if min(c for _, c, _ in found) <= 0.02 else 'not met'), f'Batch 4: K = 4 costs +0.150; {text}.'
     # (gates and diagnostics have no loss: they never hold a verdict back)
     own = [a for a in by_key.values() if a['experiment'] == e['id'] and a['task'] not in NO_LOSS]
     cells = {a['variant']: a for a in own if not a['followup'] or a['val_mean'] is not None}

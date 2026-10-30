@@ -1,0 +1,15 @@
+# E20 (added): does E6's partial-row cost shrink with a larger batch? At PR #40's batch of 4, K = 4 by token costs
+# +0.150 against every row (e1.h8_synth), and no rate recovers it (E19). A batch of 8 averages 2x the tokens per
+# update, so the rows' noise in the update falls 2x in variance while the data stays the 10M set (606 updates). This
+# arm: H8 synthesis with every row at batch 8, the reference for token_k4_b8.
+experiment: e20
+variant: synth_b8
+task: h8
+seeds: [0, 1, 2]
+priority: 37
+gpu_memory_gb: 26  # batch 8: about twice batch 4's 10 GB
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 8
