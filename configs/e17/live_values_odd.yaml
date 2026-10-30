@@ -1,0 +1,15 @@
+# E17 (added): values live in the value-embedding blocks (1, 3, 5, 7) only. Values live in every block recover 25% of the cut's gap to backprop and keys and values 91%;
+# the keys' share sits in blocks 3, 5 and 7 (67-69% there against 71% everywhere), while the key_paths diagnostic
+# spreads the values' across blocks (block 5 most). This asks whether the values' share is also in a few blocks.
+experiment: e17
+variant: live_values_odd
+task: h8
+seeds: [0, 1, 2]
+priority: 37
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  mode: cut
+  live_paths: [values]
+  live_blocks: [1, 3, 5, 7]
