@@ -186,13 +186,14 @@ class Toolkit:
         names = site_names(self.n_layer)[2:]
         cos = {n: {r: [] for r in (0.0, ridge)} for n in names}
         condition = {n: [] for n in names}
-        # bf16 as the chain runs its products; float32 to separate the method from the replay's rounding: the replay
-        # differences whole bf16 losses, which a 1% probe's change sinks under (linearity_check), where the chain's
-        # kernels difference the changes themselves
+        # 'bf16': whole moved copies under bf16 autocast, whose rounding of full-size activations and logits swamps a
+        # 1% probe's change (linearity_check); 'bf16_delta': the chain's way (DeltaReplay), each change's products in
+        # bf16 and every nonlinear step in float32 around the clean values; 'float32': the method without rounding
         bf16 = lambda: (torch.autocast('cuda', dtype=torch.bfloat16) if sites[1].is_cuda and precision == 'bf16' else
-                        exact() if precision == 'float32' else nullcontext())
+                        exact() if precision in ('float32', 'bf16_delta') else nullcontext())
         with bf16():
-            replay = h8.Replay(model, self.x, self.y, chunk=chunk)
+            replay = (h8.DeltaReplay(model, self.x, self.y, chunk=chunk) if precision == 'bf16_delta' else
+                      h8.Replay(model, self.x, self.y, chunk=chunk))
             base = replay(1, torch.zeros_like(sites[1]).unsqueeze(2))[..., 0]
         eye = torch.eye(width, device=basis.device)
         for t0 in range(0, tokens, chunk):

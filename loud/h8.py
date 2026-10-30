@@ -297,6 +297,108 @@ class Replay:
         return (losses, at) if sites else losses
 
 
+class DeltaReplay(Replay):
+    """Replay as the chain's kernels compute it: each probe's change carried through the network, every product of a
+    change taken in `dtype` (bf16 as the chain runs them) and every nonlinear step (the RMS norms, the own query's
+    rotary and norm, the softmax, ReLU^2, the soft cap and the loss) evaluated in float32 around the clean float32
+    values. Replay instead reruns whole moved copies, whose bf16 rounding of full-size activations and logits swamps a
+    1% probe's change (H6 linearity_check's bf16 rows). With dtype float32 the two agree to rounding. Same interface:
+    losses [B, C, D] (and each later mid stream's change), keys and values held, each token's own query live."""
+
+    def __init__(self, model, idx, targets, chunk=128, dtype=torch.bfloat16):
+        super().__init__(model, idx, targets, chunk)
+        self.dtype = dtype
+
+    def lin(self, layer, d):
+        """A linear map applied to a change, in the products' dtype, returned in float32."""
+        return F.linear(d.to(self.dtype), layer.weight.to(self.dtype)).float()
+
+    def query(self, attn, h, pos):
+        """The own query (rotary and norm) of normed inputs h [B, C, D, W] at positions pos, in float32."""
+        m = um()
+        B, C, D, _ = h.shape
+        q = F.linear(h, attn.c_q.weight.float()).view(B, C, D, attn.n_head, attn.head_dim)
+        return self.rotate(m, attn, q, pos)
+
+    def rotate(self, m, attn, q, pos):
+        cos, sin = self.cos[:, pos].unsqueeze(2).float(), self.sin[:, pos].unsqueeze(2).float()
+        half = attn.head_dim // 2
+        q1, q2 = q[..., :half], q[..., half:]
+        return m.norm(torch.cat([q1 * cos + q2 * sin, q1 * -sin + q2 * cos], -1))
+
+    def held_attention_change(self, i, xin, dxin, t0):
+        """Block i's attention output change for clean block inputs xin and their changes dxin [B, C, D, W]."""
+        m, attn = um(), self.model.transformer.h[i].attn
+        B, C, D, _ = xin.shape
+        pos = torch.arange(t0, t0 + C, device=xin.device)
+        h, dh = m.norm(xin), m.norm(xin + dxin) - m.norm(xin)
+        q = self.query(attn, h, pos)
+        dq_pre = self.lin(attn.c_q, dh).view(B, C, D, attn.n_head, attn.head_dim)
+        q_pre = F.linear(h, attn.c_q.weight.float()).view(B, C, D, attn.n_head, attn.head_dim)
+        dq = self.rotate(m, attn, q_pre + dq_pre, pos) - q
+        k, v = self.keys[i].float(), self.values[i].float()
+        T = k.shape[2]
+        scores = torch.einsum('bcdhk,bhsk->bhcds', q, k) / attn.head_dim ** 0.5
+        dscores = torch.einsum('bcdhk,bhsk->bhcds', dq.to(self.dtype), k.to(self.dtype)).float() / attn.head_dim ** 0.5
+        s = torch.arange(T, device=xin.device)
+        allowed = (s[None, :] <= pos[:, None]) & (pos[:, None] - s[None, :] <= self.model.window_sizes[i][0])
+        mask = ~allowed[None, None, :, None, :]
+        p = scores.masked_fill(mask, float('-inf')).softmax(-1)
+        dp = (scores + dscores).masked_fill(mask, float('-inf')).softmax(-1) - p
+        dout = torch.einsum('bhcds,bhsk->bcdhk', dp.to(self.dtype), v.to(self.dtype)).float()
+        return self.lin(attn.c_proj, dout.reshape(B, C, D, -1))
+
+    def mlp_change(self, block, mid, dmid):
+        m = um()
+        u = F.linear(m.norm(mid), block.mlp.c_fc.weight.float())
+        du = self.lin(block.mlp.c_fc, m.norm(mid + dmid) - m.norm(mid))
+        return self.lin(block.mlp.c_proj, F.relu(u + du).square() - F.relu(u).square())
+
+    @torch.no_grad()
+    def __call__(self, site, delta, sites=False, start=0):
+        m, model = um(), self.model
+        L, vocab = model.config.n_layer, model.config.vocab_size
+        B, C, D, W = delta.shape
+        losses = torch.empty(B, C, D, device=delta.device)
+        at = {k: torch.empty_like(delta, dtype=torch.float32) for k in range(site + 1, L + 1)} if sites else None
+        head = model.lm_head.weight
+        for c0 in range(0, C, self.chunk):
+            dl = delta[:, c0:c0 + self.chunk].float()
+            n = dl.shape[1]
+            local, sl = slice(c0, c0 + n), slice(start + c0, start + c0 + n)
+            expand = lambda t: t[:, sl, None].float().expand(-1, -1, D, -1)
+            x0 = expand(self.x0)
+            if site == 0:
+                e = expand(self.sites[0])
+                dx0 = m.norm(e + dl) - m.norm(e)
+                x, dx, first = x0, dx0, 0
+            else:
+                mid = expand(self.sites[site])
+                block = model.transformer.h[site - 1]
+                dx0 = torch.zeros_like(dl)
+                x = mid + F.linear(F.relu(F.linear(m.norm(mid), block.mlp.c_fc.weight.float())).square(),
+                                   block.mlp.c_proj.weight.float())
+                dx, first = dl + self.mlp_change(block, mid, dl), site
+            for i in range(first, L):
+                block = model.transformer.h[i]
+                lam_r, lam_0 = model.resid_lambdas[i].float(), model.x0_lambdas[i].float()
+                xin, dxin = lam_r * x + lam_0 * x0, lam_r * dx + lam_0 * dx0
+                mid = expand(self.sites[i + 1])
+                dmid = dxin + self.held_attention_change(i, xin, dxin, sl.start)
+                if sites:
+                    at[i + 1][:, local] = dmid
+                x = mid + F.linear(F.relu(F.linear(m.norm(mid), block.mlp.c_fc.weight.float())).square(),
+                                   block.mlp.c_proj.weight.float())
+                dx = dmid + self.mlp_change(block, mid, dmid)
+            z = F.linear(m.norm(x), head.float())[..., :vocab]
+            dz = F.linear((m.norm(x + dx) - m.norm(x)).to(self.dtype), head.to(self.dtype)).float()[..., :vocab]
+            capped = SOFTCAP * torch.tanh((z + dz) / SOFTCAP)
+            y = self.targets[:, sl, None].expand(-1, -1, D)
+            losses[:, local] = F.cross_entropy(capped.flatten(0, 2), y.flatten(), ignore_index=-1,
+                                               reduction='none').view(B, n, D)
+        return (losses, at) if sites else losses
+
+
 class frozen:
     """A module's parameters as constants for the duration (their gradient comes from elsewhere)."""
 

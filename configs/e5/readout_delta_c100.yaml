@@ -1,0 +1,16 @@
+# E5's diagnostic as the chain computes it, on e1.h8_synth.s0's 100% checkpoint: each probe's change carried through
+# the network in bf16 products, every nonlinear step in float32 around the clean values (h8.DeltaReplay). On CPU this
+# differs from float32 by 0.4-0.5%, against 42-68% for the bf16 replay of whole copies (readout_c100); float32
+# (readout_fp32_c100) gave 0.998-1.000 at every site. This settles the plan's bf16 test: all sites at 0.95 or above,
+# build (after the maintainers' rules answer); failures only at the top two or three, a hybrid; most failing, drop.
+experiment: e5
+variant: readout_delta_c100
+task: diagnose
+seeds: [0]
+priority: 20  # the one open diagnostic: first
+gpu_memory_gb: 32  # a 512-probe cycle per token chunk through reforward
+after: [e1.h8_synth.s0]
+args:
+  tool: deep_readout_check
+  checkpoint: e1.h8_synth.s0:ckpt_100.pt
+  precision: bf16_delta

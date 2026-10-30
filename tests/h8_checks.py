@@ -158,6 +158,15 @@ def h6_tools(scratch):
     tools = Toolkit(m, model, x, y)
     deep, _ = tools.deep_readout_check(sigma=1e-3, chunk=8)
     assert tools.deep_readout_check(sigma=1e-3, chunk=8, precision='float32')[0]['settings']['precision'] == 'float32'
+    delta, _ = tools.deep_readout_check(sigma=1e-3, chunk=8, precision='bf16_delta')
+    for name in names[2:]:  # the chain's way of differencing keeps the readout (bf16 products of the changes)
+        assert delta[name]['cosine ridge 0.0']['median'] > 0.9, (name, delta[name])
+    from loud import h8
+    replay, exact32 = h8.Replay(model, x, y), h8.DeltaReplay(model, x, y, dtype=torch.float32)
+    move = 1e-2 * torch.randn(1, x.shape[1], 2, s.model.n_embd, generator=torch.Generator().manual_seed(5))
+    a = replay(1, move) - replay(1, torch.zeros_like(move))
+    b = exact32(1, move) - exact32(1, torch.zeros_like(move))
+    assert (a - b).norm() < 1e-3 * a.norm(), 'DeltaReplay in float32 is not Replay'
     for name in names[2:]:
         assert deep[name]['cosine ridge 0.0']['median'] > 0.95, (name, deep[name])
         assert deep[name]['condition']['median'] >= 1

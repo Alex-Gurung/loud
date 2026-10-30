@@ -197,7 +197,8 @@ DIAGNOSE = dict(
     batch=8,                    # snr_spectrum: the update batch the SNR is stated at (and the checkpoint run's)
     estimators=['backprop', 'synthesis', 'time_k4', 'token_k4'],  # snr_spectrum: per-sequence gradients (ESTIMATORS)
     estimator='identity',       # cos_to_autograd: 'identity' (PR #26), 'h8' (H8 synthesis) or 'cut' (PR #40's Cut)
-    precision='bf16',           # h8_validation, deep_readout_check: 'float32' runs without bf16
+    precision='bf16',           # h8_validation, deep_readout_check: 'float32' runs without bf16; deep_readout_check
+                                # 'bf16_delta': changes carried in bf16 products, as the chain's kernels do
 )
 TOOLS = ('cos_to_autograd', 'credit_dump', 'deep_readout_check', 'linearity_check', 'h8_validation', 'ngram_tiers',
          'snr_spectrum', 'synth_vs_real')
@@ -514,9 +515,11 @@ def diagnose_options(args):
     if o['estimator'] not in ('identity', 'h8', 'cut') or (
             o['estimator'] != 'identity' and o['tool'] != 'cos_to_autograd'):
         raise ValueError("estimator ('identity', 'h8' or 'cut') applies to cos_to_autograd only")
-    if o['precision'] not in ('bf16', 'float32') or (
-            o['precision'] != 'bf16' and o['tool'] not in ('h8_validation', 'deep_readout_check')):
-        raise ValueError("precision ('bf16' or 'float32') applies to h8_validation and deep_readout_check only")
+    if o['precision'] not in ('bf16', 'float32', 'bf16_delta') or (
+            o['precision'] != 'bf16' and o['tool'] not in ('h8_validation', 'deep_readout_check')) or (
+            o['precision'] == 'bf16_delta' and o['tool'] != 'deep_readout_check'):
+        raise ValueError("precision: 'bf16' or 'float32' (h8_validation, deep_readout_check), or 'bf16_delta' "
+                         "(deep_readout_check: the chain's way of differencing)")
     positive(o, 'sequences', 'batch')
     names = o['estimators']
     if not names or set(names) - set(ESTIMATORS) or len(set(names)) < len(names):
