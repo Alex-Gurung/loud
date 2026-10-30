@@ -74,6 +74,26 @@ verifications and E1 keep theirs exact), the track-3 model's is about 1.2 GB, an
 diagnostic reads them (`e1.bp_b8.s0` with ANVIL II's state, `e1.h8_synth.s0`), in bf16. Workers pause when the
 shared volume has 15 GB left.
 
+**Follow-ups (2026-10-30, three pods, autonomous loop).** Each answers a question the first queue left open; the board
+has every arm.
+- **E17, where H8's cut loses credit:** of the 0.160 gap from `e1.h8_cut` to matched backprop, keys live in every
+  block recover 71%, values 25%, both 91% (three seeds, per-seed spread 3 points). Keys live only in blocks 0-3
+  recover 62%, only in 4-7 67%: the halves overlap, so the key path's credit does not need every block. Queued:
+  each block alone (`live_keys_b0`..`b7`) and the key input read through 32-256 random Hadamard rows per block
+  (`key_draws`, as the record's input-key probes draw them; the record pays 512 at every block).
+- **E18, 30M:** H8 cut's gap to matched backprop shrinks from 0.160 to 0.123 (two seeds, 0.126 and 0.120); E6's
+  partial-row cost holds or grows (K = 4 by token +0.158, by time +0.188, against +0.150 and +0.184 at 10M);
+  NextLat at 0.3 gives -0.005 on both seeds (10M: -0.001), steady but under the 0.02 bar.
+- **E10:** a binding clip (1x the median) costs +0.233 and agreement at 55% keeps 9.8% of the entries and costs
+  +0.78: neither rule helps once it acts.
+- **E4:** a 16-row judge moves `adapt_nowd` from +0.355 to +0.337: the judge's noise is not what fails.
+- **E7:** the identity prior at m = 64 costs +0.149 and at m = 128 +0.086; it helps (E6's m = 128 costs +0.150)
+  but not to 0.02.
+- **E8:** in H8, SNR scaling makes partial rows worse (it recovers -92% of their cost) and trails the plain rate
+  control; E9, gated on E8, does not run.
+- **E19 (queued), the rate check:** H8 cut at 0.5-2x every rate and E6's K = 4 at 0.35-1.4x, to see whether any
+  of these gaps is PR #40's rate, tuned for the record's estimator, rather than the estimator.
+
 ## Running on GPUs
 
 Workers are Kubernetes Jobs, launched from the root node as in stylo. A worker pod pulls jobs from
