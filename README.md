@@ -307,7 +307,7 @@ gives a first read of every arm early. The bands, in order (`priority:` in each 
   (`checkpoint: <job>:<file>`); scores, logs and diagnostic tensors stay. Every deletion is listed in
   `artifacts/deleted_weights.txt`. On 2026-10-30, with the shared volume at 5 GB free, the first deletions were the
   smoke runs', E16's and the finished arms' finals; since then the autonomous loop runs the prune every few minutes,
-  and E1's seeds 1-2 (scored, read by nothing) went when the volume fell to 15 GB. This project holds about 3.6 GB.
+  and E1's seeds 1-2 (scored, read by nothing) went when the volume fell to 15 GB. This project holds about 3.4 GB.
 
 ### When a job fails or is blocked
 

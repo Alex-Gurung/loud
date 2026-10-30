@@ -6,7 +6,7 @@ work reads. Every deletion is appended to artifacts/deleted_weights.txt; scores,
 
 Kept: E1's seed-0 runs (the baselines' weights and H4 checkpoints the diagnostics read; E1's other seeds are scored
 and their weights go), the verifications that score their weights (verify.bp_b8*, verify.identity), and any file a
-config reads (`checkpoint: <job>:<file>` in any config, with the .optim.pt beside it). A run is pruned only when its result.json says complete (or it failed its check), so a
+config reads (`checkpoint: <job>:<file>` in any config, with the .optim.pt beside it). A run is pruned only when its result.json says complete, failed its check or finished early on purpose (stop_after), so a
 running or crashed attempt is never touched; attempt and superseded directories are pruned the same way.
 """
 import argparse
@@ -43,7 +43,9 @@ def candidates(runs=RUNS):
         if not result.exists():
             continue  # running, crashed or never finished: leave it alone
         info = read_json(result)
-        if not (info.get('complete') or (info.get('check') or {}).get('status') == 'fail'):
+        # finished: complete, failed its check, or stopped early on purpose (stop_after: a smoke or a timing run),
+        # which writes its result with complete false
+        if not (info.get('complete') or info.get('finished_at') or (info.get('check') or {}).get('status') == 'fail'):
             continue
         seed = run.name.split('.')[0]
         for f in sorted(run.glob('*.pt')):

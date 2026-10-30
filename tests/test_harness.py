@@ -447,10 +447,12 @@ def test_prune_keeps_what_is_read(tmp_path):
     run('verify/bp_b8/s0', ['final.pt'])
     run('e7/arm/s1', ['final.pt', 'ckpt_20.pt', 'ckpt_20.optim.pt', 'ckpt_50.pt', 'snr_spectrum.pt'])
     run('e7/arm/s2', ['final.pt'], complete=None)  # still running
+    early = run('e7/smoke/s0', ['final.pt'], complete=False)  # stopped early on purpose
+    (early / 'result.json').write_text(json.dumps({'complete': False, 'finished_at': 'then'}))
     original = prune.checkpoints_read
     prune.checkpoints_read = lambda: original(configs)
     try:
         gone = sorted(str(f.relative_to(runs)) for f in prune.candidates(runs))
     finally:
         prune.checkpoints_read = original
-    assert gone == ['e1/h8_cut/s1/final.pt', 'e7/arm/s1/ckpt_50.pt', 'e7/arm/s1/final.pt'], gone
+    assert gone == ['e1/h8_cut/s1/final.pt', 'e7/arm/s1/ckpt_50.pt', 'e7/arm/s1/final.pt', 'e7/smoke/s0/final.pt'], gone
