@@ -151,7 +151,8 @@ def activity(arm, runs_):
         shares = [s[-1] for m in logs if 'runway' in m for s in m['runway'].values()]
         if shares:
             top = statistics.fmean(shares)
-            return top < 0.99, f'{top:.2%} of tokens pick the grid\'s largest move, so the weights are almost all 1'
+            tail = ', so the weights are almost all 1' if top >= 0.99 else ''
+            return top < 0.99, f'{top:.2%} of tokens pick the grid\'s largest move{tail}'
     if arm.startswith('e10.clip'):
         cos = [m['cosine_to_identity'] for m in logs if 'cosine_to_identity' in m]
         if cos:

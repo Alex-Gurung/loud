@@ -77,15 +77,23 @@ shared volume has 15 GB left.
 **Follow-ups (2026-10-30, three pods, autonomous loop).** Each answers a question the first queue left open; the board
 has every arm.
 - **E17, where H8's cut loses credit:** of the 0.160 gap from `e1.h8_cut` to matched backprop, keys live in every
-  block recover 71%, values 25%, both 91% (three seeds, per-seed spread 3 points). Keys live only in blocks 0-3
-  recover 62%, only in 4-7 67%: the halves overlap, so the key path's credit does not need every block. Queued:
-  each block alone (`live_keys_b0`..`b7`) and the key input read through 32-256 random Hadamard rows per block
-  (`key_draws`, as the record's input-key probes draw them; the record pays 512 at every block).
+  block recover 71%, values 25%, both 91% (three seeds, per-seed spread 3 points). The key path's share sits in
+  three blocks: keys live only in block 3 recover 59-63%, block 5 62%, block 7 48%, the other five 0-2%, and blocks
+  3, 5 and 7 together 67-69% (three seeds). The `key_paths` diagnostic shows the same split in one gradient: on the
+  cut model's final weights block 5's key path removes 54% of the cut gradient's error, block 3 23%, block 7 10%,
+  the rest under 1%; at the 20% handoff it is blocks 1, 3 and 5 (15% each) and 7 (4%): the blocks with value
+  embeddings, whose values carry the token itself, so their keys need context that earlier blocks must learn to
+  write. Read through fewer rows (as the record's input-key probes: 512 per token at every block), shared rows
+  recover 0/28/49/62% at m = 32/64/128/256 and token-assigned rows 10/38/55% at 32/64/128. At 30M keys recover 71%
+  of that gap too (seed 0). Queued on the real chain: PR #40 unchanged at full length, and with its key probes at
+  blocks 3, 5, 7 or at block 5 only (`key_blocks`), for the loss and the time saved.
 - **E18, 30M:** H8 cut's gap to matched backprop shrinks from 0.160 to 0.123 (two seeds, 0.126 and 0.120); E6's
   partial-row cost holds or grows (K = 4 by token +0.158, by time +0.188, against +0.150 and +0.184 at 10M);
   NextLat at 0.3 gives -0.005 on both seeds (10M: -0.001), steady but under the 0.02 bar.
 - **E10:** a binding clip (1x the median) costs +0.233 and agreement at 55% keeps 9.8% of the entries and costs
   +0.78: neither rule helps once it acts.
+- **E11:** with the runway grid widened to 0.08-1.28 the rule acts (79-93% of tokens per site take the largest
+  move) and costs +0.289 (three seeds, +0.26 to +0.30): weighting credit by runway hurts.
 - **E4:** a 16-row judge moves `adapt_nowd` from +0.355 to +0.337: the judge's noise is not what fails.
 - **E7:** the identity prior at m = 64 costs +0.149 and at m = 128 +0.086; it helps (E6's m = 128 costs +0.150)
   but not to 0.02.
