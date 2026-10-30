@@ -100,6 +100,17 @@ EXPERIMENTS = [
          setup='Both models under backprop and under H8 cut mode, PR #40\'s recipe at batch 4, two seeds.',
          success='H8 reproduces backprop\'s order (leaderboard on 30M: 3.211 against 3.338).',
          gate='The track-3 smoke run and H8 validation.'),
+    dict(id='e17', name='E17 where the cut loses credit (added)', priority='P1', reference=CUT,
+         question='Which cross-token path carries the credit H8 loses to backprop: other tokens\' keys or values?',
+         setup='H8 cut mode with the values, the keys or both left live (both: the full graph), PR #40\'s recipe.',
+         success='Our reading: the share of the e1.h8_cut -> e1.bp_b4_pr40 gap (0.16) each path recovers.',
+         gate='H8 validation.'),
+    dict(id='e18', name='E18 the 30M length check (added)', priority='P1', reference='e18.h8_synth',
+         question='Do the 10M answers hold with 3x the data (the 30M set)?',
+         setup='H8 synthesis with all rows and K = 4 by token and time; H8 cut with and without NextLat (0.3); '
+               'matched backprop; two seeds.',
+         success='Our reading: the 10M gaps (E6 +0.15/+0.19, E14 0.00, H8 to backprop +0.16) grow, hold or shrink.',
+         gate='H8 validation.'),
     dict(id='e8', name='E8 SNR-scaled steps (follow-up)', priority='P1', reference=BP8,
          question='Does an orthogonalizing optimizer amplify estimator noise, and does SNR scaling fix it?',
          setup='Control, SNR and rate arms in backprop and in H8 synthesis at K = 4; built if the diagnostic says.',
@@ -210,10 +221,23 @@ def verdict(e, by_key, by_arm=None):
         closed = (base - best['val_mean']) / (base - low) if base != low else 0.0
         ok = best['val_mean'] <= base - 0.02 or (e['id'] == 'e14' and closed >= 0.5)
         return ('met' if ok else 'not met'), \
-            f'Best arm {best["variant"]} at {best["val_mean"] - base:+.4f}, closing {closed:.0%} of the gap to backprop.'
+            f'Best arm {best["variant"]} at {best["val_mean"] - base:+.4f}, ' \
+            f'closing {closed:.0%} of the gap to backprop.'
+    if e['id'] == 'e17':
+        low, high = by_key.get(BP4, {}).get('val_mean'), by_key.get(CUT, {}).get('val_mean')
+        if low is None or high is None:
+            return 'waiting', f'Waiting for {CUT} and {BP4}.'
+        shares = ', '.join(f'{v} {(high - a["val_mean"]) / (high - low):.0%}' for v, a in sorted(cells.items()))
+        return 'n/a', f'Share of the {high - low:.3f} gap recovered: {shares}.'
+    if e['id'] == 'e18':
+        g = lambda v: cells[v]['val_mean'] if v in cells else None
+        pairs = [('token_k4', 'h8_synth'), ('time_k4', 'h8_synth'), ('nextlat_0p3', 'h8_cut'), ('h8_cut', 'bp_b4_pr40')]
+        found = [f'{a} - {b} {g(a) - g(b):+.3f}' for a, b in pairs if g(a) is not None and g(b) is not None]
+        return 'n/a', 'At 30M: ' + '; '.join(found) + ' (10M: +0.150, +0.184, -0.001, +0.160).'
     if e['id'] == 'e16':  # the fixed model's cells on the track-3 arms' seeds (0-1)
         seeds = {0, 1}
         four = [seed_mean(by_arm.get(k, []), seeds) for k in (BP4, 'e16.bp_track3', CUT, 'e16.h8_track3')]
+        cells = {k: v for k, v in cells.items() if not k.endswith('_plain')}  # the closer pair reads held-out loss
         if any(v is None for v in four):
             return 'waiting', 'Waiting for the four arms.'
         bp, h8 = four[0] - four[1], four[2] - four[3]
@@ -329,7 +353,8 @@ def build(configs=REPO / 'configs', queue_root=QUEUE, runs_root=RUNS, out=OUT):
         xs = sorted(set.intersection(*(set(s) for s in series)))
         stride = max(1, len(xs) // 40)
         exp, variant = key.split('.', 1)
-        curves += [dict(arm=key, experiment=exp, variant=variant, seqs=x, heldout=statistics.fmean(s[x] for s in series),
+        curves += [dict(arm=key, experiment=exp, variant=variant, seqs=x,
+                        heldout=statistics.fmean(s[x] for s in series),
                         seeds=len(series)) for x in xs[::stride] + ([xs[-1]] if xs[::stride][-1:] != xs[-1:] else [])]
 
     out.mkdir(parents=True, exist_ok=True)
