@@ -632,6 +632,12 @@ def h8_knobs(scratch):
     assert torch.allclose(grad(held=True, live=['keys', 'values']), full, atol=1e-6)
     assert not torch.allclose(grad(held=True), full, atol=1e-6)
     assert (grad(held=True, live=['values']) - full).norm() < (grad(held=True) - full).norm()
+    wte = model.transformer.wte.weight  # live_blocks: a key path opens upstream credit, block by block
+    gw = lambda **kw: torch.autograd.grad(h8.cut_forward(model, x, y, **kw)[0].sum(), wte)[0]
+    every, held = gw(held=True, live=['keys']), gw(held=True)
+    assert torch.allclose(gw(held=True, live=['keys'], live_blocks=[0, 1]), every, atol=1e-6)
+    assert not torch.allclose(gw(held=True, live=['keys'], live_blocks=[0]), held)
+    assert not torch.allclose(gw(held=True, live=['keys'], live_blocks=[0]), every)
     o = h8_options(dict(preset='2m', clip_credit=True, clip_factor=1.0))
     h8.H8(o, torch.device('cpu'), 0, 10, torch.zeros(0, CUT_SEQ, dtype=torch.long))
     assert h8.CLIP == 1.0 and h8.RUNWAY == h8.RUNWAY_V2

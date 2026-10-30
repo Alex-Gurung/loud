@@ -111,7 +111,7 @@ def attention(attn, x, ve, cos_sin, window, held, freeze_queries=False, live=())
     return attn.c_proj(m.attention(q, k, v, window[0]).contiguous().view(B, T, -1))
 
 
-def cut_forward(model, idx, targets, held=True, freeze_queries=False, live=()):
+def cut_forward(model, idx, targets, held=True, freeze_queries=False, live=(), live_blocks=None):
     """GPT.forward on the cut graph (held=False: the model's own forward). Returns the token losses [B, T] (None
     without targets), the nine sites, the top stream and each block's attention and MLP outputs (what synthesis mode
     differentiates)."""
@@ -124,7 +124,8 @@ def cut_forward(model, idx, targets, held=True, freeze_queries=False, live=()):
     for i, block in enumerate(model.transformer.h):
         x = model.resid_lambdas[i] * x + model.x0_lambdas[i] * x0
         ve = arch.value_embedding(model, idx, i, ngram)
-        a = attention(block.attn, m.norm(x), ve, cos_sin, model.window_sizes[i], held, freeze_queries, live)
+        open_ = live if live_blocks is None or i in live_blocks else ()  # E17: the live paths of chosen blocks only
+        a = attention(block.attn, m.norm(x), ve, cos_sin, model.window_sizes[i], held, freeze_queries, open_)
         x = x + a
         sites.append(x)
         attn_out.append(a)
@@ -810,7 +811,8 @@ class H8:
                 loss, losses = boost_loss(self.model, x, y, side, keep)
                 top, embedding = keep['top'], keep['embedding']
             elif o['mode'] == 'cut':
-                losses, sites, top, _, _ = cut_forward(self.model, x, y, True, o['freeze_queries'], o['live_paths'])
+                losses, sites, top, _, _ = cut_forward(self.model, x, y, True, o['freeze_queries'], o['live_paths'],
+                                                       o['live_blocks'] or None)
                 loss, embedding = losses.sum() / (y != -1).sum(), sites[0]
             else:
                 each = {} if self.shaper is not None else None

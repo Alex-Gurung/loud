@@ -1,0 +1,15 @@
+# E17 (added): keys live in blocks [0, 1, 2, 3] only. Seed 0 of e17.live_keys recovered 69% of the cut's gap to backprop
+# with every block's keys live (values 24%, both 89%); the diagnostics put the cut's loss at the low sites late in
+# training (S1 cosine 0.65 at 100%), so this pair asks which blocks' key paths carry it.
+experiment: e17
+variant: live_keys_low
+task: h8
+seeds: [0, 1, 2]
+priority: 42
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  mode: cut
+  live_paths: [keys]
+  live_blocks: [0, 1, 2, 3]

@@ -163,6 +163,7 @@ H8 = dict(
     agree_share=0.7,            # E10 (b)'s share of tokens that must back an entry's sign (v2: 0.7)
     runway_grid=[],             # E11's moves (in the token's RMS per coordinate); empty: v2's 0.01, 0.02, 0.04, 0.08
     live_paths=[],              # cut mode: cross-token paths left live, 'keys' and/or 'values' (both: the full graph)
+    live_blocks=[],             # with live_paths: only these blocks' paths (empty: every block)
     snr_scaling='none',         # E8's H8 setting: 'control', 'snr' or 'rate' in place of ANVIL II's polar factor in the
                                 # Cut phase, from each sequence's synthesized gradients (loud/snr.py)
 )
@@ -384,6 +385,10 @@ def h8_options(args):
     if not isinstance(o['live_paths'], list) or set(o['live_paths']) - {'keys', 'values'} or (
             o['live_paths'] and o['mode'] != 'cut'):
         raise ValueError("live_paths: a list of 'keys' and 'values', in cut mode")
+    blocks = o['live_blocks']
+    if not isinstance(blocks, list) or not all(isinstance(b, int) and 0 <= b < PRESETS[o['preset']][0] for b in blocks) \
+            or (blocks and not o['live_paths']):
+        raise ValueError('live_blocks: block indices of this preset, with live_paths')
     if not (o['clip_factor'] > 0 and 0 <= o['agree_share'] <= 1):
         raise ValueError('clip_factor must be > 0 and agree_share in [0, 1]')
     grid = o['runway_grid']
