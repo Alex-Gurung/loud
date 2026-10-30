@@ -1,0 +1,14 @@
+# E19 (added): is part of H8's gap to backprop the rate? PR #40's rates were tuned for the record's estimator (its
+# cross-token patches on); H8's cut graph drops that credit, which may move its best rate. H8 cut mode (e1.h8_cut,
+# 3.799 over three seeds; matched backprop 3.636) with every Adam and ANVIL II rate times 0.5.
+experiment: e19
+variant: cut_lr0p5
+task: h8
+seeds: [0, 1, 2]
+priority: 39
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  mode: cut
+  lr_mult: 0.5

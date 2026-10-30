@@ -658,6 +658,9 @@ def h8_knobs(scratch):
     trainer = h8.H8(o, torch.device('cpu'), 0, 10, torch.zeros(0, CUT_SEQ, dtype=torch.long))
     rows = trainer.key_rows()
     assert len(rows) == L and rows[0].shape == (W // 4, W) and torch.allclose(rows[0] @ rows[0].T, W * torch.eye(W // 4))
+    rates = lambda **kw: [g['lr'] for g in h8.H8(h8_options(dict(preset='2m', **kw)), torch.device('cpu'), 0, 10,
+                                                 torch.zeros(0, CUT_SEQ, dtype=torch.long)).optimizer.param_groups]
+    assert all(abs(b - 2 * a) < 1e-12 for a, b in zip(rates(), rates(lr_mult=2.0)))  # E19: every group's rate scales
     o = h8_options(dict(preset='2m', clip_credit=True, clip_factor=1.0))
     h8.H8(o, torch.device('cpu'), 0, 10, torch.zeros(0, CUT_SEQ, dtype=torch.long))
     assert h8.CLIP == 1.0 and h8.RUNWAY == h8.RUNWAY_V2
@@ -666,7 +669,7 @@ def h8_knobs(scratch):
     assert h8.RUNWAY == (0.1, 0.4) and h8.CLIP == 3.0
     for bad in (dict(live_paths=['keys']), dict(clip_factor=2.0), dict(mode='cut', live_paths=['queries']),
                 dict(mode='cut', key_draws=64), dict(mode='cut', live_paths=['values'], key_draws=64),
-                dict(mode='cut', live_paths=['keys'], key_draws=10 ** 6)):
+                dict(mode='cut', live_paths=['keys'], key_draws=10 ** 6), dict(lr_mult=0.0)):
         try:
             h8_options(dict(preset='2m', **bad))
         except ValueError:

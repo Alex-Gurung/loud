@@ -744,6 +744,7 @@ class H8:
         self.untimed = Untimed(device)  # loud/train.py takes it off the clock after each update
         self.probe = heldout[:PROBE_ROWS].to(device) if len(heldout) else None  # E14/E15's untimed logs
         self.settings = s = record_settings(m, o['preset'], o['batch'])
+        s.lr, s.anvil_lr = s.lr * o['lr_mult'], s.anvil_lr * o['lr_mult']  # E19's rate scale (1: the record's)
         if not o['boost']:
             s.switch = 0.0  # Cut from the first update
         self.schedule = m.stage_schedule(steps * o['batch'], s)

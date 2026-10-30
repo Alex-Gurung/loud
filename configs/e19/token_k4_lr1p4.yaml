@@ -1,0 +1,15 @@
+# E19 (added): is part of E6's partial-row cost the rate? K = 4 by token (128 rows per token per site) costs +0.150
+# against every row (e1.h8_synth) at the record's rates; a noisier gradient usually wants a smaller step. E6's
+# token_k4 with every Adam and ANVIL II rate times 1.4 (E6's success: within 0.02 of e1.h8_synth).
+experiment: e19
+variant: token_k4_lr1p4
+task: h8
+seeds: [0, 1, 2]
+priority: 39
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  rows: 128
+  row_assign: token
+  lr_mult: 1.4

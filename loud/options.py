@@ -140,6 +140,7 @@ H8 = dict(
     mode='synthesis',           # the Cut phase: 'synthesis' (credits at the sites, a probing scheme, block-local
                                 # gradients) or 'cut' (one backward of the cut graph)
     boost=True,                 # PR #40's Boost phase first (false: Cut from the first update)
+    lr_mult=1.0,                # scales PR #40's Adam and ANVIL II rates (E19), as the proxy's lr_mult
     freeze_queries=False,       # also detach the query's input: record #9's Cut, without own queries
     rows=None,                  # synthesis: Hadamard rows per token per site in the Cut phase (None: all 512)
     row_assign='token',         # 'time' (all tokens share rows, rotating across updates) or 'token' (offset by t mod K)
@@ -373,6 +374,8 @@ def h8_options(args):
     width = PRESETS[o['preset']][1]
     if o['mode'] not in ('synthesis', 'cut'):
         raise ValueError("mode must be 'synthesis' or 'cut'")
+    if not o['lr_mult'] > 0:
+        raise ValueError('lr_mult must be positive')
     if o['row_assign'] not in ('time', 'token') or o['prior'] not in ('none', 'identity'):
         raise ValueError("row_assign must be 'time' or 'token', prior 'none' or 'identity'")
     if o['rows'] is not None:

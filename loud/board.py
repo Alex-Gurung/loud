@@ -111,6 +111,12 @@ EXPERIMENTS = [
                'matched backprop; two seeds.',
          success='Our reading: the 10M gaps (E6 +0.15/+0.19, E14 0.00, H8 to backprop +0.16) grow, hold or shrink.',
          gate='H8 validation.'),
+    dict(id='e19', name='E19 the rate check (added)', priority='P1', reference=CUT,
+         question='Is part of H8\'s gap to backprop, or of E6\'s partial-row cost, the record\'s rate?',
+         setup='H8 cut mode at 0.5-2x every rate; E6\'s K = 4 by token at 0.35-1.4x; PR #40\'s recipe otherwise.',
+         success='Our reading: the best rate per estimator and the gap left there (cut to e1.bp_b4_pr40, K = 4 to '
+                 'e1.h8_synth).',
+         gate='H8 validation.'),
     dict(id='e8', name='E8 SNR-scaled steps (follow-up)', priority='P1', reference=BP8,
          question='Does an orthogonalizing optimizer amplify estimator noise, and does SNR scaling fix it?',
          setup='Control, SNR and rate arms in backprop and in H8 synthesis at K = 4; built if the diagnostic says.',
@@ -250,6 +256,19 @@ def verdict(e, by_key, by_arm=None):
             return 'waiting', f'Waiting for {CUT} and {BP4}.'
         shares = ', '.join(f'{v} {(high - a["val_mean"]) / (high - low):.0%}' for v, a in sorted(cells.items()))
         return 'n/a', f'Share of the {high - low:.3f} gap recovered: {shares}.'
+    if e['id'] == 'e19':
+        out = []
+        for prefix, one, target in (('cut_lr', CUT, BP4), ('token_k4_lr', 'e6.token_k4', SYNTH)):
+            arms = {v: a['val_mean'] for v, a in cells.items() if v.startswith(prefix)}
+            if one in by_key and by_key[one]['val_mean'] is not None:
+                arms[prefix + '1'] = by_key[one]['val_mean']
+            if not arms or target not in by_key:
+                continue
+            v, best = min(arms.items(), key=lambda kv: kv[1])
+            rate = v[len(prefix):].replace('p', '.')
+            out.append(f'{prefix.rstrip("_lr")}: best at {rate}x ({best - arms.get(prefix + "1", best):+.4f} '
+                       f'against 1x), {best - by_key[target]["val_mean"]:+.3f} from {target}')
+        return 'n/a', '; '.join(out) + '.'
     if e['id'] == 'e18':
         g = lambda v: cells[v]['val_mean'] if v in cells else None
         pairs = [('token_k4', 'h8_synth'), ('time_k4', 'h8_synth'), ('nextlat_0p3', 'h8_cut'), ('h8_cut', 'bp_b4_pr40')]
