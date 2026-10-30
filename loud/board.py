@@ -200,6 +200,27 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
             return 'met', (f'Every site at median cosine 0.95 or more (lowest {low["c20"]:.4f} at 20%, '
                            f'{low["c100"]:.4f} at 100%): build it, under the linear-consumer question.')
         return 'not met', f'Sites under 0.95: {failing}.'
+    if e['id'] == 'e9':  # gated on E8's intervention, which did not help
+        return 'skipped', 'Its gate (E8 shows per-direction scaling matters) did not pass: E8 is not met.'
+    if e['id'] == 'e12':
+        return 'skipped', 'No experiment produced a winner to take to 30M; E18 runs the length check in H8.'
+    if e['id'] == 'e17':  # read as arms land: H8 arms against the cut's gap, chain arms against the record's chain
+        low, high = by_key.get(BP4, {}).get('val_mean'), by_key.get(CUT, {}).get('val_mean')
+        mine = {a['variant']: a for a in by_key.values() if a['experiment'] == 'e17' and a['task'] not in NO_LOSS}
+        done = {v: a for v, a in mine.items() if a['val_mean'] is not None}
+        if low is None or high is None or not done:
+            return 'waiting', f'Waiting for {CUT}, {BP4} and the first arms.'
+        h8_ = {v: a for v, a in done.items() if a['task'] == 'h8'}
+        top = sorted(h8_.items(), key=lambda kv: kv[1]['val_mean'])
+        shares = ', '.join(f'{v} {(high - a["val_mean"]) / (high - low):.0%}' for v, a in top)
+        out = f'Share of the {high - low:.3f} gap recovered: {shares}.'
+        chain = {v: a for v, a in done.items() if a['task'] == 'cut'}
+        if 'chain_record' in chain:
+            ref = chain['chain_record']['val_mean']
+            out += ' Real chain: ' + ', '.join(f'{v} {a["val_mean"] - ref:+.4f}' for v, a in chain.items()
+                                               if v != 'chain_record') + ' against chain_record.'
+        left = len(mine) - len(done)
+        return 'n/a', out + (f' ({left} arms still running or queued.)' if left else '')
     # (gates and diagnostics have no loss: they never hold a verdict back)
     own = [a for a in by_key.values() if a['experiment'] == e['id'] and a['task'] not in NO_LOSS]
     cells = {a['variant']: a for a in own if not a['followup'] or a['val_mean'] is not None}
@@ -271,33 +292,6 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
             f'Partial rows cost {cost:+.4f}; SNR scaling recovers {recovered:.0%} of it (needs 50%) and ' \
             f'{"beats" if h["h8_snr"] < h["h8_rate"] else "trails"} the rate control ({h["h8_snr"]:.4f} against ' \
             f'{h["h8_rate"]:.4f}).'
-    if e['id'] == 'e17':
-        low, high = by_key.get(BP4, {}).get('val_mean'), by_key.get(CUT, {}).get('val_mean')
-        if low is None or high is None:
-            return 'waiting', f'Waiting for {CUT} and {BP4}.'
-        shares = ', '.join(f'{v} {(high - a["val_mean"]) / (high - low):.0%}' for v, a in sorted(cells.items()))
-        return 'n/a', f'Share of the {high - low:.3f} gap recovered: {shares}.'
-    if e['id'] == 'e19':
-        out = []
-        for prefix, one, target in (('cut_lr', CUT, BP4), ('token_k4_lr', 'e6.token_k4', SYNTH)):
-            arms = {v: a['val_mean'] for v, a in cells.items() if v.startswith(prefix)}
-            if one in by_key and by_key[one]['val_mean'] is not None:
-                arms[prefix + '1'] = by_key[one]['val_mean']
-            if not arms or target not in by_key:
-                continue
-            v, best = min(arms.items(), key=lambda kv: kv[1])
-            rate = v[len(prefix):].replace('p', '.')
-            out.append(f'{prefix.rstrip("_lr")}: best at {rate}x ({best - arms.get(prefix + "1", best):+.4f} '
-                       f'against 1x), {best - by_key[target]["val_mean"]:+.3f} from {target}')
-        return 'n/a', '; '.join(out) + '.'
-    if e['id'] == 'e20':
-        a, b = cells.get('token_k4_b16'), cells.get('synth_b16')
-        if a is None or b is None:
-            return 'waiting', 'Waiting for both arms.'
-        cost = a['val_mean'] - b['val_mean']
-        return ('met' if cost <= 0.02 else 'not met'), \
-            f'K = 4 costs {cost:+.4f} at batch 16 (batch 4: +0.150); synth_b16 is ' \
-            f'{b["val_mean"] - by_key[SYNTH]["val_mean"]:+.4f} from batch 4\'s e1.h8_synth.'
     if e['id'] == 'e18':
         g = lambda v: cells[v]['val_mean'] if v in cells else None
         pairs = [('token_k4', 'h8_synth'), ('time_k4', 'h8_synth'), ('nextlat_0p3', 'h8_cut'), ('nextlat_1', 'h8_cut'),

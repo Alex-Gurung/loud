@@ -77,16 +77,19 @@ shared volume has 15 GB left.
 **Follow-ups (2026-10-30, three pods, autonomous loop).** Each answers a question the first queue left open; the board
 has every arm.
 - **E17, where H8's cut loses credit:** of the 0.160 gap from `e1.h8_cut` to matched backprop, keys live in every
-  block recover 71%, values 25%, both 91% (three seeds, per-seed spread 3 points). The key path's share sits in
-  three blocks: keys live only in block 3 recover 59-63%, block 5 62%, block 7 48%, the other five 0-2%, and blocks
-  3, 5 and 7 together 67-69% (three seeds). The `key_paths` diagnostic shows the same split in one gradient: on the
-  cut model's final weights block 5's key path removes 54% of the cut gradient's error, block 3 23%, block 7 10%,
-  the rest under 1%; at the 20% handoff it is blocks 1, 3 and 5 (15% each) and 7 (4%): the blocks with value
+  block recover 71%, values 25%, both 91% (means of three seeds, per-seed spread about 3 points). The key path's
+  share sits in three blocks: keys live only in block 3 recover 60%, block 5 64%, block 7 55%, each of the other
+  five 1-2%, and blocks 3, 5 and 7 together 68%. The `key_paths` diagnostic shows the same split in one gradient: on
+  the cut model's final weights block 5's key path removes 54% of the cut gradient's error, block 3 23%, block 7
+  10%, the rest under 1%; at the 20% handoff it is blocks 1, 3 and 5 (15% each) and 7 (4%), the blocks with value
   embeddings, whose values carry the token itself, so their keys need context that earlier blocks must learn to
-  write. Read through fewer rows (as the record's input-key probes: 512 per token at every block), shared rows
-  recover 0/28/49/62% at m = 32/64/128/256 and token-assigned rows 10/38/55% at 32/64/128. At 30M keys recover 71%
-  of that gap too (seed 0). Queued on the real chain: PR #40 unchanged at full length, and with its key probes at
-  blocks 3, 5, 7 or at block 5 only (`key_blocks`), for the loss and the time saved.
+  write. Values are spread out: the value-embedding blocks' values recover 18%, the others' 10%; keys and values in
+  blocks 3, 5, 7 recover 80%. Read through fewer rows (the record's input-key probes take 512 per token at every
+  block), shared rows recover -4/27/49/63% at m = 32/64/128/256 and token-assigned rows 9/37/54% at 32/64/128;
+  blocks 3, 5, 7 through 256 token-assigned rows still recover 63%, under a fifth of the record's key probes. At
+  30M keys recover 71% of the (smaller) gap on both seeds. Running on the real chain: PR #40 unchanged at full
+  length and with its key probes at blocks 3, 5, 7 or at block 5 only (`key_blocks`): Cut updates already take
+  about 18% less time with them restricted.
 - **E18, 30M:** H8 cut's gap to matched backprop shrinks from 0.160 to 0.123 (two seeds, 0.126 and 0.120); E6's
   partial-row cost holds or grows (K = 4 by token +0.158, by time +0.188, against +0.150 and +0.184 at 10M);
   NextLat at 0.3 gives -0.005 on both seeds (10M: -0.001), steady but under the 0.02 bar.
