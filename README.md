@@ -227,7 +227,9 @@ gives a first read of every arm early. The bands, in order (`priority:` in each 
   A submission is checked in full first: duplicate ids, unknown `after` ids, conflicts and config errors stop it
   before anything is written.
 - **Disk.** Workers pause below `LOUD_MIN_FREE_GB` free; see Disk under Running on GPUs.
-- The harness deletes nothing: attempts, superseded runs, snapshots and job history all stay.
+- The harness deletes nothing: attempts, superseded runs, snapshots and job history all stay. Weights are deleted only
+  by hand and listed in `artifacts/deleted_weights.txt`. On 2026-10-30, with the volume at 5 GB free, that was the
+  smoke runs' weights, E16's track-3 finals and the finals of finished arms E2-E15; every score stays in its run.
 
 ### When a job fails or is blocked
 
