@@ -104,8 +104,10 @@ has every arm.
   model's nonlinearity early on. By v2's rule this means implement, with the linear-consumer question open.
 - **E8:** in H8, SNR scaling makes partial rows worse (it recovers -92% of their cost) and trails the plain rate
   control; E9, gated on E8, does not run.
-- **E19 (queued), the rate check:** H8 cut at 0.5-2x every rate and E6's K = 4 at 0.35-1.4x, to see whether any
-  of these gaps is PR #40's rate, tuned for the record's estimator, rather than the estimator.
+- **E19, the rate check:** PR #40's rates are about the best for both estimators: H8 cut at 0.5/0.7/1.4/2x costs
+  +0.066/+0.022/+0.011/+0.068 (three seeds) and E6's K = 4 by token at 0.35/0.5/0.7/1.4x +0.14/+0.07/+0.018/+0.009
+  against itself at 1x (two seeds). A noisier gradient does not want a smaller step here (ANVIL II's polar factor
+  sets the step's size), so neither the cut's gap nor E6's +0.15 is the rate.
 
 ## Running on GPUs
 

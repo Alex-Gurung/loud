@@ -1,0 +1,14 @@
+# E18 (added): E17's three key blocks at 30M. At 10M keys live in blocks 3, 5 and 7 recover 67-69% of the cut's gap
+# to backprop against 71% in every block; at 30M every block's keys recover 71% (two seeds). Does the split hold?
+experiment: e18
+variant: live_keys_b357
+task: h8
+seeds: [0, 1]
+priority: 37
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 30M
+  heldout: 32
+  mode: cut
+  live_paths: [keys]
+  live_blocks: [3, 5, 7]

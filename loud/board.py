@@ -287,7 +287,8 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
         return 'n/a', '; '.join(out) + '.'
     if e['id'] == 'e18':
         g = lambda v: cells[v]['val_mean'] if v in cells else None
-        pairs = [('token_k4', 'h8_synth'), ('time_k4', 'h8_synth'), ('nextlat_0p3', 'h8_cut'), ('h8_cut', 'bp_b4_pr40')]
+        pairs = [('token_k4', 'h8_synth'), ('time_k4', 'h8_synth'), ('nextlat_0p3', 'h8_cut'), ('nextlat_1', 'h8_cut'),
+                 ('h8_cut', 'bp_b4_pr40'), ('live_keys', 'h8_cut'), ('live_keys_b357', 'h8_cut')]
         found = [f'{a} - {b} {g(a) - g(b):+.3f}' for a, b in pairs if g(a) is not None and g(b) is not None]
         return 'n/a', 'At 30M: ' + '; '.join(found) + ' (10M: +0.150, +0.184, -0.001, +0.160).'
     if e['id'] == 'e16':  # the fixed model's cells on the track-3 arms' seeds (0-1)

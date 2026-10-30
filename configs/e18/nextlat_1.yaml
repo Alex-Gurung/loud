@@ -1,0 +1,13 @@
+# E18 (added): NextLat at lambda 1 on 30M. At lambda 0.3 it gives -0.005 against e18.h8_cut on both 30M seeds (10M:
+# -0.001), small but steady; this asks whether a larger weight grows it toward E14's 0.02 bar with the longer run.
+experiment: e18
+variant: nextlat_1
+task: h8
+seeds: [0, 1]
+priority: 37
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 30M
+  heldout: 32
+  mode: cut
+  nextlat: 1.0
