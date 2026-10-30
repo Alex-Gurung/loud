@@ -50,8 +50,9 @@ loop's untimed pause instead of the timed region (a 9-way lerp every 5 updates).
 from concurrent.futures import ThreadPoolExecutor
 import contextvars
 from dataclasses import asdict
-from functools import partial
+from functools import partial, wraps
 import threading
+import time
 
 import torch
 
@@ -170,6 +171,48 @@ class Turns:
             raise RuntimeError('another part of the sequence failed') from self.failed
 
 
+class Profile:
+    """Seconds per part of the Cut estimate, the GPU synchronized around each call (profile: true; a timing aid, the
+    syncs cost a little). Inclusive: a part's time includes the parts it calls (internals holds query_errors,
+    exact_key_errors and exact_values; path_credits holds key_input_credits and gate_input_credits; estimate all)."""
+    METHODS = ('estimate', 'probe', 'chain_credits', 'path_credits', 'key_input_credits', 'gate_input_credits',
+               'value_credit', 'hidden_credit', 'internals', 'query_errors', 'exact_key_errors', 'exact_values',
+               'select_mlp_routes', 'own_query_inputs')
+
+    def __init__(self):
+        self.on, self.seconds, self.installed = False, {}, set()
+
+    def wrap(self, name, fn):
+        @wraps(fn)
+        def timed(*args, **kwargs):
+            if not self.on:
+                return fn(*args, **kwargs)
+            sync = torch.cuda.synchronize if torch.cuda.is_available() else (lambda: None)
+            sync()
+            start = time.perf_counter()
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                sync()
+                self.seconds[name] = self.seconds.get(name, 0.0) + time.perf_counter() - start
+        return timed
+
+    def install(self, m, Cut):
+        """Time the Cut class's parts, the capture's forward and head readout, and the future probes."""
+        for name in self.METHODS:
+            setattr(Cut, name, self.wrap(name, getattr(Cut, name)))
+        if m not in self.installed:  # module-level: once per process
+            self.installed.add(m)
+            for name in ('capture', 'head_error'):
+                setattr(m.Capture, name, self.wrap(name, getattr(m.Capture, name)))
+            m.add_future_gradients = self.wrap('add_future_gradients', m.add_future_gradients)
+
+    def take(self):
+        out, self.seconds = {k: round(v, 3) for k, v in sorted(self.seconds.items())}, {}
+        return out
+
+
+PROFILE = Profile()
 SITES = None  # E5's kernel (eager, compiled static, compiled dynamic), built with the estimators
 CHANGES_DTYPE = torch.bfloat16  # E5: how the changes are stored for the solve
 RIDGE = 1e-3  # E5: the solve's ridge toward the identity path's guess, times the mean diagonal of A^T A (v2's)
@@ -587,6 +630,8 @@ class CutChain:
         self.schedule = m.stage_schedule(steps * o['batch'], s)
         self.horizons = {phase: horizon for phase, _, _, _, horizon in self.schedule}
         self.Boost, self.Cut = estimator_classes(m)
+        if o['profile']:
+            PROFILE.install(m, self.Cut)
         self.turns = Turns(self.split) if self.split > 1 else None
         self.finish = self.end_merge if o['end_merge'] else None
         if o['row_budget'] is not None and o['row_budget'] not in ROW_BUDGETS:
@@ -687,12 +732,16 @@ class CutChain:
             if start is not None:
                 fields['chain_window'] = [start, start + self.o['rows']]
         total, losses = None, []
+        PROFILE.on = self.o['profile'] and phase == 'cut'
         order = list(enumerate(self.groups))  # group g: the GPUs of the batch's g-th sequences
         for g, group in order[::-1] if self.o['reverse_sum'] else order:
             seqs = batch[g * self.per:(g + 1) * self.per]
             total, loss = self.measure(group, seqs[:, :-1].contiguous(), seqs[:, 1:].contiguous(), total)
             losses += loss
         total /= len(self.groups)  # Boost.step: the all-reduced sum over the GPUs, divided by the sequences
+        if PROFILE.on:
+            PROFILE.on = False
+            fields['cut_profile'] = PROFILE.take()
         if not bool(torch.isfinite(total).all()):
             raise FloatingPointError('Non-finite estimate')
         self.optimizer.zero_grad(set_to_none=True)

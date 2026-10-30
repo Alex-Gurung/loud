@@ -543,6 +543,25 @@ def cut_deep_readout(scratch):
         raise AssertionError(f'accepted deep_readout with {bad}')
 
 
+def cut_profile(scratch):
+    """profile: each Cut update logs seconds per part (the parts that ran, the estimate holding them); Boost logs none."""
+    cut_module()
+    import loud.cut
+    from loud.options import cut_options
+    patch_sequences(length=CUT_SEQ, vocab=CUT_VOCAB)
+    args = dict(preset='2m', sequences=20, heldout=8, batch=1, virtual_gpus=2, official_eval=False, profile=True)
+    chain = loud.cut.CutChain(cut_options(args), torch.device('cpu'), 0, 12, torch.zeros(8, CUT_SEQ, dtype=torch.long))
+    batch = cut_rows_data()[:1]
+    boost = next(i for i, b in enumerate(chain.schedule, 1) if b[0] == 'boost')
+    cut = next(i for i, b in enumerate(chain.schedule, 1) if b[0] == 'cut')
+    assert 'cut_profile' not in chain.update(boost, batch)[1]
+    chain.reset('cut')
+    parts = chain.update(cut, batch)[1]['cut_profile']
+    assert {'estimate', 'chain_credits', 'key_input_credits', 'internals', 'capture'} <= set(parts), parts
+    assert all(parts['estimate'] >= parts[k] for k in ('chain_credits', 'internals', 'probe')), parts
+    assert not loud.cut.PROFILE.on and not loud.cut.PROFILE.seconds
+
+
 def cut_budget(scratch):
     """E13's hook through the trainer: a ROW_BUDGETS strategy is built fresh by every reset (the run's never sees the
     warmup's random tokens), gives each Cut estimate's tokens their counts (once per GPU of the sequence) and sees
