@@ -7,7 +7,7 @@ variant: synth_b16
 task: h8
 seeds: [0, 1, 2]
 priority: 37
-gpu_memory_gb: 40  # four times batch 4's activations
+gpu_memory_gb: 32  # batch 4 peaks near 10 GB, mostly activations, which scale with the batch
 after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
 args:
   sequences: 10M
