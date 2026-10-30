@@ -167,7 +167,9 @@ def verdict(e, by_key, by_arm=None):
     """(state, sentence) for an experiment from its arms' means (by_key: arm key -> arm row; by_arm: arm key -> its
     runs): 'waiting' until every arm has a counted run; 'null' when every arm's rule never acted."""
     by_arm = by_arm or {}
-    cells = {a['variant']: a for a in by_key.values() if a['experiment'] == e['id'] and not a['followup']}
+    # an experiment's own arms, and its follow-ups once they have run (E14's second stage)
+    cells = {a['variant']: a for a in by_key.values()
+             if a['experiment'] == e['id'] and (not a['followup'] or a['val_mean'] is not None)}
     if not cells or any(a['val_mean'] is None for a in cells.values()):
         return 'waiting', 'Waiting for every arm to finish.'
     ref = e.get('reference')
@@ -223,6 +225,17 @@ def verdict(e, by_key, by_arm=None):
         return ('met' if ok else 'not met'), \
             f'Best arm {best["variant"]} at {best["val_mean"] - base:+.4f}, ' \
             f'closing {closed:.0%} of the gap to backprop.'
+    if e['id'] == 'e8':  # the H8 setting carries the success test
+        h = {v: cells[v]['val_mean'] for v in ('h8_exact_control', 'h8_control', 'h8_snr', 'h8_rate') if v in cells}
+        if len(h) < 4:
+            return 'waiting', 'Waiting for the H8 setting\'s four arms.'
+        cost = h['h8_control'] - h['h8_exact_control']
+        recovered = (h['h8_control'] - h['h8_snr']) / cost if cost else 0.0
+        ok = recovered >= 0.5 and h['h8_snr'] < h['h8_rate']
+        return ('met' if ok else 'not met'), \
+            f'Partial rows cost {cost:+.4f}; SNR scaling recovers {recovered:.0%} of it (needs 50%) and ' \
+            f'{"beats" if h["h8_snr"] < h["h8_rate"] else "trails"} the rate control ({h["h8_snr"]:.4f} against ' \
+            f'{h["h8_rate"]:.4f}).'
     if e['id'] == 'e17':
         low, high = by_key.get(BP4, {}).get('val_mean'), by_key.get(CUT, {}).get('val_mean')
         if low is None or high is None:
@@ -311,6 +324,10 @@ def build(configs=REPO / 'configs', queue_root=QUEUE, runs_root=RUNS, out=OUT):
                 a['delta'] = None if base is None or a['val_mean'] is None else a['val_mean'] - base
         state, sentence = verdict(e, by_key, by_arm)
         mine = [a for a in arms if a['experiment'] == e['id']]
+        own = [j for j in jobs if j['experiment'] == e['id'] and not j['followup']
+               and j['task'] not in ('diagnose', 'gate', 'compare')]
+        if own and all(j['state'] == 'skipped' for j in own):  # its gate said skip: nothing will run
+            state, sentence = 'skipped', 'Skipped by its gate: ' + ', '.join(sorted({j['detail'] for j in own}))
         label, title = e['name'].split(' ', 1) if e['id'][0] in 'eh' else ('Checks', e['name'])
         n = state_counts.get(e['id'], {})
         experiments.append(dict(

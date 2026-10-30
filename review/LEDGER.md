@@ -399,3 +399,12 @@ wrong or not worth it) or **deferred** (why, and what it waits on). "Same as" po
 | 9 | minor | Shared-GPU wall-clocks unflagged | fixed | `collect.py` flags `shared GPU` from each run's job record |
 | 10 | minor | E5's float32 rerun tests the method, not the bf16 readout the plan specifies | deferred | A chain-style bf16 replay (differencing the changes) needs the record's kernels; float32 is necessary, not sufficient, and the README says so |
 | 11 | nit | Board's 1e-5, score.json's hash after bf16, E13's reading, identity_match's one update, E15 s1's spike | fixed (partly) | Board text; E13's note in the reading; the rest recorded here |
+
+### 20261029T224110Z-results-codex.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | major | H8's validation passed only after lowering the threshold | fixed (doc) | Same as results-claude #1: the configs and README state the float32 reading; the 0.99 gate is not described as passed |
+| 2 | major | E14 gets a final verdict before its second stage | fixed | The second stage (target x onset at lambda 0.3) has run; the board counts follow-up arms once they have results: all null (best -0.001) |
+| 3 | minor | E16's gains mix seed sets | fixed | Same as results-claude #4 |
+| 4 | minor | Gated-off experiments show as waiting | fixed | The board marks an experiment `skipped` when its gate skipped every training arm (E13); E7's arms ran (results-claude #5) |
