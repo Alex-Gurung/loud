@@ -92,7 +92,10 @@ has every arm.
   about 18% less time with them restricted.
 - **E18, 30M:** H8 cut's gap to matched backprop shrinks from 0.160 to 0.123 (two seeds, 0.126 and 0.120); E6's
   partial-row cost holds or grows (K = 4 by token +0.158, by time +0.188, against +0.150 and +0.184 at 10M);
-  NextLat at 0.3 gives -0.005 on both seeds (10M: -0.001), steady but under the 0.02 bar.
+  NextLat helps more with the longer run: -0.005 at lambda 0.3, -0.008 at 1 and -0.007 at 3 (two seeds each; at 10M
+  lambda 1 and 3 cost +0.008 and +0.048), so an auxiliary loss that hurts a short run pays in a longer one, though
+  it levels off under E14's 0.02 bar. Keys live recover 71% of the 30M gap (both seeds), keys at blocks 3, 5, 7
+  only 64%.
 - **E10:** a binding clip (1x the median) costs +0.233 and agreement at 55% keeps 9.8% of the entries and costs
   +0.78: neither rule helps once it acts.
 - **The last 9% of E17:** keys and values live with Boost off lands on matched backprop to 0.0001 (three seeds),
