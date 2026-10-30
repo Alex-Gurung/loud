@@ -1,0 +1,15 @@
+# E17 (added): keys and values live (the full graph) without the Boost phase: backprop with PR #40's recipe from the
+# first update, except for H8's optimizer setup. With Boost, live_both recovers 89-92% of the cut's gap to matched
+# backprop; this says whether the rest is Boost's 20% (if it lands on e1.bp_b4_pr40) or something else in H8.
+experiment: e17
+variant: live_both_noboost
+task: h8
+seeds: [0, 1, 2]
+priority: 37
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  mode: cut
+  boost: false
+  live_paths: [keys, values]

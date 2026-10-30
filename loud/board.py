@@ -117,6 +117,11 @@ EXPERIMENTS = [
          success='Our reading: the best rate per estimator and the gap left there (cut to e1.bp_b4_pr40, K = 4 to '
                  'e1.h8_synth).',
          gate='H8 validation.'),
+    dict(id='e20', name='E20 the batch check (added)', priority='P1', reference='e20.synth_b16',
+         question='Does E6\'s partial-row cost shrink with a larger batch (more tokens averaged per update)?',
+         setup='H8 synthesis at batch 16 (303 updates on 10M) with every row and with K = 4 by token; three seeds.',
+         success='Our reading: K = 4\'s cost at batch 16 against +0.150 at batch 4 (E6\'s bar: 0.02).',
+         gate='H8 validation.'),
     dict(id='e8', name='E8 SNR-scaled steps (follow-up)', priority='P1', reference=BP8,
          question='Does an orthogonalizing optimizer amplify estimator noise, and does SNR scaling fix it?',
          setup='Control, SNR and rate arms in backprop and in H8 synthesis at K = 4; built if the diagnostic says.',
@@ -285,6 +290,14 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
             out.append(f'{prefix.rstrip("_lr")}: best at {rate}x ({best - arms.get(prefix + "1", best):+.4f} '
                        f'against 1x), {best - by_key[target]["val_mean"]:+.3f} from {target}')
         return 'n/a', '; '.join(out) + '.'
+    if e['id'] == 'e20':
+        a, b = cells.get('token_k4_b16'), cells.get('synth_b16')
+        if a is None or b is None:
+            return 'waiting', 'Waiting for both arms.'
+        cost = a['val_mean'] - b['val_mean']
+        return ('met' if cost <= 0.02 else 'not met'), \
+            f'K = 4 costs {cost:+.4f} at batch 16 (batch 4: +0.150); synth_b16 is ' \
+            f'{b["val_mean"] - by_key[SYNTH]["val_mean"]:+.4f} from batch 4\'s e1.h8_synth.'
     if e['id'] == 'e18':
         g = lambda v: cells[v]['val_mean'] if v in cells else None
         pairs = [('token_k4', 'h8_synth'), ('time_k4', 'h8_synth'), ('nextlat_0p3', 'h8_cut'), ('nextlat_1', 'h8_cut'),

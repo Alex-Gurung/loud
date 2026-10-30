@@ -6,7 +6,7 @@
 experiment: e17
 variant: chain_keys_b357
 task: cut
-seeds: [0]
+seeds: [0, 1]
 priority: 30
 gpu_memory_gb: 24  # the Cut chain: 18 GB at its peak
 after: [verify.cut_prefix_match.s0]

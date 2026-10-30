@@ -1,0 +1,15 @@
+# E20 (added): E6's K = 4 by token (128 rows per token per site) at batch 16, against e20.synth_b16. At batch 4 the
+# cost is +0.150; if it falls toward E6's 0.02 bar here, partial rows pay at a larger batch.
+experiment: e20
+variant: token_k4_b16
+task: h8
+seeds: [0, 1, 2]
+priority: 37
+gpu_memory_gb: 40  # four times batch 4's activations
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 16
+  rows: 128
+  row_assign: token
