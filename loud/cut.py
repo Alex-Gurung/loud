@@ -41,7 +41,8 @@ full cycle runs the record's chain_credits itself.
     record's 4 central moves at every mid site (the solved credit is least sure along the stream itself, the
     direction the residual scalar's move takes: on the CPU test model, credit cosine 0.995 but its dot product with
     the stream off by 3x).
-    The first GPU of a sequence takes S1's whole cycle (the system needs all its moves), the others none of it.
+    A token's system needs all its moves but the tokens are independent, so the GPUs of a sequence split S1's tokens
+    (and the scalar moves') instead of its moves. The bases are drawn as the record draws them, the skipped sites' too.
 Differences from PR #40, all deliberate: the job's seed replaces the module's SEED (seed 0 is the record's); the shared
 loop (loud/train.py): H4, untimed diagnostics, official scoring in a fresh process; the means are updated in the
 loop's untimed pause instead of the timed region (a 9-way lerp every 5 updates).
@@ -221,14 +222,16 @@ def sites_kernel(m):
 def solve_credits(changes, derivative, steps, guess):
     """E5: per token, the credit g [W] at one site from its moves' changes there (changes [t, P, W], each from a move of
     `steps` [t, 1] times a basis row) and the loss changes along the rows (derivative [t, P]): the least-squares
-    solution of (changes / steps) g = derivative, with RIDGE toward the identity path's guess [t, W]."""
+    solution of (changes / steps) g = derivative, with RIDGE toward the identity path's guess [t, W], by Cholesky.
+    Returns g and each system's status (nonzero: not positive definite), for one check per estimate."""
     with torch.autocast(changes.device.type, enabled=False):
         A = changes.float() / steps.unsqueeze(-1)
         gram = A.transpose(1, 2) @ A
         ridge = RIDGE * gram.diagonal(dim1=-2, dim2=-1).mean(-1)
         gram.diagonal(dim1=-2, dim2=-1).add_(ridge.unsqueeze(-1))
         rhs = (A.transpose(1, 2) @ derivative.unsqueeze(-1)).squeeze(-1) + ridge.unsqueeze(-1) * guess
-        return torch.linalg.solve(gram, rhs)
+        factor, status = torch.linalg.cholesky_ex(gram)  # the ridge makes it positive definite; no host sync
+        return torch.cholesky_solve(rhs.unsqueeze(-1), factor).squeeze(-1), status
 
 
 def estimator_classes(m):
@@ -393,43 +396,13 @@ def estimator_classes(m):
             return move, scale
 
         def deep_chain_credits(self, e, x0, mids, outs, routes, y):
-            """E5 (module docstring): S0's cycle as the record's (this GPU's share); on the first GPU of the sequence,
-            S1's full cycle and its scalar moves through sites_kernel, S1's credit decoded as the record's and each
-            later mid site's solved per token; the other GPUs add nothing past S0."""
-            s, L, model = self.s, self.model.config.n_layer, self.model
-            n, first, h = e.shape[0], self.part == 0, s.scalar_step
-            lo, hi = self.share(self.width)
-            H0 = self.basis()[lo:hi]
-            steps0 = s.chain_sigma * e.square().mean(-1, keepdim=True).sqrt().clamp(min=1e-6)
-            moves0 = lambda sl: (steps0[sl].unsqueeze(-1) * H0.unsqueeze(0), steps0[sl].expand(-1, hi - lo))
-            credits = {'emb': self.group_sum(self.chain_pass(e, x0, mids, outs, routes, y, [(-1, moves0)])[0]
-                                             @ H0 / self.width)}
-            H = self.basis()
-            out = {k: torch.zeros(n, self.width, device=self.device) for k in range(L)}
-            lam = {k: torch.zeros(2, device=self.device) for k in range(L)}
-            if first:
-                self.deep_pass(e, x0, mids, outs, routes, y, H, out, lam, h)
-                # the later sites' mixing scalars keep the record's 4 central moves each (the solved credit is
-                # least sure along the stream itself, which the residual scalar's move follows)
-                scalars = []
-                for k in range(1, L):
-                    def moves(sl, k=k):
-                        prev, z = outs[k - 1][sl].unsqueeze(1), x0[sl].unsqueeze(1)
-                        move = torch.cat([h * prev, h * z, -h * prev, -h * z], 1)
-                        scale = torch.cat([torch.full_like(move[:, :2, 0], h), torch.full_like(move[:, :2, 0], -h)], 1)
-                        return move, scale
-                    scalars.append((k, moves))
-                if scalars:
-                    for (k, _), d in zip(scalars, self.chain_pass(e, x0, mids, outs, routes, y, scalars)):
-                        lam[k] += (d[:, 0:2] + d[:, 2:4]).sum(0) / 2
-            for k in range(L):
-                credits[k] = self.group_sum(out[k])
-                credits['lam', k] = self.group_sum(lam[k])
-            return credits
-
-        def deep_pass(self, e, x0, mids, outs, routes, y, H, out, lam, h):
-            """S1's full cycle (and its 4 scalar moves) through sites_kernel, token chunk by chunk as chain_pass; fills
-            out[k] (the credit at mid site k) and lam[k] (its mixing scalars' credit)."""
+            """E5 (module docstring), one pass over each sequence's token chunks with one own-query context, as the
+            record's chain_credits: S0's cycle as the record's (this GPU's share of the moves, every token); S1's full
+            cycle and its scalar moves through sites_kernel, and the later sites' scalar moves through the record's
+            kernel, for this GPU's share of the chunk's tokens (each token's system needs all its moves, and the
+            tokens are independent, so the GPUs of a sequence split the tokens and stay balanced); S1's credit decoded
+            as the record's, each later mid site's solved per token. The bases are drawn as the record draws them, the
+            skipped sites' too, so the run stays paired with the record's draw for draw."""
             model, s, L = self.model, self.s, self.model.config.n_layer
             vocab = model.config.vocab_size
             weight = model.lm_head.weight.float()[:vocab]
@@ -437,11 +410,22 @@ def estimator_classes(m):
             w_fc = [blk.mlp.c_fc.weight.to(s.chain_dtype) for blk in model.transformer.h]
             w_out_t = [blk.mlp.c_proj.weight.to(s.chain_dtype).T.contiguous() for blk in model.transformer.h]
             lam_r, lam_0 = model.resid_lambdas.float(), model.x0_lambdas.float()
-            xL, P = outs[-1], H.shape[0]
+            xL, h = outs[-1], s.scalar_step
             base, target_w = xL @ weight.T, weight[y.clamp(min=0)]
+            lo, hi = self.share(self.width)
+            H0 = self.basis()[lo:hi]  # S0's, this GPU's share
+            H = self.basis()          # S1's, whole
+            for _ in range(L - 1):    # the sites whose cycles E5 skips: drawn and dropped, as the record draws them
+                self.basis()
+            P0, P = H0.shape[0], H.shape[0]
+            steps0 = s.chain_sigma * e.square().mean(-1, keepdim=True).sqrt().clamp(min=1e-6)
             steps = s.chain_sigma * mids[0].square().mean(-1, keepdim=True).sqrt().clamp(min=1e-6)
             guesses = self.guesses()
             n, chunk = e.shape[0], s.chain_tokens
+            emb = torch.zeros(n, self.width, device=self.device)
+            out = {k: torch.zeros(n, self.width, device=self.device) for k in range(L)}
+            lam = {k: torch.zeros(2, device=self.device) for k in range(L)}
+            status = torch.zeros((), dtype=torch.int32, device=self.device)
             length = self.capture.length if s.own_query else n
             for start in range(0, n, length):
                 own = None
@@ -449,35 +433,64 @@ def estimator_classes(m):
                     own = self.own_query_inputs(start // length)
                     if s.query_keys:
                         own = self.strong_keys(own, s.query_keys)
-                for t0 in range(start, start + length, chunk):
-                    t1 = min(t0 + chunk, start + length)
-                    sl = slice(t0, t1)
+
+                def context(sl):
+                    """The kernel and the token slice's own-query context, its selected units and clean inputs."""
                     own_sl = None
                     if own is not None:
-                        begin, end = t0 - start, t1 - start
+                        begin, end = sl.start - start, sl.stop - start
                         if own[0] == 'routed':
                             local = slice(begin, end)
                             own_sl = ('routed', own[1][local], [z[local] for z in own[2]], own[3]) + tuple(
                                 [z[local] for z in part] for part in own[4:8]) + own[8:]
                         else:
                             own_sl = self.own_query_window(own, begin, end)
-                    kernel = SITES[2] if own_sl is not None and own_sl[0] == 'window' else SITES[1]
-                    prev, z0 = x0[sl].unsqueeze(1), x0[sl].unsqueeze(1)  # S1's scalars scale x0 (block 0's input)
-                    move = torch.cat([steps[sl].unsqueeze(-1) * H.unsqueeze(0), h * prev, h * z0, -h * prev, -h * z0], 1)
-                    scale = torch.cat([steps[sl].expand(-1, P), torch.full_like(steps[sl].expand(-1, 2), h),
-                                       torch.full_like(steps[sl].expand(-1, 2), -h)], 1)
-                    derivative, changes = kernel(
-                        0, move, scale, e[sl], x0[sl], [z[sl] for z in mids], xL[sl],
-                        [r[0][sl] for r in routes], [r[1][sl] for r in routes], lam_r, lam_0,
-                        [w[r[0][sl]] for w, r in zip(w_fc, routes)], [w[r[0][sl]] for w, r in zip(w_out_t, routes)],
-                        weight_t, base[sl], target_w[sl], y[sl], own_sl, rows=P)
-                    out[0][sl] = derivative[:, :P] @ H / self.width
+                    window = own_sl is not None and own_sl[0] == 'window'
+                    return window, (e[sl], x0[sl], [z[sl] for z in mids], xL[sl], [r[0][sl] for r in routes],
+                                    [r[1][sl] for r in routes], lam_r, lam_0,
+                                    [w[r[0][sl]] for w, r in zip(w_fc, routes)],
+                                    [w[r[0][sl]] for w, r in zip(w_out_t, routes)], weight_t, base[sl], target_w[sl],
+                                    y[sl], own_sl)
+
+                for t0 in range(start, start + length, chunk):
+                    t1 = min(t0 + chunk, start + length)
+                    sl = slice(t0, t1)
+                    window, args = context(sl)
+                    kernel = m.chain_chunk_own if window else m.chain_chunk
+                    d = kernel(-1, steps0[sl].unsqueeze(-1) * H0.unsqueeze(0), steps0[sl].expand(-1, P0), *args,
+                               packed=True)
+                    emb[sl] = d @ H0 / self.width
+                    del args
+                    share = (t1 - t0) // self.split  # this GPU's tokens of the chunk
+                    mine = slice(t0 + self.part * share, t1 if self.part == self.split - 1 else t0 + (self.part + 1) * share)
+                    window, args = context(mine)
+                    z0 = x0[mine].unsqueeze(1)  # S1's scalars both scale x0 (block 0's input)
+                    move = torch.cat([steps[mine].unsqueeze(-1) * H.unsqueeze(0), h * z0, h * z0, -h * z0, -h * z0], 1)
+                    unit = torch.ones_like(steps[mine].expand(-1, 2))
+                    scale = torch.cat([steps[mine].expand(-1, P), h * unit, -h * unit], 1)
+                    derivative, changes = (SITES[2] if window else SITES[1])(0, move, scale, *args, rows=P)
+                    out[0][mine] = derivative[:, :P] @ H / self.width
                     lam[0] += (derivative[:, P:P + 2] + derivative[:, P + 2:]).sum(0) / 2
                     for k, change in enumerate(changes, 1):
-                        g = solve_credits(change, derivative[:, :P], steps[sl], guesses[k][sl].float())
-                        out[k][sl] = g
-                    del changes
-                del own_sl, own
+                        g, info = solve_credits(change, derivative[:, :P], steps[mine], guesses[k][mine].float())
+                        out[k][mine] = g
+                        status = torch.maximum(status, info.max().to(status.dtype))
+                    del changes, derivative
+                    kernel = m.chain_chunk_own if window else m.chain_chunk
+                    for k in range(1, L):  # the later sites' mixing scalars: the record's 4 central moves each
+                        prev = outs[k - 1][mine].unsqueeze(1)
+                        d = kernel(k, torch.cat([h * prev, h * z0, -h * prev, -h * z0], 1),
+                                   torch.cat([h * unit, -h * unit], 1), *args, packed=True)
+                        lam[k] += (d[:, 0:2] + d[:, 2:4]).sum(0) / 2
+                    del args
+                del own
+            if int(status):  # one check per estimate: a failed factorization would leave garbage, not an error
+                raise RuntimeError(f'deep readout: a 512 x 512 system was not positive definite (status {int(status)})')
+            credits = {'emb': self.group_sum(emb)}
+            for k in range(L):
+                credits[k] = self.group_sum(out[k])
+                credits['lam', k] = self.group_sum(lam[k])
+            return credits
 
         def partial_chain_credits(self, e, x0, mids, outs, routes, y):
             """PR #40's chain_credits at `rows` rows per token per site (or each token's budget): each token reads its
@@ -698,7 +711,7 @@ class CutChain:
         if not any(phase == 'cut' for phase, *_ in self.schedule):
             return set()
         share = (self.o['rows'] or self.width) // self.split
-        if self.o['deep_readout']:  # E5: chain_chunk runs S0's cycle and the later sites' 4 scalar moves (part 0)
+        if self.o['deep_readout']:  # E5: chain_chunk runs S0's cycle and the later sites' 4 scalar moves
             return {(-1, share)} | {(site, 4) for site in range(1, self.settings.model.n_layer)}
         keys = {(-1, share)} | {(site, share + 4) for site in range(self.settings.model.n_layer)}
         if self.split > 1:

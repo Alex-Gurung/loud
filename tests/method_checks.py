@@ -487,10 +487,10 @@ def cut_key_blocks(scratch):
 
 
 def cut_deep_readout(scratch):
-    """E5's deep readout on the 2-layer model (two virtual GPUs on one sequence): S0's and S1's credits are the
-    record's own (the same cycles), the mixing scalars' too (the same moves), S2's solved credit is the record's
-    measured one up to the model's nonlinearity, and the update's gradient follows; the plan has S0's cycle and the
-    later sites' scalar moves only."""
+    """E5's deep readout on the 2-layer model (two virtual GPUs on one sequence, which split S1's tokens): S0's and
+    S1's credits are the record's own (the same cycles), the mixing scalars' too (the same moves), S2's solved credit
+    is the record's measured one up to the model's nonlinearity, the update's gradient follows, the generators end
+    where the record's do (paired runs); the plan has S0's cycle and the later sites' scalar moves only."""
     cut_module()
     import loud.cut
     from loud.options import cut_options
@@ -518,10 +518,14 @@ def cut_deep_readout(scratch):
             chain.update(step, batch)
         finally:
             chain.Cut.chain_credits = original
+        states[tag] = [est.generator.get_state() for group in chain.groups for est in group]
         return chain, {n: p.grad.clone() for n, p in chain.named}
 
+    states = {}
     _, record = run('record')
     chain, deep = run('deep', deep_readout=True)
+    # the skipped sites' bases are still drawn: every estimator's generator ends where the record's does (paired runs)
+    assert all(torch.equal(a, b) for a, b in zip(states['record'], states['deep']))
     a, b = seen['record'], seen['deep']
     assert torch.allclose(a['emb'], b['emb'], atol=1e-6) and torch.allclose(a[0], b[0], atol=1e-6)
     for k in range(2):

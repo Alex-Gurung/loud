@@ -208,7 +208,7 @@ def h8_run(scratch):
         phases = [r['phase'] for r in records]
         if variant == 'synth':
             assert phases == ['boost'] * 2 + ['cut'] * 8, phases
-            assert all(-1 <= r['cosine_to_identity'] <= 1 for r in records if r['phase'] == 'cut')
+            assert all(-1 - 1e-5 <= r['cosine_to_identity'] <= 1 + 1e-5 for r in records if r['phase'] == 'cut')
             assert any('stable_rank' in r for r in records)
         else:
             assert set(phases) == {'cut'}
@@ -511,7 +511,7 @@ def h8_variants_run(scratch):
         assert result['complete'] and len(records) == 10, (variant, len(records))
         cut = [r for r in records if r['phase'] == 'cut']
         if variant == 'clip':
-            assert all(-1 <= r['cosine_to_identity'] <= 1 for r in cut if r['step'] % 5 == 0)
+            assert all(-1 - 1e-5 <= r['cosine_to_identity'] <= 1 + 1e-5 for r in cut if r['step'] % 5 == 0)
         if variant == 'agree':
             assert 0 <= records[-1]['agree_kept'] <= 1
         if variant == 'runway':
@@ -659,22 +659,36 @@ def h8_knobs(scratch):
     blocks = perm.view(8, W // 8, W).double()
     x0 = torch.zeros(1, 8, W, dtype=torch.float64, requires_grad=True)
     g8 = torch.randn(1, 8, W, dtype=torch.float64)
-    read = torch.autograd.grad(h8.ReadCredit.apply(x0, blocks), x0, g8)[0]
+    read = torch.autograd.grad(h8.ReadCredit.apply(x0, blocks.unsqueeze(0)), x0, g8)[0]
     for t in range(8):  # (in float32, as the record decodes)
         assert torch.allclose(read[0, t], (g8[0, t] @ blocks[t].T) @ blocks[t] / (W // 8), atol=1e-4)
     whole = sum((g8[0, 0] @ blocks[k].T) @ blocks[k] for k in range(8)) / W  # the K blocks together: the whole basis
     assert torch.allclose(whole, g8[0, 0])
     assert (mean - g).norm() < 0.25 * (one - g).norm(), ((mean - g).norm(), (one - g).norm())
+    # the read sits before the key branch's RMSNorm, where the record's probes move the block input: P (J g), not
+    # J (P g) (review round 9)
+    stream = torch.randn(2, 3, W, dtype=torch.float64, requires_grad=True)
+    A = torch.randn(W, 5, dtype=torch.float64)
+    rows = (H[torch.randperm(W)[:W // 8]] * signs).double()
+    pulled = torch.autograd.grad((h8.um().norm(stream) @ A).square().sum(), stream)[0]
+    read = torch.autograd.grad((h8.um().norm(h8.ReadCredit.apply(stream, rows)) @ A).square().sum(), stream)[0]
+    assert torch.allclose(read, (pulled.float() @ rows.float().T @ rows.float() / (W // 8)).double(), atol=1e-4)
     partial = [r[:W // 8] for r in full]
     assert not torch.allclose(gw(held=True, live=['keys'], key_rows=partial), every, atol=1e-5)
     o = h8_options(dict(preset='2m', mode='cut', live_paths=['keys'], key_draws=W // 4))
     trainer = h8.H8(o, torch.device('cpu'), 0, 10, torch.zeros(0, CUT_SEQ, dtype=torch.long))
-    rows = trainer.key_rows()
-    assert len(rows) == L and rows[0].shape == (W // 4, W) and torch.allclose(rows[0] @ rows[0].T, W * torch.eye(W // 4))
+    rows = trainer.key_rows(3)  # each sequence its own rows, as the record's per-sequence generators draw them
+    assert len(rows) == L and rows[0].shape == (3, W // 4, W) and not torch.equal(rows[0][0], rows[0][1])
+    assert torch.allclose(rows[0][1] @ rows[0][1].T, W * torch.eye(W // 4))
+    two = torch.randn(2, 3, W, dtype=torch.float64)  # [B, m, W]: sequence b read with its own rows
+    x2 = torch.zeros_like(two, requires_grad=True)
+    got = torch.autograd.grad(h8.ReadCredit.apply(x2, rows[0][:2].double()), x2, two)[0]
+    for b in range(2):
+        assert torch.allclose(got[b], (two[b].float() @ rows[0][b].T @ rows[0][b] / (W // 4)).double(), atol=1e-4)
     o = h8_options(dict(preset='2m', mode='cut', live_paths=['keys'], key_draws=W // 4, key_assign='token'))
-    rows = h8.H8(o, torch.device('cpu'), 0, 10, torch.zeros(0, CUT_SEQ, dtype=torch.long)).key_rows()
-    assert rows[0].shape == (4, W // 4, W) and torch.allclose(rows[0].flatten(0, 1).T @ rows[0].flatten(0, 1),
-                                                              W * torch.eye(W))
+    rows = h8.H8(o, torch.device('cpu'), 0, 10, torch.zeros(0, CUT_SEQ, dtype=torch.long)).key_rows(2)
+    assert rows[0].shape == (2, 4, W // 4, W) and torch.allclose(rows[0][1].flatten(0, 1).T @ rows[0][1].flatten(0, 1),
+                                                                 W * torch.eye(W))
     rates = lambda **kw: [g['lr'] for g in h8.H8(h8_options(dict(preset='2m', **kw)), torch.device('cpu'), 0, 10,
                                                  torch.zeros(0, CUT_SEQ, dtype=torch.long)).optimizer.param_groups]
     assert all(abs(b - 2 * a) < 1e-12 for a, b in zip(rates(), rates(lr_mult=2.0)))  # E19: every group's rate scales

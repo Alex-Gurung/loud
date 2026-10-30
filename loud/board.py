@@ -173,6 +173,21 @@ def activity(arm, runs_):
 NO_LOSS = ('gate', 'diagnose', 'compare')  # tasks whose runs report no validation loss
 
 
+def chain_pairs(by_arm, experiment, variants):
+    """'variant +d (seeds ...)' for each chain arm with runs, d its mean difference from e17.chain_record on the
+    seeds both have: the chain arms are paired with the record draw for draw, so a two-seed mean against a one-seed
+    arm would add a seed's noise to a difference expected near 0."""
+    record = {r['seed']: r['val_loss'] for r in by_arm.get('e17.chain_record', []) if counts(r)}
+    out = []
+    for v in variants:
+        mine = {r['seed']: r['val_loss'] for r in by_arm.get(f'{experiment}.{v}', []) if counts(r)}
+        seeds = sorted(set(mine) & set(record))
+        if seeds:
+            d = statistics.fmean(mine[s] - record[s] for s in seeds)
+            out.append(f'{v} {d:+.4f} (seed{"s" if len(seeds) > 1 else ""} {", ".join(map(str, seeds))})')
+    return out
+
+
 def seed_mean(runs_, seeds):
     vals = [r['val_loss'] for r in runs_ if r['seed'] in seeds and counts(r)]
     return statistics.fmean(vals) if vals else None
@@ -186,22 +201,25 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
         return 'n/a', 'Checks: each passes or fails on its own (see the jobs).'
     # an experiment's own arms, and its follow-ups once they have run (E14's second stage)
     if e['id'] == 'e5':  # v2's decision, on the chain's way of differencing in bf16 (readout_delta)
-        found = {}
+        found, plain = {}, {}
         for c in ('c20', 'c100'):
             path = Path(runs_root) / 'e5' / f'readout_delta_{c}' / 's0' / 'deep_readout_check.json'
             if path.exists():
-                sites = {k: v['cosine ridge 0.0']['median'] for k, v in read_json(path).items() if k.startswith('S')}
-                found[c] = sites
+                data = {k: v for k, v in read_json(path).items() if k.startswith('S')}
+                found[c] = {k: v['cosine ridge 0.001']['median'] for k, v in data.items()}  # the build's ridged solve
+                plain[c] = min(v['cosine ridge 0.0']['median'] for v in data.values())
         if len(found) < 2:
             return 'waiting', 'Waiting for the bf16 delta readouts at 20% and 100%.'
         low = {c: min(v.values()) for c, v in found.items()}
         failing = {c: sorted(k for k, x in v.items() if x < 0.95) for c, v in found.items()}
         if not any(failing.values()):
-            note = (f'Every site at median cosine 0.95 or more (lowest {low["c20"]:.4f} at 20%, {low["c100"]:.4f} at '
-                    f'100%): build it, under the linear-consumer question.')
-            deep, ref = by_key.get('e5.chain_deep', {}).get('val_mean'), by_key.get('e17.chain_record', {})
-            if deep is not None and ref.get('val_mean') is not None:
-                note += f' On the chain (seed 0): {deep - ref["val_mean"]:+.4f} against the record unchanged.'
+            note = (f'Every site at median cosine 0.95 or more with the build\'s ridge (lowest {low["c20"]:.4f} at 20%, '
+                    f'{low["c100"]:.4f} at 100%; unridged {plain["c20"]:.4f} and {plain["c100"]:.4f}). v2: ask the '
+                    f'maintainers, then build; built as a measurement, not admissible until the linear-consumer '
+                    f'question is settled.')
+            paired = chain_pairs(by_arm, 'e5', ['chain_deep', 'chain_deep_paired'])
+            if paired:
+                note += ' On the chain, against the record unchanged on the same seeds: ' + ', '.join(paired) + '.'
             return 'met', note
         return 'not met', f'Sites under 0.95: {failing}.'
     if e['id'] == 'e9':  # gated on E8's intervention, which did not help
@@ -218,11 +236,9 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
         top = sorted(h8_.items(), key=lambda kv: kv[1]['val_mean'])
         shares = ', '.join(f'{v} {(high - a["val_mean"]) / (high - low):.0%}' for v, a in top)
         out = f'Share of the {high - low:.3f} gap recovered: {shares}.'
-        chain = {v: a for v, a in done.items() if a['task'] == 'cut'}
-        if 'chain_record' in chain:
-            ref = chain['chain_record']['val_mean']
-            out += ' Real chain: ' + ', '.join(f'{v} {a["val_mean"] - ref:+.4f}' for v, a in chain.items()
-                                               if v != 'chain_record') + ' against chain_record.'
+        paired = chain_pairs(by_arm, 'e17', [v for v, a in done.items() if a['task'] == 'cut' and v != 'chain_record'])
+        if paired:
+            out += ' Real chain, paired with chain_record seed by seed: ' + ', '.join(paired) + '.'
         left = len(mine) - len(done)
         return 'n/a', out + (f' ({left} arms still running or queued.)' if left else '')
     if e['id'] == 'e19':
@@ -232,24 +248,25 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
             arms = {v: a['val_mean'] for v, a in cells19.items() if v.startswith(prefix)}
             if one in by_key and by_key[one]['val_mean'] is not None:
                 arms[prefix + '1'] = by_key[one]['val_mean']
-            if len(arms) < 2 or target not in by_key:
+            if len(arms) < 2 or by_key.get(target, {}).get('val_mean') is None:
                 continue
             v, best = min(arms.items(), key=lambda kv: kv[1])
             rate = v[len(prefix):].replace('p', '.')
             out.append(f'{prefix[:-3]}: best at {rate}x ({best - arms.get(prefix + "1", best):+.4f} '
                        f'against 1x), {best - by_key[target]["val_mean"]:+.3f} from {target}')
         return ('n/a', '; '.join(out) + '.') if out else ('waiting', 'Waiting for the first rates.')
-    if e['id'] == 'e20':  # read each batch as its two arms land
-        found = []
+    if e['id'] == 'e20':  # the test is batch 16's pair; batch 8's is read as it lands
+        base = by_key.get(SYNTH, {}).get('val_mean')
+        found = {}
         for batch in (8, 16):
             a, b = by_key.get(f'e20.token_k4_b{batch}', {}), by_key.get(f'e20.synth_b{batch}', {})
-            if a.get('val_mean') is not None and b.get('val_mean') is not None:
-                found.append((batch, a['val_mean'] - b['val_mean'], b['val_mean'] - by_key[SYNTH]['val_mean']))
-        if not found:
-            return 'waiting', 'Waiting for a batch\'s two arms.'
+            if a.get('val_mean') is not None and b.get('val_mean') is not None and base is not None:
+                found[batch] = (a['val_mean'] - b['val_mean'], b['val_mean'] - base)
         text = '; '.join(f'at batch {n} K = 4 costs {c:+.4f} (every row there: {d:+.4f} from batch 4)'
-                         for n, c, d in found)
-        return ('met' if min(c for _, c, _ in found) <= 0.02 else 'not met'), f'Batch 4: K = 4 costs +0.150; {text}.'
+                         for n, (c, d) in sorted(found.items()))
+        if 16 not in found:
+            return 'waiting', 'Waiting for batch 16\'s two arms' + (f'; so far {text}.' if text else '.')
+        return ('met' if found[16][0] <= 0.02 else 'not met'), f'Batch 4: K = 4 costs +0.150; {text}.'
     # (gates and diagnostics have no loss: they never hold a verdict back)
     own = [a for a in by_key.values() if a['experiment'] == e['id'] and a['task'] not in NO_LOSS]
     cells = {a['variant']: a for a in own if not a['followup'] or a['val_mean'] is not None}

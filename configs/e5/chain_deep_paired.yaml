@@ -1,0 +1,16 @@
+# E5's implementation (added after review round 9): chain_deep with the fixed deep path: the GPUs of a sequence split
+# S1's tokens (balanced), one pass per sequence, Cholesky solves, and the skipped sites' bases still drawn, so the run
+# is paired with e17.chain_record draw for draw (e5.chain_deep, which predates these, is not). Full 10M schedule, seed
+# 0. A measurement, not a submission: the solved credits feed nonlinear consumers (v2 Section 7, not asked).
+experiment: e5
+variant: chain_deep_paired
+task: cut
+seeds: [0]
+priority: 30
+gpu_memory_gb: 26  # the Cut chain (18 GB at its peak), S1's changes at 7 sites (2 GB) and a site's solve (1.5 GB)
+after: [e5.chain_deep_smoke.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  deep_readout: true

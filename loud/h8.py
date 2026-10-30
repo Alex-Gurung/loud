@@ -95,7 +95,8 @@ def token_losses(model, x, targets, head=None):
 class ReadCredit(torch.autograd.Function):
     """The identity forward; backward passes on only the partial-row read of the incoming credit g [B, T, W]:
     (g R^T) R / m for the m rows R (+-1 entries, E[R^T R / m] = I), in float32. What m probes per token would measure.
-    Rows [m, W] are every token's; rows [K, m, W] give token t block t mod K (E6's token assignment)."""
+    Rows [m, W]: every token's; [B, m, W]: each sequence's own; [B, K, m, W]: each sequence's, token t reading block
+    t mod K (E6's token assignment)."""
 
     @staticmethod
     def forward(ctx, x, rows):
@@ -107,27 +108,27 @@ class ReadCredit(torch.autograd.Function):
         rows, = ctx.saved_tensors
         with torch.autocast(g.device.type, enabled=False):
             r, g32 = rows.float(), g.float()
-            if r.dim() == 2:
-                read = (g32 @ r.T) @ r / r.shape[0]
+            if r.dim() < 4:  # [m, W] broadcasts over the sequences; [B, m, W] reads each with its own
+                read = (g32 @ r.transpose(-1, -2)) @ r / r.shape[-2]
             else:
-                K, m = r.shape[:2]
+                K, m = r.shape[1:3]
                 read = torch.empty_like(g32)
                 for k in range(K):
-                    read[:, k::K] = (g32[:, k::K] @ r[k].T) @ r[k] / m
+                    read[:, k::K] = (g32[:, k::K] @ r[:, k].transpose(-1, -2)) @ r[:, k] / m
         return read.to(g.dtype), None
 
 
-def attention(attn, x, ve, cos_sin, window, held, freeze_queries=False, live=(), key_rows=None):
+def attention(attn, x, ve, cos_sin, window, held, freeze_queries=False, live=(), key_x=None):
     """CausalSelfAttention.forward on the normed block input x. With `held`, the keys', values' and gate's input is
     detached: every token's keys and values are their clean ones while its query stays live (freeze_queries detaches
     the query's input too: record #9's Cut, without own queries). `live` names cross-token paths held keeps open
-    ('keys', 'values': the values and their gate), to measure what each carries. key_rows (with the keys live): the
-    key input's credit reaches x only through these rows' partial read (ReadCredit), the record's input-key probes."""
+    ('keys', 'values': the values and their gate), to measure what each carries. key_x (with the keys live): the key
+    branch's input in place of x, the same value (cut_forward's partial read of the key credit)."""
     m = um()
     B, T, _ = x.shape
     kx = x if not held or 'keys' in live else x.detach()
-    if key_rows is not None and held and 'keys' in live:
-        kx = ReadCredit.apply(x, key_rows)
+    if key_x is not None and held and 'keys' in live:
+        kx = key_x
     vx = x if not held or 'values' in live else x.detach()
     q = attn.c_q(x.detach() if freeze_queries else x).view(B, T, attn.n_head, attn.head_dim)
     k = attn.c_k(kx).view(B, T, attn.n_kv_head, attn.head_dim)
@@ -143,7 +144,8 @@ def attention(attn, x, ve, cos_sin, window, held, freeze_queries=False, live=(),
 def cut_forward(model, idx, targets, held=True, freeze_queries=False, live=(), live_blocks=None, key_rows=None):
     """GPT.forward on the cut graph (held=False: the model's own forward). Returns the token losses [B, T] (None
     without targets), the nine sites, the top stream and each block's attention and MLP outputs (what synthesis mode
-    differentiates). key_rows: per block, the rows that read its live key input's credit (None: exact)."""
+    differentiates). key_rows: per block, the rows that read its live key path's credit at the block input, before
+    the key branch's RMSNorm, where the record's input-key probes move it (None: exact)."""
     m = um()
     cos_sin = (model.cos[:, :idx.shape[1]], model.sin[:, :idx.shape[1]])
     e = model.transformer.wte(idx)
@@ -154,8 +156,10 @@ def cut_forward(model, idx, targets, held=True, freeze_queries=False, live=(), l
         x = model.resid_lambdas[i] * x + model.x0_lambdas[i] * x0
         ve = arch.value_embedding(model, idx, i, ngram)
         open_ = live if live_blocks is None or i in live_blocks else ()  # E17: the live paths of chosen blocks only
-        a = attention(block.attn, m.norm(x), ve, cos_sin, model.window_sizes[i], held, freeze_queries, open_,
-                      None if key_rows is None else key_rows[i])
+        key_x = None
+        if key_rows is not None and held and 'keys' in open_:  # norm(x) in value; the read before the norm
+            key_x = m.norm(ReadCredit.apply(x, key_rows[i]))
+        a = attention(block.attn, m.norm(x), ve, cos_sin, model.window_sizes[i], held, freeze_queries, open_, key_x)
         x = x + a
         sites.append(x)
         attn_out.append(a)
@@ -804,22 +808,24 @@ class H8:
             self.reset(phase)
             self.update(next(i for i, b in enumerate(self.schedule, 1) if b[0] == phase), batch)
 
-    def key_rows(self):
-        """E17's key draws: for each block, key_draws rows of the Hadamard basis chosen at random with random column
-        signs, fresh each update, as the record draws them (key_input_credits). key_assign 'shared' (the record's):
-        every token reads the same rows; 'token': the block's basis, permuted, split into K = width / m blocks of m
-        rows, token t reading block t mod K, so neighbouring tokens' errors are uncorrelated. None: exact."""
+    def key_rows(self, sequences):
+        """E17's key draws: for each block and sequence, key_draws rows of the Hadamard basis chosen at random with
+        random column signs, fresh each update, as the record draws them (key_input_credits, each sequence from its
+        own generator). key_assign 'shared' (the record's): every token of the sequence reads the same rows; 'token':
+        the sequence's basis, permuted, split into K = width / m blocks of m rows, token t reading block t mod K, so
+        neighbouring tokens' errors are uncorrelated. None: exact."""
         m = self.o['key_draws']
         if not m:
             return None
         W, H, out = self.settings.model.n_embd, self.scheme.hadamard, []
         for _ in range(self.settings.model.n_layer):
-            order = torch.randperm(W, device=self.device, generator=self.key_generator)
-            signs = torch.randint(0, 2, (W,), device=self.device, generator=self.key_generator).float() * 2 - 1
-            if self.o['key_assign'] == 'token':
-                out.append((H[order] * signs).view(W // m, m, W))
-            else:
-                out.append(H[order[:m]] * signs)
+            per = []
+            for _ in range(sequences):
+                order = torch.randperm(W, device=self.device, generator=self.key_generator)
+                signs = torch.randint(0, 2, (W,), device=self.device, generator=self.key_generator).float() * 2 - 1
+                per.append((H[order] * signs).view(W // m, m, W) if self.o['key_assign'] == 'token'
+                           else H[order[:m]] * signs)
+            out.append(torch.stack(per))
         return out
 
     def describe(self):
@@ -862,7 +868,7 @@ class H8:
                 top, embedding = keep['top'], keep['embedding']
             elif o['mode'] == 'cut':
                 losses, sites, top, _, _ = cut_forward(self.model, x, y, True, o['freeze_queries'], o['live_paths'],
-                                                       o['live_blocks'] or None, self.key_rows())
+                                                       o['live_blocks'] or None, self.key_rows(len(x)))
                 loss, embedding = losses.sum() / (y != -1).sum(), sites[0]
             else:
                 each = {} if self.shaper is not None else None

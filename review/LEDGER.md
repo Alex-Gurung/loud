@@ -408,3 +408,34 @@ wrong or not worth it) or **deferred** (why, and what it waits on). "Same as" po
 | 2 | major | E14 gets a final verdict before its second stage | fixed | The second stage (target x onset at lambda 0.3) has run; the board counts follow-up arms once they have results: all null (best -0.001) |
 | 3 | minor | E16's gains mix seed sets | fixed | Same as results-claude #4 |
 | 4 | minor | Gated-off experiments show as waiting | fixed | The board marks an experiment `skipped` when its gate skipped every training arm (E13); E7's arms ran (results-claude #5) |
+
+## Round 9: the autonomous follow-ups (E17's key paths, E19, E20, E5 built, key transport), 2026-10-30
+
+Code reviewed: `git diff 1114022..8077df4` (loud/cut.py deep_readout, key_blocks, key_probes, key_transport; loud/h8.py
+ReadCredit, key_draws, key_assign, lr_mult; loud/diagnostics.py key_paths; loud/board.py verdicts).
+
+### 20261030T133338Z-code-codex.md
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | major | H8's partial key read projects the credit after the key branch's RMSNorm; the record's probes move the block input before it, so H8 computed J(Pg) for P(Jg) | fixed | `cut_forward` gives the key branch norm(ReadCredit(x)) (the same value); `h8_knobs` checks the gradient is P(Jg). The E17 arms that read keys through rows (key_draws_*, key_token_*, b357_token_*) rerun; their earlier numbers are marked as the old placement until then |
+| 2 | major | E19's and E20's verdicts crash on a pending baseline | fixed | Both require a non-null baseline mean |
+| 3 | major | E20's verdict passes on batch 8 while its stated test is batch 16 | fixed | The verdict waits for batch 16's pair; batch 8's cost is shown as it lands |
+| 4 | minor | Every deep-readout solve syncs the GPU with the CPU (112 per update) | fixed | `solve_ex`, its status checked once per estimate; the queued timing run (e5.time_deep) takes the change; the running e5.chain_deep keeps the old code (its loss is unaffected, its time is not read) |
+| - | (suite) | `h8_variants_run` rejects a float32 cosine of 1.0000044 | fixed | The cosine bounds allow 1e-5 of rounding |
+
+### 20261030T1400Z-research-claude.md (loud-reviewer, research lens, on 8077df4)
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | major | The board compares one-seed chain arms with chain_record's two-seed mean | fixed | `chain_pairs`: each chain arm against the record on the seeds both have, labelled with them (E5 and E17) |
+| 2 | major | E5 as built saves 1-2% of a Cut update; the deep path builds the own-query context three times and solves by LU | fixed (code), open (finding) | One pass per sequence with one context; Cholesky solves (ridge: positive definite) without a sync per solve. The finding stands in the README: the record's stream cycles are a small share of a Cut update (128 rows per site was no faster than 512); dedicated-GPU timing runs (e5.time_deep, e5.time_record) settle the number |
+| 3 | major | Part 0 takes S1's whole cycle: balanced in the serial harness, not on 8 GPUs | fixed | The GPUs of a sequence split S1's tokens (each token's system is its own); scalars' moves likewise |
+| 4 | major | E5 built before the maintainers' answer; README misstated v2's rule | fixed (doc) | Status row, README and board: v2 says ask, then build; built as a measurement by the user's call not to ask; not admissible until the linear-consumer question is settled; the restricted variant waits on the timing |
+| 5 | major | "18% less time" is not what the runs show | fixed (doc) | README: at matched load removing every key probe saves 12-13%; dedicated-GPU timing queued |
+| 6 | major | H8's key_draws share rows across the batch; the record draws per sequence | fixed | `key_rows(sequences)`: each sequence its own rows ([B, m, W], [B, K, m, W]); `h8_knobs` checks; the arms rerun with codex #1's placement fix |
+| 7 | major | Boost's cost "about 0.019" is seed 0 | fixed (doc) | 0.014 over three seeds (+0.018, +0.012, +0.012) |
+| 8 | minor | The deep path draws 2 bases where the record draws 9, so chain_deep is unpaired | fixed | The skipped sites' bases are drawn and dropped; `cut_deep_readout` checks the generators end where the record's do. The running e5.chain_deep predates it; e5.chain_deep_paired runs the fixed code |
+| 9 | minor | E5's verdict quotes the unridged solve | fixed | The board reads the ridged medians (lowest 0.9853 at 20%) and gives the unridged beside them; README too |
+| 10 | nit | "to 1e-4" | fixed (doc) | 4e-4 on the CPU models, 1e-3 on trained weights |
+| 11 | nit | Stale seed counts (E19, E20) | fixed (doc) | E19's K = 4 arms at three seeds; E20 +0.147 |
