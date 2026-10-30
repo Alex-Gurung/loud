@@ -842,6 +842,9 @@ class H8:
             self.optimizer, self.phase = optimizer, phase
             self.labels = rate_labels(optimizer, self.settings.lr)
         m.set_rate(self.optimizer, phase_step, horizon, self.settings.warmdown, self.settings.final)
+        if phase == 'cut' and o['cut_lr_mult'] != 1:  # E19: the Cut step alone (set_rate restarts from initial_lr)
+            for group in self.optimizer.param_groups:
+                group['lr'] *= o['cut_lr_mult']
         fields = dict(current_rates(self.optimizer, self.labels), phase=phase)
         x, y = batch[:, :-1].contiguous(), batch[:, 1:].contiguous()
         compare = bool(o['compare_every']) and step % o['compare_every'] == 0

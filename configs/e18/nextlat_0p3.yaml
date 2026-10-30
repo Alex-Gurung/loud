@@ -4,7 +4,7 @@
 experiment: e18
 variant: nextlat_0p3
 task: h8
-seeds: [0, 1]
+seeds: [0, 1, 2]  # seed 2 added: v2 reads differences under 0.02 only at three seeds
 priority: 40
 after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
 args:

@@ -1,0 +1,15 @@
+# E19 (added after the results review): E6's K = 4 by token with only the Cut phase's rates times 0.7 (cut_lr_mult;
+# Boost keeps the record's). The lr_mult arms scaled Boost too, so their cost mixed a different Boost with a different
+# Cut step; this asks the question E6 needs: does the partial-row gradient want a smaller Cut step?
+experiment: e19
+variant: token_k4_cutlr0p7
+task: h8
+seeds: [0, 1, 2]
+priority: 37
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  rows: 128
+  row_assign: token
+  cut_lr_mult: 0.7

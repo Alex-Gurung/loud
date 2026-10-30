@@ -217,13 +217,57 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
                     f'{low["c100"]:.4f} at 100%; unridged {plain["c20"]:.4f} and {plain["c100"]:.4f}). v2: ask the '
                     f'maintainers, then build; built as a measurement, not admissible until the linear-consumer '
                     f'question is settled.')
-            paired = chain_pairs(by_arm, 'e5', ['chain_deep', 'chain_deep_paired'])
-            if paired:
-                note += ' On the chain, against the record unchanged on the same seeds: ' + ', '.join(paired) + '.'
+            paired = chain_pairs(by_arm, 'e5', ['chain_deep_paired'])
+            unpaired = chain_pairs(by_arm, 'e5', ['chain_deep'])
+            if paired or unpaired:
+                note += (' On the chain, against the record unchanged on the same seed: ' + ', '.join(paired + [
+                    u + ' [first build: different draws, not paired]' for u in unpaired]) +
+                         '; one-seed chain differences under 0.02 are noise until a repeat of the record sets the floor.')
             return 'met', note
         return 'not met', f'Sites under 0.95: {failing}.'
-    if e['id'] == 'e9':  # gated on E8's intervention, which did not help
-        return 'skipped', 'Its gate (E8 shows per-direction scaling matters) did not pass: E8 is not met.'
+    mean = lambda key: by_key.get(key, {}).get('val_mean')
+    if e['id'] == 'e9':  # v2's gate: E8 shows per-direction scaling matters with exact gradients (the proxy setting)
+        snr, control, rate = mean('e8.snr'), mean('e8.snr_control'), mean('e8.snr_rate')
+        if None in (snr, control, rate):
+            return 'waiting', 'Waiting for E8\'s exact-gradient arms (its gate).'
+        passed = snr < min(control, rate) - 0.02
+        return ('waiting' if passed else 'skipped'), (
+            f'Gate: with exact gradients SNR scaling scores {snr:.4f} against the control {control:.4f} and the '
+            f'rate control {rate:.4f}: ' + ('per-direction scaling matters, E9 may run.' if passed else
+                                            'per-direction scaling does not help, so E9 does not run.'))
+    if e['id'] == 'e16':  # the fixed model's cells on the track-3 arms' seeds (0-1); the closer pair on held-out loss
+        seeds = {0, 1}
+        four = [seed_mean(by_arm.get(k, []), seeds) for k in (BP4, 'e16.bp_track3', CUT, 'e16.h8_track3')]
+        if any(v is None for v in four):
+            return 'waiting', 'Waiting for the four arms.'
+        bp, h8 = four[0] - four[1], four[2] - four[3]
+        note = f'Track-3 gain on seeds 0-1: backprop {bp:+.4f}, H8 {h8:+.4f} (leaderboard on 30M: +0.127).'
+        held = lambda key, seeds: [r['heldout_loss'] for r in by_arm.get(key, [])
+                                   if r['seed'] in seeds and r.get('heldout_loss') is not None]
+        for trainer in ('bp', 'h8'):
+            plain, full = held(f'e16.{trainer}_track3_plain', seeds), held(f'e16.{trainer}_track3', seeds)
+            if plain and full and len(plain) == len(full):
+                note += (f' The n-gram tables alone (held-out loss, {len(plain)} seed{"s" if len(plain) > 1 else ""}):'
+                         f' {trainer} {statistics.fmean(plain) - statistics.fmean(full):+.4f}.')
+        return ('met' if (bp > 0) == (h8 > 0) else 'not met'), note
+    if e['id'] == 'e18':  # read as arms land, each 30M pair beside its 10M counterpart
+        own18 = {a['variant']: a for a in by_key.values() if a['experiment'] == 'e18' and a['val_mean'] is not None}
+        g = lambda v: own18[v]['val_mean'] if v in own18 else None
+        ten = {'token_k4': ('e6.token_k4', SYNTH), 'time_k4': ('e6.time_k4', SYNTH), 'nextlat_0p3': ('e14.lambda_0p3', CUT),
+               'nextlat_1': ('e14.lambda_1', CUT), 'nextlat_3': ('e14.lambda_3', CUT), 'h8_cut': (CUT, BP4)}
+        pairs = [('token_k4', 'h8_synth'), ('time_k4', 'h8_synth'), ('nextlat_0p3', 'h8_cut'), ('nextlat_1', 'h8_cut'),
+                 ('nextlat_3', 'h8_cut'), ('h8_cut', 'bp_b4_pr40'), ('live_keys', 'h8_cut'), ('live_keys_b357', 'h8_cut')]
+        found = []
+        for a, b in pairs:
+            if g(a) is None or g(b) is None:
+                continue
+            text = f'{a} - {b} {g(a) - g(b):+.3f} ({own18[a]["counted"]} seeds'
+            if a in ten and mean(ten[a][0]) is not None and mean(ten[a][1]) is not None:
+                text += f'; 10M {mean(ten[a][0]) - mean(ten[a][1]):+.3f}'
+            found.append(text + ')')
+        if not found:
+            return 'waiting', 'Waiting for the first 30M pair.'
+        return 'n/a', 'At 30M: ' + '; '.join(found) + '. Differences under 0.02 need three seeds (v2).'
     if e['id'] == 'e12':
         return 'skipped', 'No experiment produced a winner to take to 30M; E18 runs the length check in H8.'
     if e['id'] == 'e17':  # read as arms land: H8 arms against the cut's gap, chain arms against the record's chain
@@ -238,13 +282,15 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
         out = f'Share of the {high - low:.3f} gap recovered: {shares}.'
         paired = chain_pairs(by_arm, 'e17', [v for v, a in done.items() if a['task'] == 'cut' and v != 'chain_record'])
         if paired:
-            out += ' Real chain, paired with chain_record seed by seed: ' + ', '.join(paired) + '.'
+            out += (' Real chain, paired with chain_record seed by seed: ' + ', '.join(paired) + ' (one-seed chain '
+                    'differences under 0.02 are noise until chain_record_repeat sets the floor).')
         left = len(mine) - len(done)
         return 'n/a', out + (f' ({left} arms still running or queued.)' if left else '')
     if e['id'] == 'e19':
         cells19 = {a['variant']: a for a in by_key.values() if a['experiment'] == 'e19' and a['val_mean'] is not None}
         out = []
-        for prefix, one, target in (('cut_lr', CUT, BP4), ('token_k4_lr', 'e6.token_k4', SYNTH)):
+        for prefix, one, target in (('cut_lr', CUT, BP4), ('token_k4_lr', 'e6.token_k4', SYNTH),
+                                    ('token_k4_cutlr', 'e6.token_k4', SYNTH)):
             arms = {v: a['val_mean'] for v, a in cells19.items() if v.startswith(prefix)}
             if one in by_key and by_key[one]['val_mean'] is not None:
                 arms[prefix + '1'] = by_key[one]['val_mean']
@@ -252,7 +298,9 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
                 continue
             v, best = min(arms.items(), key=lambda kv: kv[1])
             rate = v[len(prefix):].replace('p', '.')
-            out.append(f'{prefix[:-3]}: best at {rate}x ({best - arms.get(prefix + "1", best):+.4f} '
+            label = {'cut_lr': 'cut, every rate', 'token_k4_lr': 'K = 4, every rate',
+                     'token_k4_cutlr': 'K = 4, Cut-phase rates only'}[prefix]
+            out.append(f'{label}: best at {rate}x ({best - arms.get(prefix + "1", best):+.4f} '
                        f'against 1x), {best - by_key[target]["val_mean"]:+.3f} from {target}')
         return ('n/a', '; '.join(out) + '.') if out else ('waiting', 'Waiting for the first rates.')
     if e['id'] == 'e20':  # the test is batch 16's pair; batch 8's is read as it lands
@@ -266,7 +314,9 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
                          for n, (c, d) in sorted(found.items()))
         if 16 not in found:
             return 'waiting', 'Waiting for batch 16\'s two arms' + (f'; so far {text}.' if text else '.')
-        return ('met' if found[16][0] <= 0.02 else 'not met'), f'Batch 4: K = 4 costs +0.150; {text}.'
+        k4 = (mean('e6.token_k4') - base) if mean('e6.token_k4') is not None else None
+        head = f'Batch 4: K = 4 costs {k4:+.3f}; ' if k4 is not None else ''
+        return ('met' if found[16][0] <= 0.02 else 'not met'), f'{head}{text}.'
     # (gates and diagnostics have no loss: they never hold a verdict back)
     own = [a for a in by_key.values() if a['experiment'] == e['id'] and a['task'] not in NO_LOSS]
     cells = {a['variant']: a for a in own if not a['followup'] or a['val_mean'] is not None}
@@ -338,21 +388,6 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
             f'Partial rows cost {cost:+.4f}; SNR scaling recovers {recovered:.0%} of it (needs 50%) and ' \
             f'{"beats" if h["h8_snr"] < h["h8_rate"] else "trails"} the rate control ({h["h8_snr"]:.4f} against ' \
             f'{h["h8_rate"]:.4f}).'
-    if e['id'] == 'e18':
-        g = lambda v: cells[v]['val_mean'] if v in cells else None
-        pairs = [('token_k4', 'h8_synth'), ('time_k4', 'h8_synth'), ('nextlat_0p3', 'h8_cut'), ('nextlat_1', 'h8_cut'), ('nextlat_3', 'h8_cut'),
-                 ('h8_cut', 'bp_b4_pr40'), ('live_keys', 'h8_cut'), ('live_keys_b357', 'h8_cut')]
-        found = [f'{a} - {b} {g(a) - g(b):+.3f}' for a, b in pairs if g(a) is not None and g(b) is not None]
-        return 'n/a', 'At 30M: ' + '; '.join(found) + ' (10M: +0.150, +0.184, -0.001, +0.160).'
-    if e['id'] == 'e16':  # the fixed model's cells on the track-3 arms' seeds (0-1)
-        seeds = {0, 1}
-        four = [seed_mean(by_arm.get(k, []), seeds) for k in (BP4, 'e16.bp_track3', CUT, 'e16.h8_track3')]
-        cells = {k: v for k, v in cells.items() if not k.endswith('_plain')}  # the closer pair reads held-out loss
-        if any(v is None for v in four):
-            return 'waiting', 'Waiting for the four arms.'
-        bp, h8 = four[0] - four[1], four[2] - four[3]
-        return ('met' if (bp > 0) == (h8 > 0) else 'not met'), \
-            f'Track-3 gain on seeds 0-1: backprop {bp:+.4f}, H8 {h8:+.4f} (leaderboard on 30M: +0.127).'
     return 'n/a', 'Read the arms and their checks.'
 
 

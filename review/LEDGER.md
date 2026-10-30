@@ -439,3 +439,27 @@ ReadCredit, key_draws, key_assign, lr_mult; loud/diagnostics.py key_paths; loud/
 | 9 | minor | E5's verdict quotes the unridged solve | fixed | The board reads the ridged medians (lowest 0.9853 at 20%) and gives the unridged beside them; README too |
 | 10 | nit | "to 1e-4" | fixed (doc) | 4e-4 on the CPU models, 1e-3 on trained weights |
 | 11 | nit | Stale seed counts (E19, E20) | fixed (doc) | E19's K = 4 arms at three seeds; E20 +0.147 |
+
+### 20261030T1930Z-results-claude.md (loud-reviewer, results lens, README follow-ups and board at 4acfaa7)
+
+Every quoted mean, share and seed count reproduced; the findings are about readings and the board.
+
+| # | Severity | Claim | Status | Note |
+| --- | --- | --- | --- | --- |
+| 1 | major | The board can never give E16 a verdict (its held-out-only pair blocks the general check) | fixed | E16's branch runs first and reads the pair's held-out means: met (+0.141 and +0.143), the n-gram tables +0.040 under backprop |
+| 2 | major | E18's two-seed differences under 0.02 stated as results | fixed (doc), queued | README rewords (NextLat's 10M cost vanishes; the -0.005 to -0.008 is not yet a result); seed 2 of seven E18 arms queued; the board's E18 note gives seed counts and the rule |
+| 3 | major | "Waiting, on purpose" says E8 and E14's follow-ups wait; both ran | fixed (doc) | Rewritten: E8 ran (its condition held in part: K = 4 adds below-SNR-1 energy mainly in the MLP), E9 skipped by its exact-gradient gate, E14's second stage null, E15's follow-ups not run (Boost null in H8), E12 no winner |
+| 4 | minor | E4's +0.337 mixes seed sets | fixed (doc) | +0.328, with the per-seed gains |
+| 5 | minor | The key_paths mechanism leaves out the diagnostics against it | fixed (doc) | backprop's weights (block 3 0.9%), the handoff's block 1 and values rows reported; the mechanism called a conjecture |
+| 6 | minor | E19's lr_mult changes Boost too | fixed (doc), queued | "the whole recipe's rate"; `cut_lr_mult` (Cut phase only, checked in h8_knobs) with K = 4 at 0.5/0.7/1.4x queued |
+| 7 | minor | Shared-GPU timings: wrong basis for "matched", E5's time from old code, cut_smoke vs cut_prefix not like for like | fixed (doc) | Only same-GPU, same-time pairs quoted (chain_nokeys 48.6 vs chain_record.s1 56.0; first-build E5 54.3 vs chain_record.s0 55.7, labelled first build); the rows comparison dropped |
+| 8 | minor | E5's ridged readout misstated | fixed (doc) | S4-S6 0.985-0.988, S3 0.992; the ridge's 10th percentile 0.90-0.93 at S3-S6 |
+| 9 | minor | Board pairs the unpaired e5.chain_deep; the chain's noise floor is unmeasured | fixed, queued | chain_deep labelled unpaired; `e17.chain_record_repeat` (seed 0 again) measures the floor; the notes say one-seed chain differences under 0.02 are noise until then |
+| 10 | minor | e10.agree_055 is unstable | fixed (doc) | README says so |
+| 11 | minor | Hard-coded verdicts and a stale table | fixed | E9's skip computed from e8.snr against its controls; E18's 10M figures and E20's batch-4 cost from the runs; `collect.py` table regenerated |
+| 12 | nit | E11's share, "1-2%", 1.4x's +0.011, "the same to 3 decimals", the superseded arms' caveat, chain_keys_b1357 unlisted | fixed (doc) | All corrected in the README |
+
+### 20261030T192309Z-code-codex.md (verification of round 9's fixes)
+
+No findings: every round-9 fix checked (H8's read placement and per-sequence rows, the deep path's token split, Cholesky,
+pairing, uneven splits, board pairs and guards, prune); the full CPU suite passed (134 tests).

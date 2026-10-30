@@ -692,6 +692,15 @@ def h8_knobs(scratch):
     rates = lambda **kw: [g['lr'] for g in h8.H8(h8_options(dict(preset='2m', **kw)), torch.device('cpu'), 0, 10,
                                                  torch.zeros(0, CUT_SEQ, dtype=torch.long)).optimizer.param_groups]
     assert all(abs(b - 2 * a) < 1e-12 for a, b in zip(rates(), rates(lr_mult=2.0)))  # E19: every group's rate scales
+    def stepped(**kw):  # cut_lr_mult: the Cut phase's rates scale, Boost's do not
+        o = h8_options(dict(preset='2m', **kw))
+        t = h8.H8(o, torch.device('cpu'), 0, 10, torch.zeros(0, CUT_SEQ, dtype=torch.long))
+        batch = torch.randint(0, 64, (o['batch'], CUT_SEQ))
+        return {phase: t.update(next(i for i, b in enumerate(t.schedule, 1) if b[0] == phase), batch)[1]
+                for phase in ('boost', 'cut')}
+    plain, half = stepped(), stepped(cut_lr_mult=0.5)
+    assert half['boost']['lr'] == plain['boost']['lr']
+    assert all(abs(half['cut']['lr'][k] - 0.5 * plain['cut']['lr'][k]) < 1e-12 for k in plain['cut']['lr'])
     o = h8_options(dict(preset='2m', clip_credit=True, clip_factor=1.0))
     h8.H8(o, torch.device('cpu'), 0, 10, torch.zeros(0, CUT_SEQ, dtype=torch.long))
     assert h8.CLIP == 1.0 and h8.RUNWAY == h8.RUNWAY_V2
@@ -700,7 +709,7 @@ def h8_knobs(scratch):
     assert h8.RUNWAY == (0.1, 0.4) and h8.CLIP == 3.0
     for bad in (dict(live_paths=['keys']), dict(clip_factor=2.0), dict(mode='cut', live_paths=['queries']),
                 dict(mode='cut', key_draws=64), dict(mode='cut', live_paths=['values'], key_draws=64),
-                dict(mode='cut', live_paths=['keys'], key_draws=10 ** 6), dict(lr_mult=0.0),
+                dict(mode='cut', live_paths=['keys'], key_draws=10 ** 6), dict(lr_mult=0.0), dict(cut_lr_mult=-1.0),
                 dict(mode='cut', live_paths=['keys'], key_draws=48, key_assign='token'),
                 dict(mode='cut', live_paths=['keys'], key_assign='token')):
         try:

@@ -2,7 +2,7 @@
 experiment: e18
 variant: bp_b4_pr40
 task: proxy
-seeds: [0, 1]
+seeds: [0, 1, 2]  # seed 2 added: v2 reads differences under 0.02 only at three seeds
 priority: 40
 after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0]
 args:

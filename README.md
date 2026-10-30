@@ -56,15 +56,15 @@ Waiting, on purpose:
   (below), but v2 says ask the maintainers first: its solved credits feed queries, keys, the gate and MLP units,
   not only linear consumers (30M record #3's convention). We have not asked (the user's call); its chain results are
   not admissible until that is settled. v2's restricted variant (solved credits to linear consumers only) waits on
-  the timing: as built, E5 saves little of a Cut update (below).
-- **E8's intervention and E9** wait in `configs/followups/`, which a directory submission skips: E8's (both settings,
-  proxy and H8, with their smoke runs) only if its diagnostic shows partial rows pushing a large share of the
-  momentum's energy below SNR 1, E9 (P3) only if E8 shows per-direction scaling matters with exact gradients. E9's
-  kernel version follows only if it beats `e1.bp_b8` by 0.02.
-- **E14's and E15's follow-ups** (the teacher and onset variants) wait in `configs/followups/` for the first arms.
-- **E12** (30M, P3, rented 8×H100): there is no 8-GPU path; its one-GPU backprop run waits in `configs/followups/e12/`.
-- **Confirming a winner on the real chain** (the Cut chain on the 1M slice): its configs are written once H8 names
-  the winners, with the H5 flags (`rows`, `row_assign`, `prior`, `row_budget`).
+  the timing: so far E5 saves little of a Cut update (below).
+- **E9** (P3) does not run: v2 gates it on E8 showing per-direction scaling matters with exact gradients, and in E8's
+  proxy setting SNR scaling scores 3.913 against the control's 3.782 and the rate control's 3.854.
+- **E15's follow-ups** (its lambda variants) are not run: in H8 Boost does nothing (Differences below), so they
+  would not transfer to the chain.
+- **E12** (30M, P3, rented 8xH100): no experiment produced a winner to take there; its one-GPU backprop run waits in
+  `configs/followups/e12/`. E18 runs the length question in H8.
+- **Confirming a winner on the real chain** (the Cut chain on the 1M slice): no H8 experiment produced a winner;
+  E17's key findings run on the real chain instead (below).
 
 **First queue (2026-10-29, one H100, four jobs at a time):** all 147 runnable jobs finished, none failed, and 15
 were skipped by their gates; it took about 8 hours of wall-clock. Every verification passed (verification 1 at
@@ -78,75 +78,87 @@ diagnostic reads them (`e1.bp_b8.s0` with ANVIL II's state, `e1.h8_synth.s0`), i
 shared volume has 15 GB left.
 
 **Follow-ups (2026-10-30, three pods, autonomous loop).** Each answers a question the first queue left open; the board
-has every arm.
+has every arm. v2's rule holds throughout: a difference under 0.02 is not a result without three seeds.
+- **E8 and E14's second stage ran.** E8's build condition held in part: at 100%, exact credit already has 0.61-0.98
+  of each matrix's energy below SNR 1 and K = 4 adds mainly in the MLP matrices (c_fc 0.61 -> 0.84), so the
+  intervention ran in both settings. In H8, SNR scaling makes partial rows worse (it recovers -92% of their cost)
+  and trails the plain rate control; with exact gradients it also loses (above). E14's second stage (teacher x
+  onset at lambda 0.3) is null like the first (best -0.001).
 - **E17, where H8's cut loses credit:** of the 0.160 gap from `e1.h8_cut` to matched backprop, keys live in every
   block recover 71%, values 25%, both 91% (means of three seeds, per-seed spread about 3 points). The key path's
   share sits in three blocks: keys live only in block 3 recover 60%, block 5 64%, block 7 55%, each of the other
-  five 1-2%, and blocks 3, 5 and 7 together 68%. The `key_paths` diagnostic shows the same split in one gradient: on
-  the cut model's final weights block 5's key path removes 54% of the cut gradient's error, block 3 23%, block 7
-  10%, the rest under 1%; at the 20% handoff it is blocks 1, 3 and 5 (15% each) and 7 (4%), the blocks with value
-  embeddings, whose values carry the token itself, so their keys need context that earlier blocks must learn to
-  write. Values are spread out: the value-embedding blocks' values recover 18%, the others' 10%; keys and values in
-  blocks 3, 5, 7 recover 80%. Read through fewer rows (the record's input-key probes take 512 per token at every
-  block), shared rows recover -4/27/49/63% at m = 32/64/128/256 and token-assigned rows 9/37/54% at 32/64/128;
-  blocks 3, 5, 7 through 256 token-assigned rows still recover 63%, under a fifth of the record's key probes (these
-  partial reads sat after the key branch's RMSNorm; review round 9 moved them before it, where the record's probes
-  move the input, and they rerun when the chain runs free the GPUs). At
-  30M keys recover 71% of the (smaller) gap on both seeds. Running on the real chain: PR #40 unchanged at full
-  length and with its key probes at blocks 3, 5, 7 or at block 5 only (`key_blocks`), every arm paired with the
-  record draw for draw (none of these options draws random numbers). Timing on shared GPUs is loose: at matched load
-  (similar Boost step times) removing every key probe saves 12-13% of a Cut update (`chain_nokeys`,
-  `chain_key_transport` 48 s against the record's 55 s); dedicated-GPU timing runs are queued.
+  five 0.5-1.6%, and blocks 3, 5 and 7 together 68%. Values are spread out: the value-embedding blocks' values
+  recover 18%, the others' 10%; keys and values in blocks 3, 5, 7 recover 80%. The `key_paths` diagnostic (one
+  gradient, one sequence) agrees in part: on the cut model's final weights block 5's key path removes 54% of the cut
+  gradient's error, block 3 23%, block 7 10%, the rest under 1%; on backprop's weights block 5 40%, block 7 7% and
+  block 3 only 0.9% (yet block 3's keys alone recover 60% in training); at the 20% handoff blocks 1, 3 and 5 at
+  15% each and 7 at 4% (yet block 1's keys recover 1.6% in training), and there values remove 54% against keys'
+  41%. That blocks 1, 3, 5, 7 carry value embeddings (values that are the token itself, so their keys need context
+  earlier blocks must write) is a conjecture the data only partly fit. Read through fewer rows (the record's
+  input-key probes take 512 per token at every block), shared rows recovered -4/27/49/63% at m = 32/64/128/256 and
+  token-assigned rows 9/37/54% at 32/64/128, blocks 3, 5, 7 through 256 token-assigned rows 63%; these partial
+  reads sat after the key branch's RMSNorm and shared their rows across the batch, where the record's probes move
+  the input before it with each sequence's own rows (review round 9), and they rerun when the chain runs free the
+  GPUs.
+  **On the real chain** (running, full 10M length): PR #40 unchanged (two seeds, and seed 0 again as
+  `chain_record_repeat`: the chain is not bit-reproducible on the GPU, so the repeat sets the noise floor for these
+  one-seed differences), its key probes at blocks 3, 5, 7 (two seeds), at block 5, at 1, 3, 5, 7, none at all, and
+  key transport (below), each paired with the record draw for draw (none of these options draws random numbers).
+  Timing on shared GPUs is loose; the only like-for-like pair so far is two runs sharing a GPU at once:
+  `chain_nokeys` takes 48.6 s per Cut update against `chain_record.s1`'s 56.0 s (13% less); dedicated-GPU timing
+  runs are queued.
   **Key transport:** the record's input-key probes (512 central pairs per token per block) measure the K branch's
   input credit, and that branch is an RMSNorm then c_k, a linear map, so the raw key errors the record already
   measures for c_k's own gradient, times c_k's weight, through one forward norm step (`norm_move`, the record's
   value-path convention), give the same estimate: to 4e-4 on the CPU test models and 1e-3 on trained weights (review
-  round 9), the gradients at cosine 0.999999 (`key_transport`, check `cut_key_blocks`). Running on the real chain at
-  full length, with a dedicated-GPU timing run queued.
-- **E18, 30M:** H8 cut's gap to matched backprop shrinks from 0.160 to 0.123 (two seeds, 0.126 and 0.120); E6's
-  partial-row cost holds or grows (K = 4 by token +0.158, by time +0.188, against +0.150 and +0.184 at 10M);
-  NextLat helps more with the longer run: -0.005 at lambda 0.3, -0.008 at 1 and -0.007 at 3 (two seeds each; at 10M
-  lambda 1 and 3 cost +0.008 and +0.048), so an auxiliary loss that hurts a short run pays in a longer one, though
-  it levels off under E14's 0.02 bar. Keys live recover 71% of the 30M gap (both seeds), keys at blocks 3, 5, 7
-  only 64%.
-- **E10:** a binding clip (1x the median) costs +0.233 and agreement at 55% keeps 9.8% of the entries and costs
-  +0.78: neither rule helps once it acts.
+  round 9), the gradients at cosine 0.999999 (`key_transport`, check `cut_key_blocks`).
 - **The last 9% of E17:** keys and values live with Boost off lands on matched backprop to 0.0001 (three seeds),
   so H8's machinery is exact and the rest of the gap that keys and values leave is Boost's first 20%, which costs
   about 0.014 when the remainder is backprop (three seeds: +0.018, +0.012, +0.012; in the cut setting Boost is
   neutral).
+- **E18, 30M** (two seeds; seed 2 of the arms below runs when GPUs free): H8 cut's gap to matched backprop shrinks
+  from 0.160 to 0.123 (0.126 and 0.120); E6's partial-row cost stays (K = 4 by token +0.158, by time +0.188, against
+  +0.150 and +0.184 at 10M). NextLat's 10M cost vanishes: lambda 3 costs +0.048 at 10M (three seeds) and -0.007 at
+  30M; the -0.005 to -0.008 that lambdas 0.3, 1 and 3 give at 30M is under E14's bar and, at two seeds, not yet a
+  result. Keys live recover 71% of the 30M gap on both seeds; keys at blocks 3, 5, 7 only 64% (0.007-0.009 less in
+  loss than every block's: two seeds, not yet a result).
+- **E19, the rate check:** scaling the whole recipe's rates (Boost and Cut) does not help either estimator: H8 cut
+  at 0.5/0.7/1.4/2x costs +0.066/+0.022/+0.010/+0.068 and E6's K = 4 by token at 0.35/0.5/0.7/1.4x
+  +0.137/+0.066/+0.018/+0.010 against itself at 1x (three seeds each). These arms change Boost too, so they do not
+  say whether the partial-row gradient wants a smaller Cut step; arms that scale only the Cut phase's rates
+  (`cut_lr_mult`) are queued.
 - **E20, the batch check:** at batch 8, K = 4 by token still costs +0.147 against every row at batch 8 (three
   seeds; batch 4: +0.150), so the partial-row cost does not shrink when an update averages more tokens: the rows'
   noise scales like the tokens' own gradient noise. Batch 16 waits for GPU memory (44 GB) beside the chain runs.
-- **E11:** with the runway grid widened to 0.08-1.28 the rule acts (79-93% of tokens per site take the largest
-  move) and costs +0.289 (three seeds, +0.26 to +0.30): weighting credit by runway hurts.
-- **E4:** a 16-row judge moves `adapt_nowd` from +0.355 to +0.337: the judge's noise is not what fails.
+- **E10:** a binding clip (1x the median) costs +0.233; agreement at 55% keeps 9.8% of the entries and costs +0.78,
+  but it is unstable (training-loss spikes of 0.8 or more in every seed; seed 1 ends 0.09 off the others), so its
+  cost mixes the filter with divergence. Neither rule helps once it acts.
+- **E11:** with the runway grid widened to 0.08-1.28 the rule acts (83-95% of tokens per site take the largest
+  move, averaged over the run) and costs +0.289 (three seeds, +0.26 to +0.30): weighting credit by runway hurts.
+- **E4:** a 16-row judge gives `adapt_nowd` +0.328 against +0.355 with v2's 4 (three seeds; per seed -0.008,
+  -0.013, -0.061, one seed carrying most of it): the judge's noise is not what fails.
 - **E7:** the identity prior at m = 64 costs +0.149 and at m = 128 +0.086; it helps (E6's m = 128 costs +0.150)
   but not to 0.02.
+- **E16:** met: H8 orders the fixed model and the track-3 design as backprop does (seeds 0-1: +0.141 and +0.143).
+  The closer pair (the track-3 shape without its n-gram tables, held-out loss) agrees so far: the tables gain 0.040
+  under backprop (two seeds) and 0.043 under H8 (seed 0; seed 1 queued).
 - **E5 (diagnostic): passes.** Read with the chain's way of differencing in bf16 (`readout_delta`, each change
   carried as bf16 products), one probe cycle at S1 recovers every later site's credit at median cosine 0.997 or more
-  at 20% and 0.9999 at 100% (float32: the same to 3 decimals; whole bf16 copies: 0.01-0.05, which is the rounding of
-  that method, not of the chain). The 10th percentile at S7-S8 at 20% (0.65-0.71; float32 0.78-0.84) is the
-  model's nonlinearity early on; v2's ridged solve (the build's) lowers S3-S6 to medians 0.985-0.988 and lifts that
-  tail to 0.97-0.99, still over 0.95. v2's rule: ask the maintainers, then implement; we built it as a measurement
-  (see Waiting, on purpose).
+  at 20% and 0.9999 at 100% unridged (float32 the same to 2-3 decimals; whole bf16 copies: 0.01-0.05, which is the
+  rounding of that method, not of the chain). v2's ridged solve, which the build uses, gives medians of 0.985-0.988
+  at S4-S6 (S3 0.992) at 20%; its 10th percentile is 0.90-0.93 at S3-S6 and 0.97-0.99 at S7-S8 (unridged
+  0.65-0.71 there, the model's nonlinearity early on). v2's rule: ask the maintainers, then implement; we built it
+  as a measurement (see Waiting, on purpose).
   **Built** (`deep_readout` in the Cut chain, loud/cut.py): S1's full cycle runs through a copy of the record's chain
   kernel that keeps each move's change at S2-S8, each token's 512 x 512 system is solved with v2's ridge, and the
   cycles at S2-S8 are skipped; S0's cycle and every mixing scalar's 4 moves stay. On the CPU test model S0, S1 and
   the scalars equal the record's and S2's solved credit matches its measured one per token (median cosine > 0.99).
   The solved credit is least sure along the stream itself, so the scalars keep their moves (with v2's ridge the
   residual scalar's credit came out 3x off). The GPUs of a sequence split S1's tokens (each token's system is its
-  own), and the skipped sites' bases are still drawn, so the run stays paired with the record (review round 9; the
-  first full run, `e5.chain_deep`, predates both and is unpaired). Its speed is small so far: Cut updates of 54 s
-  against the record's 55 s at matched load, and the record's chain at 128 rows per site was no faster than at 512
-  (`verify.cut_smoke` against `verify.cut_prefix`), so the stream cycles are a small share of a Cut update;
-  dedicated-GPU timing runs are queued.
-- **E8:** in H8, SNR scaling makes partial rows worse (it recovers -92% of their cost) and trails the plain rate
-  control; E9, gated on E8, does not run.
-- **E19, the rate check:** PR #40's rates are about the best for both estimators: H8 cut at 0.5/0.7/1.4/2x costs
-  +0.066/+0.022/+0.011/+0.068 and E6's K = 4 by token at 0.35/0.5/0.7/1.4x +0.137/+0.066/+0.018/+0.010 against
-  itself at 1x (three seeds each). A noisier gradient does not want a smaller step here (ANVIL II's polar factor
-  sets the step's size), so neither the cut's gap nor E6's +0.15 is the rate.
+  own), and the skipped sites' bases are still drawn, so the run stays paired with the record (review round 9:
+  `e5.chain_deep_paired`; the first full run, `e5.chain_deep`, predates both and is unpaired). Its speed is small so
+  far: the first build takes 54.3 s per Cut update against `chain_record.s0`'s 55.7 s on the same GPU at once (2.5%
+  less); the rebuilt path's time comes from the dedicated-GPU timing runs.
 
 ## Running on GPUs
 
