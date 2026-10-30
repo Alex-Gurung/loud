@@ -1,0 +1,14 @@
+# E18 (added): NextLat at lambda 3 on 30M. On 10M a larger weight hurts (lambda 1: +0.008, 3: +0.048 against
+# e1.h8_cut), on 30M it helps (0.3: -0.005, 1: -0.008 against e18.h8_cut, two seeds each): the auxiliary loss pays
+# only with the longer run. Does lambda 3 reach E14's 0.02 at 30M?
+experiment: e18
+variant: nextlat_3
+task: h8
+seeds: [0, 1]
+priority: 37
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 30M
+  heldout: 32
+  mode: cut
+  nextlat: 3.0
