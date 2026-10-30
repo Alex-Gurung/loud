@@ -1,0 +1,16 @@
+# E17 (added): keys live in every block (71% of the cut's gap to backprop over three seeds), but each block's
+# key-input credit read through 64 random Hadamard rows with random column signs, fresh each update and shared by its
+# tokens: what 64 input-key probes per token would measure, as the record draws them (key_path_draws; it uses 512).
+# The sweep 32-256 says how many key probes the key path's share needs.
+experiment: e17
+variant: key_draws_m64
+task: h8
+seeds: [0, 1, 2]
+priority: 38
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  mode: cut
+  live_paths: [keys]
+  key_draws: 64

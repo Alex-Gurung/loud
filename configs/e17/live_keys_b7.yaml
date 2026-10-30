@@ -1,0 +1,16 @@
+# E17 (added): keys live in block 7 only. Over three seeds keys live in blocks 0-3 recover 62% of the cut's gap to
+# backprop and in blocks 4-7 67%, against 71% with every block: the halves overlap almost entirely, so one block's
+# key path may carry most of it. The record pays a full cycle of input-key probes (512) at every block; this sweep
+# says which single blocks would do.
+experiment: e17
+variant: live_keys_b7
+task: h8
+seeds: [0, 1, 2]
+priority: 38
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  mode: cut
+  live_paths: [keys]
+  live_blocks: [7]

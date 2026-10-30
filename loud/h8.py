@@ -62,6 +62,7 @@ from .train import current_rates, rate_labels, train
 
 SOFTCAP = 15
 SCHEME_SEED = 7907   # the probing scheme's signs: the job seed plus this
+KEY_SEED = 7919      # E17's key-probe rows: the job seed plus this
 PROBE_ROWS = 4       # held-out sequences E14's and E15's untimed logs measure
 AUX_LOG_EVERY = 50   # E14's cosine of its gradient to the next-token one at the top stream, every this many updates
 LATENT_LOG_EVERY = 10  # E15's per-sublayer readout and latent losses, every this many Boost updates
@@ -91,14 +92,35 @@ def token_losses(model, x, targets, head=None):
     return F.cross_entropy(z.flatten(0, 1), targets.flatten(), ignore_index=-1, reduction='none').view_as(targets)
 
 
-def attention(attn, x, ve, cos_sin, window, held, freeze_queries=False, live=()):
+class ReadCredit(torch.autograd.Function):
+    """The identity forward; backward passes on only the partial-row read of the incoming credit g [B, T, W]:
+    (g R^T) R / m for the m rows R (+-1 entries, E[R^T R / m] = I), in float32. What m probes per token would measure."""
+
+    @staticmethod
+    def forward(ctx, x, rows):
+        ctx.save_for_backward(rows)
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, g):
+        rows, = ctx.saved_tensors
+        with torch.autocast(g.device.type, enabled=False):
+            r = rows.float()
+            read = (g.float() @ r.T) @ r / r.shape[0]
+        return read.to(g.dtype), None
+
+
+def attention(attn, x, ve, cos_sin, window, held, freeze_queries=False, live=(), key_rows=None):
     """CausalSelfAttention.forward on the normed block input x. With `held`, the keys', values' and gate's input is
     detached: every token's keys and values are their clean ones while its query stays live (freeze_queries detaches
     the query's input too: record #9's Cut, without own queries). `live` names cross-token paths held keeps open
-    ('keys', 'values': the values and their gate), to measure what each carries."""
+    ('keys', 'values': the values and their gate), to measure what each carries. key_rows (with the keys live): the
+    key input's credit reaches x only through these rows' partial read (ReadCredit), the record's input-key probes."""
     m = um()
     B, T, _ = x.shape
     kx = x if not held or 'keys' in live else x.detach()
+    if key_rows is not None and held and 'keys' in live:
+        kx = ReadCredit.apply(x, key_rows)
     vx = x if not held or 'values' in live else x.detach()
     q = attn.c_q(x.detach() if freeze_queries else x).view(B, T, attn.n_head, attn.head_dim)
     k = attn.c_k(kx).view(B, T, attn.n_kv_head, attn.head_dim)
@@ -111,10 +133,10 @@ def attention(attn, x, ve, cos_sin, window, held, freeze_queries=False, live=())
     return attn.c_proj(m.attention(q, k, v, window[0]).contiguous().view(B, T, -1))
 
 
-def cut_forward(model, idx, targets, held=True, freeze_queries=False, live=(), live_blocks=None):
+def cut_forward(model, idx, targets, held=True, freeze_queries=False, live=(), live_blocks=None, key_rows=None):
     """GPT.forward on the cut graph (held=False: the model's own forward). Returns the token losses [B, T] (None
     without targets), the nine sites, the top stream and each block's attention and MLP outputs (what synthesis mode
-    differentiates)."""
+    differentiates). key_rows: per block, the rows that read its live key input's credit (None: exact)."""
     m = um()
     cos_sin = (model.cos[:, :idx.shape[1]], model.sin[:, :idx.shape[1]])
     e = model.transformer.wte(idx)
@@ -125,7 +147,8 @@ def cut_forward(model, idx, targets, held=True, freeze_queries=False, live=(), l
         x = model.resid_lambdas[i] * x + model.x0_lambdas[i] * x0
         ve = arch.value_embedding(model, idx, i, ngram)
         open_ = live if live_blocks is None or i in live_blocks else ()  # E17: the live paths of chosen blocks only
-        a = attention(block.attn, m.norm(x), ve, cos_sin, model.window_sizes[i], held, freeze_queries, open_)
+        a = attention(block.attn, m.norm(x), ve, cos_sin, model.window_sizes[i], held, freeze_queries, open_,
+                      None if key_rows is None else key_rows[i])
         x = x + a
         sites.append(x)
         attn_out.append(a)
@@ -742,6 +765,7 @@ class H8:
         self.optimizer = self.make_optimizer(self.phase, self.horizons[self.phase])
         self.labels = rate_labels(self.optimizer, s.lr)
         self.scheme = Scheme(self.o, s.model.n_embd, self.device, self.seed)
+        self.key_generator = torch.Generator(self.device).manual_seed(self.seed + KEY_SEED)
         self.ngram = NGram(s.model.vocab_size) if self.o['budget_theta'] else None  # E13: the stream so far
         self.reset_latent()
 
@@ -771,6 +795,19 @@ class H8:
         for phase in self.horizons:
             self.reset(phase)
             self.update(next(i for i, b in enumerate(self.schedule, 1) if b[0] == phase), batch)
+
+    def key_rows(self):
+        """E17's key draws: for each block, key_draws rows of the Hadamard basis chosen at random with random column
+        signs, fresh each update and shared by its tokens, as the record draws them (key_input_credits). None: exact."""
+        m = self.o['key_draws']
+        if not m:
+            return None
+        W, H, out = self.settings.model.n_embd, self.scheme.hadamard, []
+        for _ in range(self.settings.model.n_layer):
+            chosen = torch.randperm(W, device=self.device, generator=self.key_generator)[:m]
+            signs = torch.randint(0, 2, (W,), device=self.device, generator=self.key_generator).float() * 2 - 1
+            out.append(H[chosen] * signs)
+        return out
 
     def describe(self):
         return dict(name='h8', file=refs.TRAINERS['pr40'], settings={k: v for k, v in asdict(self.settings).items()
@@ -812,7 +849,7 @@ class H8:
                 top, embedding = keep['top'], keep['embedding']
             elif o['mode'] == 'cut':
                 losses, sites, top, _, _ = cut_forward(self.model, x, y, True, o['freeze_queries'], o['live_paths'],
-                                                       o['live_blocks'] or None)
+                                                       o['live_blocks'] or None, self.key_rows())
                 loss, embedding = losses.sum() / (y != -1).sum(), sites[0]
             else:
                 each = {} if self.shaper is not None else None

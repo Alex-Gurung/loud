@@ -638,13 +638,35 @@ def h8_knobs(scratch):
     assert torch.allclose(gw(held=True, live=['keys'], live_blocks=[0, 1]), every, atol=1e-6)
     assert not torch.allclose(gw(held=True, live=['keys'], live_blocks=[0]), held)
     assert not torch.allclose(gw(held=True, live=['keys'], live_blocks=[0]), every)
+    # key_draws: every row of the basis reads the key credit exactly; fewer rows read it without bias
+    W, L = model.config.n_embd, model.config.n_layer
+    H = h8.hadamard(W, torch.device('cpu'))
+    signs = torch.randint(0, 2, (W,), generator=torch.Generator().manual_seed(1)).float() * 2 - 1
+    full = [H[torch.randperm(W)] * signs for _ in range(L)]
+    assert torch.allclose(gw(held=True, live=['keys'], key_rows=full), every, atol=1e-5)
+    g = torch.randn(2, 3, W, dtype=torch.float64)
+    reads = []
+    for j in range(400):
+        rows = (H[torch.randperm(W)[:W // 8]] * (torch.randint(0, 2, (W,)) * 2 - 1)).double()
+        x0 = torch.zeros_like(g, requires_grad=True)
+        reads.append(torch.autograd.grad(h8.ReadCredit.apply(x0, rows), x0, g)[0])
+    one, mean = reads[0], torch.stack(reads).mean(0)
+    assert (mean - g).norm() < 0.25 * (one - g).norm(), ((mean - g).norm(), (one - g).norm())
+    partial = [r[:W // 8] for r in full]
+    assert not torch.allclose(gw(held=True, live=['keys'], key_rows=partial), every, atol=1e-5)
+    o = h8_options(dict(preset='2m', mode='cut', live_paths=['keys'], key_draws=W // 4))
+    trainer = h8.H8(o, torch.device('cpu'), 0, 10, torch.zeros(0, CUT_SEQ, dtype=torch.long))
+    rows = trainer.key_rows()
+    assert len(rows) == L and rows[0].shape == (W // 4, W) and torch.allclose(rows[0] @ rows[0].T, W * torch.eye(W // 4))
     o = h8_options(dict(preset='2m', clip_credit=True, clip_factor=1.0))
     h8.H8(o, torch.device('cpu'), 0, 10, torch.zeros(0, CUT_SEQ, dtype=torch.long))
     assert h8.CLIP == 1.0 and h8.RUNWAY == h8.RUNWAY_V2
     o = h8_options(dict(preset='2m', runway=True, runway_grid=[0.1, 0.4]))
     h8.H8(o, torch.device('cpu'), 0, 10, torch.zeros(0, CUT_SEQ, dtype=torch.long))
     assert h8.RUNWAY == (0.1, 0.4) and h8.CLIP == 3.0
-    for bad in (dict(live_paths=['keys']), dict(clip_factor=2.0), dict(mode='cut', live_paths=['queries'])):
+    for bad in (dict(live_paths=['keys']), dict(clip_factor=2.0), dict(mode='cut', live_paths=['queries']),
+                dict(mode='cut', key_draws=64), dict(mode='cut', live_paths=['values'], key_draws=64),
+                dict(mode='cut', live_paths=['keys'], key_draws=10 ** 6)):
         try:
             h8_options(dict(preset='2m', **bad))
         except ValueError:

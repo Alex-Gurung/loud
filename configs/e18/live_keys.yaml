@@ -1,0 +1,13 @@
+# E18 (added): E17's key path at 30M. At 10M keys live in every block recover 71% of the cut's 0.160 gap to backprop;
+# at 30M the gap is 0.123 (e18.h8_cut -> e18.bp_b4_pr40, two seeds). Does the key path's share hold with 3x the data?
+experiment: e18
+variant: live_keys
+task: h8
+seeds: [0, 1]
+priority: 38
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 30M
+  heldout: 32
+  mode: cut
+  live_paths: [keys]
