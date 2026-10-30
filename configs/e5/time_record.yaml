@@ -1,0 +1,18 @@
+# E5 timing (added): the record unchanged, stopped after 262 updates (Boost and 20 Cut updates), seed 0, with a GPU to itself
+# (72 GB reserved: no other job fits beside it), so the two runs' Cut step times compare: shared GPUs make the full
+# runs' times swing with their neighbours (the record's Cut update has read 44 to 56 s on them).
+experiment: e5
+variant: time_record
+task: cut
+seeds: [0]
+priority: 20
+gpu_memory_gb: 72  # the GPU to itself, for a clean time
+after: [e5.chain_deep_smoke.s0]
+args:
+  final_dtype: bfloat16
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  deep_readout: false
+  stop_after: 262
+  official_eval: false

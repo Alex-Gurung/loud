@@ -101,6 +101,9 @@ has every arm.
 - **The last 9% of E17:** keys and values live with Boost off lands on matched backprop to 0.0001 (three seeds),
   so H8's machinery is exact and the rest of the gap that keys and values leave is Boost's first 20%, which costs
   about 0.019 when the remainder is backprop (in the cut setting Boost is neutral).
+- **E20, the batch check:** at batch 8, K = 4 by token still costs +0.148 against every row at batch 8 (three
+  seeds; batch 4: +0.150), so the partial-row cost does not shrink when an update averages more tokens: the rows'
+  noise scales like the tokens' own gradient noise. Batch 16 waits for GPU memory (44 GB) beside the chain runs.
 - **E11:** with the runway grid widened to 0.08-1.28 the rule acts (79-93% of tokens per site take the largest
   move) and costs +0.289 (three seeds, +0.26 to +0.30): weighting credit by runway hurts.
 - **E4:** a 16-row judge moves `adapt_nowd` from +0.355 to +0.337: the judge's noise is not what fails.
