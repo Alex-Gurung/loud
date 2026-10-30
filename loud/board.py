@@ -141,21 +141,24 @@ def activity(arm, runs_):
     at the grid's largest move: all of them means every weight is 1), E10's clip (its gradient's cosine to the
     unclipped one) and E10's agree (the share of weight-update entries it kept). (True, '') for any other arm."""
     logs = [m for r in runs_ for m in read_jsonl(Path(r['run_dir']) / 'metrics.jsonl')]
-    if arm == 'e11.runway':
+    if arm.startswith('e11.runway'):
         shares = [s[-1] for m in logs if 'runway' in m for s in m['runway'].values()]
         if shares:
             top = statistics.fmean(shares)
             return top < 0.99, f'{top:.2%} of tokens pick the grid\'s largest move, so the weights are almost all 1'
-    if arm == 'e10.clip':
+    if arm.startswith('e10.clip'):
         cos = [m['cosine_to_identity'] for m in logs if 'cosine_to_identity' in m]
         if cos:
             mean = statistics.fmean(cos)
             return mean < 0.995, f'its gradient keeps cosine {mean:.4f} to the unclipped one'
-    if arm == 'e10.agree':
+    if arm.startswith('e10.agree'):
         kept = [m['agree_kept'] for m in logs if 'agree_kept' in m]
         if kept:
             return True, f'it keeps {statistics.fmean(kept):.2%} of the weight-update entries'
     return True, ''
+
+
+NO_LOSS = ('gate', 'diagnose', 'compare')  # tasks whose runs report no validation loss
 
 
 def seed_mean(runs_, seeds):
@@ -167,9 +170,14 @@ def verdict(e, by_key, by_arm=None):
     """(state, sentence) for an experiment from its arms' means (by_key: arm key -> arm row; by_arm: arm key -> its
     runs): 'waiting' until every arm has a counted run; 'null' when every arm's rule never acted."""
     by_arm = by_arm or {}
+    if e['id'] == 'verify':
+        return 'n/a', 'Checks: each passes or fails on its own (see the jobs).'
     # an experiment's own arms, and its follow-ups once they have run (E14's second stage)
-    cells = {a['variant']: a for a in by_key.values()
-             if a['experiment'] == e['id'] and (not a['followup'] or a['val_mean'] is not None)}
+    # (gates and diagnostics have no loss: they never hold a verdict back)
+    own = [a for a in by_key.values() if a['experiment'] == e['id'] and a['task'] not in NO_LOSS]
+    cells = {a['variant']: a for a in own if not a['followup'] or a['val_mean'] is not None}
+    if not own and any(a['experiment'] == e['id'] for a in by_key.values()):
+        return 'n/a', 'Diagnostics and checks: read each arm\'s summary.'
     if not cells or any(a['val_mean'] is None for a in cells.values()):
         return 'waiting', 'Waiting for every arm to finish.'
     ref = e.get('reference')
