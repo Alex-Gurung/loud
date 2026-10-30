@@ -439,6 +439,37 @@ def cut_run(scratch):
     assert sum(c['reason'] == 'merge' for c in calls_) > 80  # the plain weights and every candidate the merge scored
 
 
+def cut_key_blocks(scratch):
+    """E17's key_blocks: every block listed is the record itself; a subset leaves the other blocks' c_k gradients as
+    the record's (exact key errors, which its probes also measure) and changes the rest."""
+    cut_module()
+    import loud.cut
+    from loud.options import cut_options
+    patch_sequences(length=CUT_SEQ, vocab=CUT_VOCAB)
+    batch = cut_rows_data()[:1]
+
+    def grads(**kw):
+        args = dict(preset='2m', sequences=20, heldout=8, batch=1, virtual_gpus=2, official_eval=False, **kw)
+        chain = loud.cut.CutChain(cut_options(args), torch.device('cpu'), 0, 12, torch.zeros(8, CUT_SEQ,
+                                                                                             dtype=torch.long))
+        step = next(i for i, b in enumerate(chain.schedule, 1) if b[0] == 'cut')
+        chain.reset('cut')
+        chain.update(step, batch)
+        return {n: p.grad.clone() for n, p in chain.named}
+
+    record, every, one = grads(), grads(key_blocks=[0, 1]), grads(key_blocks=[1])
+    assert all(torch.equal(record[n], every[n]) for n in record)
+    keys = [n for n in record if n.endswith('attn.c_k.weight')]
+    assert all(torch.allclose(record[n], one[n], atol=1e-6) for n in keys)
+    assert not all(torch.allclose(record[n], one[n], atol=1e-6) for n in record)
+    for bad in ([2], [0, 0], 'all'):
+        try:
+            cut_options(dict(preset='2m', key_blocks=bad))
+        except ValueError:
+            continue
+        raise AssertionError(f'accepted key_blocks={bad!r}')
+
+
 def cut_budget(scratch):
     """E13's hook through the trainer: a ROW_BUDGETS strategy is built fresh by every reset (the run's never sees the
     warmup's random tokens), gives each Cut estimate's tokens their counts (once per GPU of the sequence) and sees

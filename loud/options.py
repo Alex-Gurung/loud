@@ -189,6 +189,7 @@ CUT = dict(
     row_budget=None,            # E13: a loud.cut.ROW_BUDGETS strategy, each token's own row count (token windows):
                                 # 'ngram', LOW_ROWS where the n-gram model and the network agree a token is easy
     budget_theta=0.0,           # E13 'ngram': the low tier is max(n-gram loss, model loss) <= theta nats
+    key_blocks=[],              # E17: the blocks whose input-key probes run (empty: all, the record's)
 )
 ROW_ASSIGNS, PRIORS = ('time', 'token'), ('none', 'identity')
 
@@ -481,6 +482,10 @@ def cut_options(args):
             raise ValueError('row_budget gives each token its own count up to rows: it needs rows and token windows')
     if (o['row_budget'] == 'ngram') != (o['budget_theta'] > 0) or o['budget_theta'] < 0:
         raise ValueError("row_budget 'ngram' needs budget_theta > 0 nats, and budget_theta acts only with it")
+    blocks = o['key_blocks']
+    if not isinstance(blocks, list) or not all(isinstance(b, int) and 0 <= b < PRESETS[o['preset']][0]
+                                               for b in blocks) or len(set(blocks)) < len(blocks):
+        raise ValueError('key_blocks: distinct block indices of this preset (empty: every block)')
     return o
 
 

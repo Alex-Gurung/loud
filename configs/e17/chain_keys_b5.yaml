@@ -1,0 +1,17 @@
+# E17 on the real chain (added): PR #40 with its input-key probes (512 central pairs per token) at block 5 only;
+# the other blocks keep the key errors their c_k weights use without probes. In H8 one block's key path alone
+# recovers 59% (block 3), 62% (5) and 48% (7) of the cut's gap to backprop on seed 0 and the other five about 0%;
+# one gradient's key_paths diagnostic shows the same split. Against e17.chain_record: the loss, and the time per Cut
+# update the skipped probes save.
+experiment: e17
+variant: chain_keys_b5
+task: cut
+seeds: [0]
+priority: 30
+gpu_memory_gb: 24  # the Cut chain: 18 GB at its peak
+after: [verify.cut_prefix_match.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  key_blocks: [5]

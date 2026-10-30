@@ -177,6 +177,7 @@ def estimator_classes(m):
         start = None    # 'time': every token's window starts here; None: token windows
         prior = False   # E7: the mid sites measure the identity-path guess's residual
         budget = None   # E13: the run's ROW_BUDGETS strategy (token windows of each token's own count)
+        key_blocks = None  # E17: the blocks whose input-key probes run (None: every block, the record's)
         top = None      # this estimate's top-stream credit (the guess E7 carries down)
 
         @torch.no_grad()
@@ -184,6 +185,20 @@ def estimator_classes(m):
             gradients = super().estimate(x, y)
             self.top = None
             return gradients
+
+        def key_input_credits(self, targets):
+            """The record's input-key probes at key_blocks only; the other blocks' K-branch input credit is zero, and
+            their c_k weights take the key errors the record uses without these probes (exact_key_errors)."""
+            if self.key_blocks is None:
+                return super().key_input_credits(targets)
+            chosen = {i: t for i, t in targets.items() if i in self.key_blocks}
+            credits = super().key_input_credits(chosen) if chosen else {}
+            errors = dict(self._input_key_errors or {})
+            errors.update(self.exact_key_errors(targets, [i for i in targets if i not in chosen]))
+            self._input_key_errors = errors
+            d = self.capture
+            zero = torch.zeros(d.batch * d.length, self.width, device=self.device)
+            return {i: credits.get(i, zero) for i in targets}
 
         def probe(self, x, y, mix=None, probed=None):
             """The record's probe; Cut calls it once, for the top stream's credit (E7's guess carries it down)."""
@@ -383,7 +398,7 @@ class CutChain:
                     virtual_gpus=self.world, gpus_per_sequence=self.split,
                     boost_updates=sum(phase == 'boost' for phase, *_ in self.schedule),
                     chain_rows=self.o['rows'] or self.width, row_assign=self.o['row_assign'], prior=self.o['prior'],
-                    row_budget=self.o['row_budget'], merge_batch=self.o['merge_batch'],
+                    row_budget=self.o['row_budget'], key_blocks=self.o['key_blocks'] or 'all', merge_batch=self.o['merge_batch'],
                     reverse_sum=self.o['reverse_sum'], chain_graphs=len(self.graphs),
                     recompile_limit=self.recompile_limit)
 
@@ -462,6 +477,7 @@ class CutChain:
                 for estimator in group:
                     estimator.rows, estimator.start = self.o['rows'], start
                     estimator.prior, estimator.budget = self.o['prior'] == 'identity', self.budget
+                    estimator.key_blocks = set(self.o['key_blocks']) if self.o['key_blocks'] else None
             fields['chain_rows'] = self.o['rows'] or self.width
             if start is not None:
                 fields['chain_window'] = [start, start + self.o['rows']]
