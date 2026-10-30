@@ -442,7 +442,8 @@ def cut_run(scratch):
 def cut_key_blocks(scratch):
     """E17's key_blocks: every block listed is the record itself; a subset leaves the other blocks' c_k gradients as
     the record's (exact key errors, which its probes also measure) and changes the rest. key_transport (the raw key
-    errors through c_k and one forward norm step, no probes) gives the record's gradient; no probes keep c_k's."""
+    errors through c_k and one forward norm step, no probes) gives the record's gradient, and gate_transport (the gate's
+    error through ve_gate and one norm step) the gate probes'; no probes keep c_k's."""
     cut_module()
     import loud.cut
     from loud.options import cut_options
@@ -468,6 +469,9 @@ def cut_key_blocks(scratch):
     assert all(cos(record[n], transported[n]) > 0.99999 for n in record), \
         {n: cos(record[n], transported[n]) for n in record}
     assert all(abs(transported[n].norm() / record[n].norm() - 1) < 1e-3 for n in record if record[n].norm() > 0)
+    gated = grads(gate_transport=True)  # the gate's error through ve_gate and one norm step: the gate probes' estimate
+    assert all(cos(record[n], gated[n]) > 0.99999 for n in record if record[n].norm() > 0), \
+        {n: cos(record[n], gated[n]) for n in record}
     none = grads(key_probes=False)  # no probes: c_k as the record's, the K-branch input credit gone
     assert all(torch.allclose(record[n], none[n], atol=1e-6) for n in keys)
     assert not all(torch.allclose(record[n], none[n], atol=1e-6) for n in record)

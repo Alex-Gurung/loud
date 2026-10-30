@@ -112,6 +112,13 @@ has every arm. v2's rule holds throughout: a difference under 0.02 is not a resu
   measures for c_k's own gradient, times c_k's weight, through one forward norm step (`norm_move`, the record's
   value-path convention), give the same estimate: to 4e-4 on the CPU test models and 1e-3 on trained weights (review
   round 9), the gradients at cosine 0.999999 (`key_transport`, check `cut_key_blocks`).
+  **Gate transport**, the same for the value-embedding gate's input probes (a full cycle per token at blocks 1, 3, 5,
+  7): the gate is the input's RMSNorm, a linear map (ve_gate) on its first channels and 2 sigmoid, so the gate's own
+  error, which the record computes for ve_gate's weight (its central slope times the value credit dotted with the
+  embedding), through ve_gate's weight and one norm step, equals the probes' estimate (cosine 1.0, norms within
+  0.1%, gradients at 0.999999; `gate_transport`). Both transports run together on the chain at full length
+  (`chain_transport_both`), and dedicated-GPU profiles of a Cut update (`profile: true`, seconds per part) of the
+  record and of both transports show where the rest of its time goes.
 - **The last 9% of E17:** keys and values live with Boost off lands on matched backprop to 0.0001 (three seeds),
   so H8's machinery is exact and the rest of the gap that keys and values leave is Boost's first 20%, which costs
   about 0.014 when the remainder is backprop (three seeds: +0.018, +0.012, +0.012; in the cut setting Boost is

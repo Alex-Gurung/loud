@@ -1,0 +1,18 @@
+# E17 on the real chain (added): PR #40 with both of its input-probe cycles replaced by transport of credit it already
+# measures: key_transport (the raw key errors through c_k and one norm step) and gate_transport (the gate's own error,
+# exact_values', through ve_gate and one norm step). On the CPU test model each equals its probes' estimate (cosine
+# 1.0, norms within 0.1%) and the gradients agree at 0.999999. Against e17.chain_record: the loss (expected the same)
+# and the time per Cut update both probe cycles cost.
+experiment: e17
+variant: chain_transport_both
+task: cut
+seeds: [0]
+priority: 31
+gpu_memory_gb: 24  # the Cut chain: 18 GB at its peak
+after: [verify.cut_prefix_match.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  batch: 4
+  key_transport: true
+  gate_transport: true

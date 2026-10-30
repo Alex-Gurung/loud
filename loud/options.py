@@ -193,6 +193,7 @@ CUT = dict(
     key_blocks=[],              # E17: the blocks whose input-key probes run (empty: all, the record's)
     key_probes=True,            # E17: false runs no input-key probes (key_path_draws 0; c_k keeps its key errors)
     key_transport=False,        # E17: the K-branch input credit = the raw key errors times c_k's weight, no probes
+    gate_transport=False,       # the gate's input credit = its own error through ve_gate and one norm step, no probes
     deep_readout=False,         # E5: one S1 cycle reads S2..S8 by a per-token solve (loud/cut.py)
     profile=False,              # seconds per part of each Cut estimate in metrics.jsonl (cut_profile; GPU-synced)
 )

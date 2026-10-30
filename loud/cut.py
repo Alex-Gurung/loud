@@ -300,6 +300,7 @@ def estimator_classes(m):
         key_blocks = None  # E17: the blocks whose input-key probes run (None: every block, the record's)
         deep = False    # E5: one S1 launch reads S2..S8 (deep_chain_credits)
         transport = False  # E17: the K-branch input credit from the raw key errors through c_k, no probes
+        gate_transport = False  # the gate's input credit from its own error through ve_gate, no probes
         top = None      # this estimate's top-stream credit (the guess E7 carries down)
 
         @torch.no_grad()
@@ -323,6 +324,30 @@ def estimator_classes(m):
             d = self.capture
             zero = torch.zeros(d.batch * d.length, self.width, device=self.device)
             return {i: credits.get(i, zero) for i in targets}
+
+        def gate_input_credits(self, targets, raw_values=None):
+            if not self.gate_transport:
+                return super().gate_input_credits(targets, raw_values)
+            return self.transported_gate_credits(targets, raw_values)
+
+        def transported_gate_credits(self, targets, raw_values=None):
+            """The gate's input credit without its probes: from the block input x the gate is RMSNorm, the first
+            channels through ve_gate (linear), then 2 sigmoid scaling the value embedding, so the input's credit along
+            it is the gate's own error (exact_values': the record's central slope times the value credit dotted with
+            the embedding, what its ve_gate weight takes) through ve_gate's weight, zero past the channels it reads,
+            and one forward RMSNorm step (norm_move, the record's value-path convention)."""
+            d, heads, credits = self.capture, self.model.config.n_head, {}
+            for i, target in targets.items():
+                if not m.has_ve(i, self.model.config.n_layer):
+                    continue
+                prefix = f'transformer.h.{i}.attn.'
+                raw = None if raw_values is None else raw_values[i]
+                error = self.exact_values(i, target, None, raw)[prefix + 've_gate']  # [b, t, heads]
+                weight = self.model.transformer.h[i].attn.ve_gate.weight.float()  # [heads, channels]
+                g = torch.zeros(error.shape[0] * error.shape[1], self.width, device=self.device)
+                g[:, :weight.shape[1]] = error.reshape(-1, heads) @ weight
+                credits[i] = m.norm_move(d.blocks[i].float().flatten(0, 1), g)
+            return credits
 
         def transported_key_credits(self, targets):
             """E17's key transport: from the block input x the K branch is RMSNorm, then c_k (linear) to the raw key,
@@ -646,7 +671,7 @@ class CutChain:
                     virtual_gpus=self.world, gpus_per_sequence=self.split,
                     boost_updates=sum(phase == 'boost' for phase, *_ in self.schedule),
                     chain_rows=self.o['rows'] or self.width, row_assign=self.o['row_assign'], prior=self.o['prior'],
-                    row_budget=self.o['row_budget'], key_blocks=self.o['key_blocks'] or 'all', key_transport=self.o['key_transport'], deep_readout=self.o['deep_readout'], merge_batch=self.o['merge_batch'],
+                    row_budget=self.o['row_budget'], key_blocks=self.o['key_blocks'] or 'all', key_transport=self.o['key_transport'], gate_transport=self.o['gate_transport'], deep_readout=self.o['deep_readout'], merge_batch=self.o['merge_batch'],
                     reverse_sum=self.o['reverse_sum'], chain_graphs=len(self.graphs),
                     recompile_limit=self.recompile_limit)
 
@@ -728,6 +753,7 @@ class CutChain:
                     estimator.key_blocks = set(self.o['key_blocks']) if self.o['key_blocks'] else None
                     estimator.deep = self.o['deep_readout']
                     estimator.transport = self.o['key_transport']
+                    estimator.gate_transport = self.o['gate_transport']
             fields['chain_rows'] = self.o['rows'] or self.width
             if start is not None:
                 fields['chain_window'] = [start, start + self.o['rows']]

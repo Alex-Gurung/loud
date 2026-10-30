@@ -1,4 +1,4 @@
-# Profile (added): where a Cut update's time goes, for key transport: stopped after 252 updates (Boost and 10 Cut updates),
+# Profile (added): where a Cut update's time goes, for key and gate transport: stopped after 252 updates (Boost and 10 Cut updates),
 # seed 0, a GPU to itself, with profile: true (seconds per part of each estimate, GPU-synced, in metrics.jsonl as
 # cut_profile). Key transport removed the input-key probes (about 13% of a Cut update on a shared GPU); this finds the
 # next parts worth replacing with credit the record already measures.
@@ -18,3 +18,4 @@ args:
   official_eval: false
   profile: true
   key_transport: true
+  gate_transport: true
