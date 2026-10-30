@@ -67,8 +67,10 @@ AUX_LOG_EVERY = 50   # E14's cosine of its gradient to the next-token one at the
 LATENT_LOG_EVERY = 10  # E15's per-sublayer readout and latent losses, every this many Boost updates
 CLIP = 3.0           # E10 (a): a token's credit norm at a site is capped at this times the site's batch median
 AGREE = 0.7          # E10 (b): the share of tokens that must agree in sign for a weight-update entry to be kept
+# (CLIP, AGREE and RUNWAY are v2's fixed rules; a run's clip_factor, agree_share and runway_grid set them, one trainer
+# per process)
 LOW_ROWS = 64        # E13: rows per token per site in the low tier (the high tier reads the full cycle)
-RUNWAY = (0.01, 0.02, 0.04, 0.08)  # E11: moves along -g/|g|, in the token's activation RMS per coordinate
+RUNWAY = RUNWAY_V2 = (0.01, 0.02, 0.04, 0.08)  # E11: moves along -g/|g|, in the token's RMS per coordinate
 RUNWAY_EVERY = 10    # E11: updates between logs of the runway distribution
 
 
@@ -89,25 +91,27 @@ def token_losses(model, x, targets, head=None):
     return F.cross_entropy(z.flatten(0, 1), targets.flatten(), ignore_index=-1, reduction='none').view_as(targets)
 
 
-def attention(attn, x, ve, cos_sin, window, held, freeze_queries=False):
+def attention(attn, x, ve, cos_sin, window, held, freeze_queries=False, live=()):
     """CausalSelfAttention.forward on the normed block input x. With `held`, the keys', values' and gate's input is
     detached: every token's keys and values are their clean ones while its query stays live (freeze_queries detaches
-    the query's input too: record #9's Cut, without own queries)."""
+    the query's input too: record #9's Cut, without own queries). `live` names cross-token paths held keeps open
+    ('keys', 'values': the values and their gate), to measure what each carries."""
     m = um()
     B, T, _ = x.shape
-    kv = x.detach() if held else x
+    kx = x if not held or 'keys' in live else x.detach()
+    vx = x if not held or 'values' in live else x.detach()
     q = attn.c_q(x.detach() if freeze_queries else x).view(B, T, attn.n_head, attn.head_dim)
-    k = attn.c_k(kv).view(B, T, attn.n_kv_head, attn.head_dim)
-    v = attn.c_v(kv).view(B, T, attn.n_kv_head, attn.head_dim)
+    k = attn.c_k(kx).view(B, T, attn.n_kv_head, attn.head_dim)
+    v = attn.c_v(vx).view(B, T, attn.n_kv_head, attn.head_dim)
     if ve is not None:
-        gate = 2 * torch.sigmoid(attn.ve_gate(kv[..., :attn.ve_gate_channels]))
+        gate = 2 * torch.sigmoid(attn.ve_gate(vx[..., :attn.ve_gate_channels]))
         v = v + gate.unsqueeze(-1) * ve.view(B, T, attn.n_kv_head, attn.head_dim)
     cos, sin = cos_sin
     q, k = m.norm(m.apply_rotary_emb(q, cos, sin)), m.norm(m.apply_rotary_emb(k, cos, sin))
     return attn.c_proj(m.attention(q, k, v, window[0]).contiguous().view(B, T, -1))
 
 
-def cut_forward(model, idx, targets, held=True, freeze_queries=False):
+def cut_forward(model, idx, targets, held=True, freeze_queries=False, live=()):
     """GPT.forward on the cut graph (held=False: the model's own forward). Returns the token losses [B, T] (None
     without targets), the nine sites, the top stream and each block's attention and MLP outputs (what synthesis mode
     differentiates)."""
@@ -120,7 +124,7 @@ def cut_forward(model, idx, targets, held=True, freeze_queries=False):
     for i, block in enumerate(model.transformer.h):
         x = model.resid_lambdas[i] * x + model.x0_lambdas[i] * x0
         ve = arch.value_embedding(model, idx, i, ngram)
-        a = attention(block.attn, m.norm(x), ve, cos_sin, model.window_sizes[i], held, freeze_queries)
+        a = attention(block.attn, m.norm(x), ve, cos_sin, model.window_sizes[i], held, freeze_queries, live)
         x = x + a
         sites.append(x)
         attn_out.append(a)
@@ -607,6 +611,9 @@ class H8:
         from .cut import record_settings
         m = self.m = refs.trainer_module('pr40')
         self.o, self.device, self.seed, self.steps = o, device, seed, steps
+        global CLIP, AGREE, RUNWAY  # the rules' constants for this run (v2's unless the config sets them)
+        CLIP, AGREE = o['clip_factor'], o['agree_share']
+        RUNWAY = tuple(o['runway_grid']) if o['runway_grid'] else RUNWAY_V2
         self.model_file = arch.model_file() if o['arch'] == 'ngram' else None  # what the official scorer builds
         self.untimed = Untimed(device)  # loud/train.py takes it off the clock after each update
         self.probe = heldout[:PROBE_ROWS].to(device) if len(heldout) else None  # E14/E15's untimed logs
@@ -701,7 +708,7 @@ class H8:
                 loss, losses = boost_loss(self.model, x, y, side, keep)
                 top, embedding = keep['top'], keep['embedding']
             elif o['mode'] == 'cut':
-                losses, sites, top, _, _ = cut_forward(self.model, x, y, True, o['freeze_queries'])
+                losses, sites, top, _, _ = cut_forward(self.model, x, y, True, o['freeze_queries'], o['live_paths'])
                 loss, embedding = losses.sum() / (y != -1).sum(), sites[0]
             else:
                 each = {} if self.shaper is not None else None

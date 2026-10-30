@@ -18,7 +18,8 @@ def test_population_branches_at_the_plans_update():
     (dict(blur=-0.1), '>= 0'),
     (dict(blur=0.1, step_control='reject'), 'one change per variant'),
     (dict(accept_up=1.2), 'acts only with step_control: adapt'),
-    (dict(step_control='reject', heldout=2), 'heldout must be >= 4'),
+    (dict(step_control='reject', heldout=2), 'heldout must be at least that'),
+    (dict(judge_rows=8), 'acts only with step_control'),
 ])
 def test_proxy_variant_options(args, error):
     with pytest.raises(ValueError, match=error):

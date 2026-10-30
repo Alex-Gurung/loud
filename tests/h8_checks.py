@@ -610,6 +610,33 @@ def h8_snr(scratch):
     assert all(0 <= v['r_mean'] <= 1 and 0 <= v['frobenius'] <= 1 for v in ratios), ratios
 
 
+def h8_knobs(scratch):
+    """The follow-up knobs: live cross-token paths (keys and values live is the full graph; held is not), and the rule
+    constants a run sets (E10's clip factor and agreement share, E11's grid), with their checks."""
+    from loud import h8
+    from loud.options import h8_options
+    m, s, model, x, y = record_setup()
+    model.requires_grad_(True)
+    w = model.transformer.h[0].attn.c_v.weight
+    grad = lambda **kw: torch.autograd.grad(h8.cut_forward(model, x, y, **kw)[0].sum(), w)[0]
+    full = grad(held=False)
+    assert torch.allclose(grad(held=True, live=['keys', 'values']), full, atol=1e-6)
+    assert not torch.allclose(grad(held=True), full, atol=1e-6)
+    assert (grad(held=True, live=['values']) - full).norm() < (grad(held=True) - full).norm()
+    o = h8_options(dict(preset='2m', clip_credit=True, clip_factor=1.0))
+    h8.H8(o, torch.device('cpu'), 0, 10, torch.zeros(0, CUT_SEQ, dtype=torch.long))
+    assert h8.CLIP == 1.0 and h8.RUNWAY == h8.RUNWAY_V2
+    o = h8_options(dict(preset='2m', runway=True, runway_grid=[0.1, 0.4]))
+    h8.H8(o, torch.device('cpu'), 0, 10, torch.zeros(0, CUT_SEQ, dtype=torch.long))
+    assert h8.RUNWAY == (0.1, 0.4) and h8.CLIP == 3.0
+    for bad in (dict(live_paths=['keys']), dict(clip_factor=2.0), dict(mode='cut', live_paths=['queries'])):
+        try:
+            h8_options(dict(preset='2m', **bad))
+        except ValueError:
+            continue
+        raise AssertionError(f'accepted {bad}')
+
+
 def h6_snr(scratch):
     """E8's snr_spectrum tool: H8's per-sequence synthesized gradients at K = 4 average, over draws, to the exact
     credits' (the scheme is unbiased), one draw being far noisier; the tool measures the training sequences after the

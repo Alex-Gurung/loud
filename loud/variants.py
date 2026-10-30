@@ -9,7 +9,6 @@ import contextlib
 import torch
 
 from .heldout import mean_loss
-from .options import JUDGE_ROWS
 
 BLUR_SEED = 7907    # the blur draws from its own generator, seeded with the job seed + BLUR_SEED
 
@@ -118,9 +117,9 @@ class Snapshot:
 
 
 class StepControl:
-    """E4. Each update is judged on JUDGE_ROWS of the held-out sequences, rotating (update s takes rows 4(s - 1) ..
-    4s - 1 mod 32): their loss under the old weights and under the new ones, a paired comparison costing two forwards
-    of 4 sequences. Never on the batch that produced the step, which almost always improves, nor on the next training
+    """E4. Each update is judged on judge_rows (v2: 4) of the held-out sequences, rotating (update s takes rows
+    4(s - 1) .. 4s - 1 mod 32 at 4): their loss under the old weights and under the new ones, a paired comparison
+    costing two forwards of 4 sequences. Never on the batch that produced the step, which almost always improves, nor on the next training
     batch, which would then feed two updates. If the held-out loss rose, the weights and the optimizer state go back
     to before the update and the batch feeds no update ('reject', v1). 'adapt' (v2) also keeps a global multiplier on
     every group's rate, on top of the hand schedule: times accept_up after an accept, times accept_down after a
@@ -130,16 +129,18 @@ class StepControl:
 
     def __init__(self, model, optimizer, o, heldout, device):
         self.adapt, self.up, self.down = o['step_control'] == 'adapt', o['accept_up'], o['accept_down']
+        self.o = o
         self.model, self.heldout, self.device = model, heldout, device
         self.multiplier = 1.0
         self.snapshot = Snapshot(model, optimizer)
 
     def rows(self, step):
-        start = (step - 1) * JUDGE_ROWS % len(self.heldout)
-        return [(start + i) % len(self.heldout) for i in range(JUDGE_ROWS)]
+        n = self.o['judge_rows']
+        start = (step - 1) * n % len(self.heldout)
+        return [(start + i) % len(self.heldout) for i in range(n)]
 
     def loss(self, step):
-        return mean_loss(self.model, self.heldout[self.rows(step)], self.device, JUDGE_ROWS)
+        return mean_loss(self.model, self.heldout[self.rows(step)], self.device, self.o['judge_rows'])
 
     def scale(self, optimizer):
         """Apply the multiplier to the rates set_rate just set (they are recomputed from initial_lr every update)."""

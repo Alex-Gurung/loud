@@ -1,0 +1,16 @@
+# E16's closer pair (added): the track-3 shape (12 x 1,024) without the n-gram tables, under H8 cut mode,
+# against e16.h8_track3 (with them): does H8 rank a single architectural feature as backprop does? The official
+# scorer builds only the fixed 8 x 512 model or record #5's own shape, so these compare on the held-out loss.
+experiment: e16
+variant: h8_track3_plain
+task: h8
+seeds: [0, 1]
+priority: 45
+gpu_memory_gb: 32  # a 151M-parameter model
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  preset: track3
+  official_eval: false
+  mode: cut

@@ -1,0 +1,18 @@
+# E4's v2b with a less noisy judge (added): 16 held-out rows per update instead of 4. At 4 rows adapt_nowd lost 0.36
+# to the hand warmdown; this asks whether the judge's noise is why.
+experiment: e4
+variant: adapt_nowd_j16
+task: proxy
+seeds: [0, 1, 2]
+priority: 45
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0,
+        verify.step_control_smoke.s0]
+args:
+  recipe: boostcut
+  sequences: 10M
+  heldout: 32
+  batch: 8
+  heldout_every: 50
+  step_control: adapt
+  warmdown: 0
+  judge_rows: 16

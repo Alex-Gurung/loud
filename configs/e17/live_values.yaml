@@ -1,0 +1,15 @@
+# E17 (added after the first queue): where does H8 lose the cross-token credit the record's patches recover? H8 cut
+# mode with the other tokens' values left live: credit flows through their values as backprop's does, the rest held.
+# The gap e1.h8_cut -> e1.bp_b4_pr40 (0.16 at 10M) is all cross-token credit; this arm says how much of it the
+# values carry. The diagnostics put the loss at the low sites late in training (S1 cosine 0.65 at 100%).
+experiment: e17
+variant: live_values
+task: h8
+seeds: [0, 1, 2]
+priority: 40
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  mode: cut
+  live_paths: [values]

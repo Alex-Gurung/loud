@@ -1,0 +1,14 @@
+# E17's anchor: H8 cut mode with keys and values live is the full graph in the Cut phase, so this arm is backprop with
+# H8's Boost phase and PR #40's recipe at batch 4: it should land near e1.bp_b4_pr40, and the two single-path arms
+# split the gap between it and e1.h8_cut.
+experiment: e17
+variant: live_both
+task: h8
+seeds: [0, 1, 2]
+priority: 40
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  mode: cut
+  live_paths: [keys, values]

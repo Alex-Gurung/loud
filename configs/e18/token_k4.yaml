@@ -1,0 +1,14 @@
+# E18 (added): the length check on the 30M set (14,616 training sequences, 3x the 10M runs) with PR #40's recipe at
+# batch 4, as at 10M, so only the data length changes. Do E6's partial-row cost and E14's null hold, grow or shrink
+# with 3x the data, and how far does H8's gap to matched backprop (e18.bp_b4_pr40) close? Two seeds.
+experiment: e18
+variant: token_k4
+task: h8
+seeds: [0, 1]
+priority: 40
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 30M
+  heldout: 32
+  rows: 128
+  row_assign: token

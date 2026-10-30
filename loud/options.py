@@ -88,6 +88,8 @@ TRAINING = dict(
                                 # keeps them exact (verifications, E1). The disk is shared
 )
 
+JUDGE_ROWS = 4  # E4: held-out rows each update is judged on, rotating through the 32 (v2's; judge_rows sets it)
+
 PROXY = dict(
     TRAINING,
     recipe='boostcut',          # reference trainer: 'boostcut' (backprop_preset.py), 'pr40' (PR #40's rates, the 10M
@@ -104,6 +106,7 @@ PROXY = dict(
                                 # scales every rate by the outcomes (loud/variants.py)
     accept_up=1.1,              # E4 adapt: rate multiplier after an accepted update
     accept_down=0.87,           # E4 adapt: after a rejected one (with 1.1: steady at 59% acceptance)
+    judge_rows=JUDGE_ROWS,      # E4: held-out rows each update is judged on (v2: 4)
     snr_scaling='none',         # E8: 'control', 'snr' or 'rate' in place of ANVIL II's polar factor (loud/snr.py)
     fisher=False,               # E9: momentum left-preconditioned by the damped true-Fisher factor (loud/fisher.py)
     end_merge=False,            # the record's end merge of the nine means after the last update (recipes pr40, pr46)
@@ -111,9 +114,9 @@ PROXY = dict(
     ngram_rows=TRACK3_ROWS,     # E16: rows of each hashed n-gram table (the record's)
 )
 STEP_CONTROLS, SNR_ARMS = ('none', 'reject', 'adapt'), ('none', 'control', 'snr', 'rate')
-JUDGE_ROWS = 4  # E4: held-out rows each update is judged on, rotating through the 32
 # Each variant option, and the setting (of another option) it acts under.
 VARIANT_OPTIONS = {'accept_up': ('step_control', 'adapt'), 'accept_down': ('step_control', 'adapt')}
+STEP_OPTIONS = ('judge_rows',)  # E4: act only with step_control on
 
 # E3 (loud/population.py): local SGD over copies branched from one trajectory. Only POPULATION_FREE options may
 # change; the rest stay at their defaults (one change per variant).
@@ -156,6 +159,10 @@ H8 = dict(
     agree=False,                # E10 (b): block weight-update entries kept where >= 70% of the tokens agree in sign
     runway=False,               # E11: each token's credit at a site weighted by how far its loss keeps falling
     budget_theta=0.0,           # E13: 64 rows per site where max(n-gram loss, model loss) <= theta nats (0: off)
+    clip_factor=3.0,            # E10 (a)'s cap, in the site's batch median token norm (v2: 3)
+    agree_share=0.7,            # E10 (b)'s share of tokens that must back an entry's sign (v2: 0.7)
+    runway_grid=[],             # E11's moves (in the token's RMS per coordinate); empty: v2's 0.01, 0.02, 0.04, 0.08
+    live_paths=[],              # cut mode: cross-token paths left live, 'keys' and/or 'values' (both: the full graph)
     snr_scaling='none',         # E8's H8 setting: 'control', 'snr' or 'rate' in place of ANVIL II's polar factor in the
                                 # Cut phase, from each sequence's synthesized gradients (loud/snr.py)
 )
@@ -304,13 +311,16 @@ def proxy_options(args):
     for key, (mode, value) in VARIANT_OPTIONS.items():
         if key in args and o[mode] != value:
             raise ValueError(f'{key} acts only with {mode}: {value}')
+    for key in STEP_OPTIONS:
+        if key in args and o['step_control'] == 'none':
+            raise ValueError(f'{key} acts only with step_control')
     if o['blur'] < 0:
         raise ValueError('blur must be >= 0')
     if not (o['accept_up'] >= 1 and 0 < o['accept_down'] <= 1):
         raise ValueError('accept_up must be >= 1 and accept_down in (0, 1]')
-    if o['step_control'] != 'none' and o['heldout'] < JUDGE_ROWS:
-        raise ValueError(f'step_control judges each update on {JUDGE_ROWS} held-out rows: heldout must be >= '
-                         f'{JUDGE_ROWS}')
+    if o['step_control'] != 'none' and not 1 <= o['judge_rows'] <= o['heldout']:
+        raise ValueError(f'step_control judges each update on judge_rows ({o["judge_rows"]}) held-out rows: heldout '
+                         f'must be at least that')
     if o['per_sequence_grads'] and variants and variants[0] not in ('step_control', 'snr_scaling', 'fisher'):
         raise ValueError(f"per_sequence_grads reads each sequence's plain gradient, which {variants[0]} replaces")
     if o['snr_scaling'] != 'none' and not (o['per_sequence_grads'] and o['batch'] >= 2):
@@ -370,6 +380,17 @@ def h8_options(args):
                                    ('runway', o['runway']), ('budget_theta', o['budget_theta'] != 0)) if on]
     if o['snr_scaling'] not in SNR_ARMS:
         raise ValueError(f'snr_scaling must be one of {SNR_ARMS}')
+    if not isinstance(o['live_paths'], list) or set(o['live_paths']) - {'keys', 'values'} or (
+            o['live_paths'] and o['mode'] != 'cut'):
+        raise ValueError("live_paths: a list of 'keys' and 'values', in cut mode")
+    if not (o['clip_factor'] > 0 and 0 <= o['agree_share'] <= 1):
+        raise ValueError('clip_factor must be > 0 and agree_share in [0, 1]')
+    grid = o['runway_grid']
+    if not isinstance(grid, list) or not all(isinstance(d, (int, float)) and d > 0 for d in grid):
+        raise ValueError('runway_grid: a list of positive moves (empty: v2\'s)')
+    for key, on in (('clip_factor', o['clip_credit']), ('agree_share', o['agree']), ('runway_grid', o['runway'])):
+        if key in args and not on:
+            raise ValueError(f'{key} acts only with its rule on')
     if o['snr_scaling'] != 'none':  # E8: its arms run on a partial-row scheme (E6's best at K = 4), the setting
         if o['mode'] != 'synthesis' or o['batch'] < 2 or o['prior'] != 'none':
             raise ValueError('snr_scaling (E8) runs in synthesis mode at a batch of at least 2, without a prior')

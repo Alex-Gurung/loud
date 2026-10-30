@@ -1,0 +1,12 @@
+# E18 (added): backprop at batch 4 on PR #40's recipe on the 30M set, the matched reference for E18's H8 arms.
+experiment: e18
+variant: bp_b4_pr40
+task: proxy
+seeds: [0, 1]
+priority: 40
+after: [verify.score_record.s0, verify.bp_b8.s0, verify.bp_b8_match.s0, verify.bp_b8_ledger.s0]
+args:
+  recipe: pr40
+  sequences: 30M
+  heldout: 32
+  batch: 4

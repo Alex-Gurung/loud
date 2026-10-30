@@ -1,0 +1,13 @@
+# E10 (b) at a 55% agreement share (added): at v2's 70% the rule kept 0.6% of the weight-update entries and lost 0.69,
+# so this arm asks whether a looser filter (more entries kept) helps instead.
+experiment: e10
+variant: agree_055
+task: h8
+seeds: [0, 1, 2]
+priority: 45
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  agree: true
+  agree_share: 0.55

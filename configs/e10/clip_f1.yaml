@@ -1,0 +1,13 @@
+# E10 (a) with the cap at 1x the site's batch median token norm (added): at v2's 3x the rule never acted (the clipped
+# gradient kept cosine 0.999 to the unclipped one), so this arm asks the question with a cap that binds.
+experiment: e10
+variant: clip_f1
+task: h8
+seeds: [0, 1, 2]
+priority: 45
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args:
+  sequences: 10M
+  heldout: 32
+  clip_credit: true
+  clip_factor: 1.0
