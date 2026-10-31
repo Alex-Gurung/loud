@@ -109,7 +109,7 @@ has every arm. v2's rule holds throughout: a difference under 0.02 is not a resu
   runs are queued.
   **Results (seed 0, full 10M, val loss after the record's end merge; one seed, the noise floor pending):** the
   record unchanged scores 3.6731 (3.6996 before the merge; published 3.676 and 3.703), key transport 3.6733 (+0.0002),
-  key probes at blocks 3, 5, 7 3.6763 (+0.0033; seed 1 3.6799 against the record's seed 1, pending), at block 5
+  key probes at blocks 3, 5, 7 3.6763 (+0.0033; seed 1: 3.6799 against the record's 3.6792, +0.0007), at block 5
   3.6773 (+0.0042), at 1, 3, 5, 7 3.6765 (+0.0034), and no key probes 3.7259 (+0.053). So the record's key probes are
   worth 0.05 on the chain (H8: the key path is 71% of the cut's 0.16), and key transport keeps all of it with no
   probes; probing fewer blocks loses 0.003-0.004, which `chain_record_repeat` will say is or is not noise. Median Cut
