@@ -230,7 +230,7 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
             if paired or unpaired:
                 note += (' On the chain, against the record unchanged on the same seed: ' + ', '.join(paired + [
                     u + ' [first build: different draws, not paired]' for u in unpaired]) +
-                         '; one-seed chain differences under 0.02 are noise until a repeat of the record sets the floor.')
+                         '; the record rerun on its seed differs by 0.0017 (the noise floor).')
             return 'met', note
         return 'not met', f'Sites under 0.95: {failing}.'
     mean = lambda key: by_key.get(key, {}).get('val_mean')
