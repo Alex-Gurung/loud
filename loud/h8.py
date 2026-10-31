@@ -52,7 +52,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from . import arch, latent, refs
+from . import arch, checkpoints, latent, refs
 from .anvil import shaped_optimizer
 from .ema import EMAWeights
 from .ngram import NGram, low_tier
@@ -756,6 +756,9 @@ class H8:
         self.probe = heldout[:PROBE_ROWS].to(device) if len(heldout) else None  # E14/E15's untimed logs
         self.settings = s = record_settings(m, o['preset'], o['batch'])
         s.lr, s.anvil_lr = s.lr * o['lr_mult'], s.anvil_lr * o['lr_mult']  # E19's rate scale (1: the record's)
+        if o['warmdown_final'] is not None:  # E21's anneal arms: the warmdown ends at this multiple of the rates
+            s.final = o['warmdown_final']
+        self.finish = self.end_merge if o['end_merge'] else None  # E21: loud/train.py runs it after the last update
         if not o['boost']:
             s.switch = 0.0  # Cut from the first update
         self.schedule = m.stage_schedule(steps * o['batch'], s)
@@ -807,6 +810,12 @@ class H8:
         for phase in self.horizons:
             self.reset(phase)
             self.update(next(i for i, b in enumerate(self.schedule, 1) if b[0] == phase), batch)
+
+    def end_merge(self, means, heldout):
+        """E21: PR #40's end merge of the nine trajectory means (loud.checkpoints.end_merge, as the proxy's pr40
+        recipe), each candidate scored on the held-out rows in one batch; timed with the training as the record times
+        it. loud/train.py keeps the weights before it as final_plain.pt and scores both."""
+        return checkpoints.end_merge(self.m, self.model, means, heldout, self.steps)
 
     def key_rows(self, sequences):
         """E17's key draws: for each block and sequence, key_draws rows of the Hadamard basis chosen at random with

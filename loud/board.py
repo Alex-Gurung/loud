@@ -122,6 +122,14 @@ EXPERIMENTS = [
          setup='H8 synthesis at batch 8 and 16 (606 and 303 updates on 10M), every row and K = 4 by token; three seeds.',
          success='Our reading: K = 4\'s cost at batch 16 against +0.150 at batch 4 (E6\'s bar: 0.02).',
          gate='H8 validation.'),
+    dict(id='e21', name='E21 walls or floor (added)', priority='P1', reference='e21.h8_synth_merge',
+         question='Is the cost of noisy credit height on the valley walls (averaging recovers it) or lost progress '
+                  'down the floor?',
+         setup='H8 arms (exact, cut, K = 4/8, prior, batch 8) and matched backprop with the record\'s means and end '
+               'merge, val loss before and after; two arms annealed to zero.',
+         success='Our reading: the share of each partial arm\'s cost the merge recovers (50% or more: walls; under '
+                 '20%: floor).',
+         gate='H8 validation.'),
     dict(id='e8', name='E8 SNR-scaled steps (follow-up)', priority='P1', reference=BP8,
          question='Does an orthogonalizing optimizer amplify estimator noise, and does SNR scaling fix it?',
          setup='Control, SNR and rate arms in backprop and in H8 synthesis at K = 4; built if the diagnostic says.',
@@ -316,6 +324,33 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
         k4 = (mean('e6.token_k4') - base) if mean('e6.token_k4') is not None else None
         head = f'Batch 4: K = 4 costs {k4:+.3f}; ' if k4 is not None else ''
         return ('met' if found[16][0] <= 0.02 else 'not met'), f'{head}{text}.'
+    if e['id'] == 'e21':  # read as arms land: each partial arm's cost before and after the merge
+        def pair(variant):
+            vals = [(r['val_loss'], read_json(Path(r['run_dir']) / 'result.json').get('val_loss_plain'))
+                    for r in by_arm.get(f'e21.{variant}', []) if counts(r)]
+            vals = [(a, b) for a, b in vals if b is not None]
+            return (statistics.fmean(a for a, _ in vals), statistics.fmean(b for _, b in vals), len(vals)) \
+                if vals else None
+        out = []
+        for arm, exact in (('token_k4_merge', 'h8_synth_merge'), ('time_k4_merge', 'h8_synth_merge'),
+                           ('token_k8_merge', 'h8_synth_merge'), ('prior_m128_merge', 'h8_synth_merge'),
+                           ('token_k4_b8_merge', 'synth_b8_merge')):
+            a, b = pair(arm), pair(exact)
+            if a and b:
+                before, after = a[1] - b[1], a[0] - b[0]
+                share = (before - after) / before if before else float('nan')
+                out.append(f'{arm[:-6]} recovers {share:.0%} ({before:+.3f} -> {after:+.3f}, {min(a[2], b[2])} seeds)')
+        cut, bp = pair('h8_cut_merge'), pair('bp_b4_pr40_merge')
+        if cut and bp:
+            out.append(f'cut to backprop {cut[1] - bp[1]:+.3f} -> {cut[0] - bp[0]:+.3f} merged')
+        k0, s0, k, sy = pair('token_k4_final0'), pair('h8_synth_final0'), pair('token_k4_merge'), pair('h8_synth_merge')
+        if k0 and s0 and k and sy:
+            base, annealed = k[1] - sy[1], k0[1] - s0[1]
+            out.append(f'annealing to zero leaves K = 4 at {annealed:+.3f} against {base:+.3f} '
+                       f'({(base - annealed) / base:.0%} recovered, before any merge)')
+        if not out:
+            return 'waiting', 'Waiting for a partial arm and its exact arm, merged.'
+        return 'n/a', '; '.join(out) + '. 50% or more: walls; under 20%: floor.'
     # (gates and diagnostics have no loss: they never hold a verdict back)
     own = [a for a in by_key.values() if a['experiment'] == e['id'] and a['task'] not in NO_LOSS]
     cells = {a['variant']: a for a in own if not a['followup'] or a['val_mean'] is not None}

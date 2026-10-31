@@ -1,0 +1,14 @@
+# E21 (added, from the valley handoff): is the cost of noisy credit height on the valley walls (averaging snapshots
+# or annealing recovers it) or lost progress down the valley floor (gone)? e6.token_k8, unchanged but for the record's nine
+# trajectory means and its end merge (candidates scored on the 32 held-out rows in one batch), so the val and held-out
+# losses are logged before the merge (final_plain) and after it. For a partial-probe arm, the share of its cost the
+# merge recovers, (cost before - cost after) / cost before against the merged exact arm: 50% or more, mostly wall
+# height (averaging during training is worth pursuing); under 20%, the noise slows the drift (only less noisy credit
+# helps).
+experiment: e21
+variant: token_k8_merge
+task: h8
+seeds: [0, 1, 2]
+priority: 25
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args: {sequences: 10M, heldout: 32, rows: 64, row_assign: token, means: true, end_merge: true}

@@ -521,6 +521,32 @@ def h8_variants_run(scratch):
 
 
 
+def h8_end_merge(scratch):
+    """E21: an H8 run with the record's means and end merge through loud/train.py: the merge's result fields, its
+    candidates on the held-out log, and final_plain.pt beside final.pt; warmdown_final sets the last rate's multiple."""
+    from loud import h8
+    from loud.options import h8_options
+    cut_module()
+    patch_sequences(length=CUT_SEQ, vocab=512)
+    spec = dict(experiment='cpu', variant='merge', seed=0, task='h8', args=dict(
+        preset='2m', sequences=72, heldout=32, batch=4, official_eval=False, means=True, end_merge=True))
+    out = Path(scratch) / 'merge'
+    result = h8.run(spec, out)
+    assert result['complete'] and {'holdout_plain', 'holdout_merged', 'merge_seconds'} <= set(result), result
+    assert result['holdout_merged'] <= result['holdout_plain'] + 1e-9
+    assert {'final.pt', 'final_plain.pt'} <= {p.name for p in out.iterdir()}
+    calls = [json.loads(line) for line in (out / 'heldout.jsonl').read_text().splitlines()]
+    assert sum(c['reason'] == 'merge' for c in calls) > 10
+    o = h8_options(dict(preset='2m', warmdown_final=0.0))
+    assert h8.H8(o, torch.device('cpu'), 0, 10, torch.zeros(0, CUT_SEQ, dtype=torch.long)).settings.final == 0.0
+    for bad in (dict(end_merge=True), dict(end_merge=True, means=True, heldout=0), dict(warmdown_final=1.5)):
+        try:
+            h8_options(dict(preset='2m', **bad))
+        except ValueError:
+            continue
+        raise AssertionError(f'accepted {bad}')
+
+
 def h8_arch(scratch):
     """E16's second architecture in H8: the cut graph without detaches is the track-3 GPT's own forward (its hashed
     n-gram value embeddings on every block included); a complete cut-mode Boost -> Cut run."""

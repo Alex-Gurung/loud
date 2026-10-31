@@ -1,0 +1,11 @@
+# E21's second check (added, from the valley handoff): e6.token_k4 with the warmdown running to zero (warmdown_final 0;
+# the record ends at 30% of its rates), means and merge as the other E21 arms. Does a full anneal recover about as much
+# of the partial-probe cost as the merge? Compare token_k4_final0 against h8_synth_final0 with the merge's own pair.
+experiment: e21
+variant: token_k4_final0
+task: h8
+seeds: [0, 1, 2]
+priority: 25
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args: {sequences: 10M, heldout: 32, rows: 128, row_assign: token, means: true, end_merge: true,
+  warmdown_final: 0.0}

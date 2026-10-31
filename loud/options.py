@@ -142,6 +142,8 @@ H8 = dict(
     boost=True,                 # PR #40's Boost phase first (false: Cut from the first update)
     lr_mult=1.0,                # scales PR #40's Adam and ANVIL II rates (E19), as the proxy's lr_mult
     cut_lr_mult=1.0,            # scales them in the Cut phase only (E19's Cut-step arms; Boost keeps the record's)
+    end_merge=False,            # E21: the record's end merge of the nine means (needs means and held-out rows)
+    warmdown_final=None,        # E21: the warmdown's final rate multiple (None: the record's 0.3; 0: anneal to zero)
     freeze_queries=False,       # also detach the query's input: record #9's Cut, without own queries
     rows=None,                  # synthesis: Hadamard rows per token per site in the Cut phase (None: all 512)
     row_assign='token',         # 'time' (all tokens share rows, rotating across updates) or 'token' (offset by t mod K)
@@ -384,6 +386,10 @@ def h8_options(args):
         raise ValueError("mode must be 'synthesis' or 'cut'")
     if not (o['lr_mult'] > 0 and o['cut_lr_mult'] > 0):
         raise ValueError('lr_mult and cut_lr_mult must be positive')
+    if o['end_merge'] and not (o['means'] and o['heldout']):
+        raise ValueError('end_merge needs the means and held-out sequences to score them')
+    if o['warmdown_final'] is not None and not 0 <= o['warmdown_final'] <= 1:
+        raise ValueError('warmdown_final is a rate multiple in [0, 1] (None: the record\'s)')
     if o['row_assign'] not in ('time', 'token') or o['prior'] not in ('none', 'identity'):
         raise ValueError("row_assign must be 'time' or 'token', prior 'none' or 'identity'")
     if o['rows'] is not None:
