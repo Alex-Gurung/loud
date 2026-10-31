@@ -427,8 +427,8 @@ def test_board_tables_from_configs_queue_and_runs(tmp_path):
 
 
 def test_prune_keeps_what_is_read(tmp_path):
-    """loud.prune: a finished run's weights go; E1's seed 0, the verifications, files a config reads, unfinished runs
-    and diagnostic tensors stay."""
+    """loud.prune: a finished run's weights go (E1's too); the verifications, files a config reads, unfinished runs and
+    diagnostic tensors stay."""
     from loud import prune
     runs, configs = tmp_path / 'runs', tmp_path / 'configs'
     configs.mkdir()
@@ -455,4 +455,5 @@ def test_prune_keeps_what_is_read(tmp_path):
         gone = sorted(str(f.relative_to(runs)) for f in prune.candidates(runs))
     finally:
         prune.checkpoints_read = original
-    assert gone == ['e1/h8_cut/s1/final.pt', 'e7/arm/s1/ckpt_50.pt', 'e7/arm/s1/final.pt', 'e7/smoke/s0/final.pt'], gone
+    assert gone == ['e1/h8_cut/s0/final.pt', 'e1/h8_cut/s1/final.pt', 'e7/arm/s1/ckpt_50.pt', 'e7/arm/s1/final.pt',
+                    'e7/smoke/s0/final.pt'], gone
