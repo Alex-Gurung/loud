@@ -107,6 +107,13 @@ has every arm. v2's rule holds throughout: a difference under 0.02 is not a resu
   Timing on shared GPUs is loose; the only like-for-like pair so far is two runs sharing a GPU at once:
   `chain_nokeys` takes 48.6 s per Cut update against `chain_record.s1`'s 56.0 s (13% less); dedicated-GPU timing
   runs are queued.
+  **Results (seed 0, full 10M, val loss after the record's end merge; one seed, the noise floor pending):** the
+  record unchanged scores 3.6731 (3.6996 before the merge; published 3.676 and 3.703), key transport 3.6733 (+0.0002),
+  key probes at blocks 3, 5, 7 3.6763 (+0.0033; seed 1 3.6799 against the record's seed 1, pending), at block 5
+  3.6773 (+0.0042), at 1, 3, 5, 7 3.6765 (+0.0034), and no key probes 3.7259 (+0.053). So the record's key probes are
+  worth 0.05 on the chain (H8: the key path is 71% of the cut's 0.16), and key transport keeps all of it with no
+  probes; probing fewer blocks loses 0.003-0.004, which `chain_record_repeat` will say is or is not noise. Median Cut
+  updates on shared GPUs (loose): record 55.7 s, transport 48.2 s, no probes 48.6 s, block 5 49.3 s.
   **Key transport:** the record's input-key probes (512 central pairs per token per block) measure the K branch's
   input credit, and that branch is an RMSNorm then c_k, a linear map, so the raw key errors the record already
   measures for c_k's own gradient, times c_k's weight, through one forward norm step (`norm_move`, the record's
