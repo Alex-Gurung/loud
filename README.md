@@ -127,7 +127,8 @@ has every arm. v2's rule holds throughout: a difference under 0.02 is not a resu
   embedding), through ve_gate's weight and one norm step, equals the probes' estimate (cosine 1.0, norms within
   0.1%, gradients at 0.999999; `gate_transport`). Both transports run together on the chain at full length
   (`chain_transport_both`), and dedicated-GPU profiles of a Cut update (`profile: true`, seconds per part) of the
-  record and of both transports show where the rest of its time goes.
+  record and of both transports show where the rest of its time goes. **Result (seed 0):** both transports together
+  score 3.6748 against the record's 3.6731 (+0.0018, the size of the noise floor's 0.0017).
 - **The last 9% of E17:** keys and values live with Boost off lands on matched backprop to 0.0001 (three seeds),
   so H8's machinery is exact and the rest of the gap that keys and values leave is Boost's first 20%, which costs
   about 0.014 when the remainder is backprop (three seeds: +0.018, +0.012, +0.012; in the cut setting Boost is
@@ -337,7 +338,9 @@ gives a first read of every arm early. The bands, in order (`priority:` in each 
   `artifacts/deleted_weights.txt`. On 2026-10-30, with the shared volume at 5 GB free, the first deletions were the
   smoke runs', E16's and the finished arms' finals; since then the autonomous loop runs the prune every few minutes,
   and E1's other weights (scored, read by nothing) went when other projects took the volume to 15 and then 14 GB
-  free. This project holds about 2.4 GB.
+  free. At 4 GB free (2026-10-31) the rest went by hand: E1's diagnostic checkpoints and the verifications'
+  weights, whose diagnostics and checks had run (rerunning `e1.h8_synth.s0`, `e1.bp_b8.s0` with checkpoints and
+  the verifications regenerates them in minutes). This project then held 0.7 GB.
 
 ### When a job fails or is blocked
 
