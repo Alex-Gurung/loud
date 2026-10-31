@@ -172,7 +172,8 @@ has every arm. v2's rule holds throughout: a difference under 0.02 is not a resu
   own), and the skipped sites' bases are still drawn, so the run stays paired with the record (review round 9:
   `e5.chain_deep_paired`; the first full run, `e5.chain_deep`, predates both and is unpaired). Its speed is small so
   far: the first build takes 54.3 s per Cut update against `chain_record.s0`'s 55.7 s on the same GPU at once (2.5%
-  less); the rebuilt path's time comes from the dedicated-GPU timing runs.
+  less); the rebuilt path's time comes from the dedicated-GPU timing runs. Its loss (first build, unpaired, seed 0):
+  3.6755 against the record's 3.6731 (+0.0024, within one seed's noise); the paired rebuild is running.
 
 ## Running on GPUs
 
