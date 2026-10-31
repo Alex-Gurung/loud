@@ -282,8 +282,7 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
         out = f'Share of the {high - low:.3f} gap recovered: {shares}.'
         paired = chain_pairs(by_arm, 'e17', [v for v, a in done.items() if a['task'] == 'cut' and v != 'chain_record'])
         if paired:
-            out += (' Real chain, paired with chain_record seed by seed: ' + ', '.join(paired) + ' (one-seed chain '
-                    'differences under 0.02 are noise until chain_record_repeat sets the floor).')
+            out += (' Real chain, paired with chain_record seed by seed: ' + ', '.join(paired) + ' (chain_record_repeat, the record rerun on its seed, is the noise floor).')
         left = len(mine) - len(done)
         return 'n/a', out + (f' ({left} arms still running or queued.)' if left else '')
     if e['id'] == 'e19':
