@@ -30,6 +30,7 @@ from .data import SEQ, benchmark_split, load_split
 from .heldout import HeldoutScorer, mean_loss
 from .options import checkpoints_on
 from .runlog import Run
+from .valley import Valley
 from .score import score_in_subprocess
 
 # utils/model.py compiles flex attention, whose compiled backward donates its buffers by default and then refuses a
@@ -96,6 +97,8 @@ def train(spec, run_dir, o, build, method):
     checkpoints = FractionCheckpoints(run_dir, steps, dtype=o['checkpoint_dtype'], enabled=checkpoints_on(o, seed))
     means = TrajectoryMeans(len(split.train), enabled=o['means'])
     val_rows = load_split('val.pt') if o['eval_every'] else None
+    valley = Valley(trainer.model, split.heldout, steps, dev, seed, run_dir / 'valley.json') if o['valley'] else None
+    current = {'batch': None}  # the update's batch, for the valley's gradient direction
 
     def paused(step):
         """Untimed work after an update (or at the initialization, step 0)."""
@@ -108,6 +111,8 @@ def train(spec, run_dir, o, build, method):
             record['heldout_loss'] = heldout.score(trainer.model, step, 'monitor')
         if val_rows is not None and step and step % o['eval_every'] == 0 and step < steps:
             record['val_loss'] = mean_loss(trainer.model, val_rows, dev, 16)
+        if valley is not None:  # E21 B and C: scans at fixed fractions, the weights restored after
+            record.update(valley.after(step, trainer.model, current['batch']))
         return record
 
     if dev.type == 'cuda':
@@ -120,7 +125,7 @@ def train(spec, run_dir, o, build, method):
     elapsed = previous = 0.0
     for step in range(1, last + 1):
         first = (step - 1) * o['batch']
-        batch = split.train[first:first + o['batch']].to(dev)
+        batch = current['batch'] = split.train[first:first + o['batch']].to(dev)
         loss, fields = trainer.update(step, batch)
         loss = loss.item()  # also waits for the update, so the step time is the GPU's
         if not math.isfinite(loss):

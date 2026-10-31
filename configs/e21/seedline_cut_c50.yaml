@@ -1,0 +1,9 @@
+# E21 C (added): the held-out loss on the line from e21.valley_cut seed 0's weights at 50% to seed 1's at
+# 50%: does it rise in the middle (a barrier between two separate valleys)?
+experiment: e21
+variant: seedline_cut_c50
+task: diagnose
+seeds: [0]
+priority: 26
+after: [e21.valley_cut.s0, e21.valley_cut.s1]
+args: {tool: seed_line, checkpoint: 'e21.valley_cut.s0:ckpt_50.pt', partner: 'e21.valley_cut.s1:ckpt_50.pt'}

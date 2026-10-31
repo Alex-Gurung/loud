@@ -547,6 +547,37 @@ def h8_end_merge(scratch):
         raise AssertionError(f'accepted {bad}')
 
 
+def h8_valley(scratch):
+    """E21 B and C: valley: true scans at 20/50/100% from inside the loop and leaves training as it was (the same
+    per-update losses as without it); seed_line scans the line between two weight sets."""
+    from loud import h8
+    from loud.diagnostics import seed_line_tool
+    cut_module()
+    patch_sequences(length=CUT_SEQ, vocab=512)
+    runs = {}
+    for name, extra in (('plain', {}), ('valley', dict(valley=True))):
+        spec = dict(experiment='cpu', variant=name, seed=0, task='h8', args=dict(
+            preset='2m', sequences=72, heldout=32, batch=4, official_eval=False, mode='cut', **extra))
+        out = Path(scratch) / name
+        h8.run(spec, out)
+        runs[name] = [json.loads(line) for line in (out / 'metrics.jsonl').read_text().splitlines()]
+    assert [r['train_loss'] for r in runs['plain']] == [r['train_loss'] for r in runs['valley']]
+    scans = json.loads((Path(scratch) / 'valley' / 'valley.json').read_text())
+    assert set(scans) == {'0.2', '0.5', '1.0'}, scans.keys()
+    for scan in scans.values():
+        assert len(scan['landing']) == 31 and 0 <= scan['t_star'] <= 3 and 'update' in scan['lines']
+        assert scan['landing']['0.0'] == scan['lines']['update']['0']  # both start at the weights before the update
+    m, s, model, x, y = record_setup()
+    other = {n: p.detach() + 0.05 * torch.randn(p.shape, generator=torch.Generator().manual_seed(1))
+             for n, p in model.named_parameters()}
+    path = Path(scratch) / 'partner.pt'
+    torch.save(other, path)
+    rows = torch.cat([x, y[:, -1:]], 1)
+    summary, _ = seed_line_tool(model, path, rows, torch.device('cpu'))
+    assert set(summary) == {'losses', 'barrier', 'barrier_at', 'distance'} and summary['distance'] > 0
+    assert all(torch.equal(p, q) for p, q in zip(model.parameters(), record_setup()[2].parameters()))  # restored
+
+
 def h8_arch(scratch):
     """E16's second architecture in H8: the cut graph without detaches is the track-3 GPT's own forward (its hashed
     n-gram value embeddings on every block included); a complete cut-mode Boost -> Cut run."""

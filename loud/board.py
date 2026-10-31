@@ -348,9 +348,26 @@ def verdict(e, by_key, by_arm=None, runs_root=RUNS):
             base, annealed = k[1] - sy[1], k0[1] - s0[1]
             out.append(f'annealing to zero leaves K = 4 at {annealed:+.3f} against {base:+.3f} '
                        f'({(base - annealed) / base:.0%} recovered, before any merge)')
+        for arm, label in (('valley_bp', 'backprop'), ('valley_cut', 'cut'), ('valley_k4', 'K = 4')):
+            scans = [read_json(Path(r['run_dir']) / 'valley.json') for r in by_arm.get(f'e21.{arm}', [])
+                     if (Path(r['run_dir']) / 'valley.json').exists()]
+            if scans:
+                stars = ', '.join(f'{f}: ' + '/'.join(f'{sc[f]["t_star"]:g}' for sc in scans if f in sc)
+                                  for f in ('0.2', '0.5', '1.0'))
+                falls = '/'.join(f'{sc["0.5"]["falls_to"].get("drift100", 0):g}' for sc in scans if '0.5' in sc)
+                out.append(f'{label}: the step lands at t* {stars} (per seed); at 50% the loss keeps falling to '
+                           f'{falls}x the 100-update drift')
+            barriers = []
+            for c in ('20', '50', '100'):
+                for r in by_arm.get(f'e21.seedline_{arm[7:]}_c{c}', []):
+                    path = Path(r['run_dir']) / 'seed_line.json'
+                    if path.exists():
+                        barriers.append(f'{c}% {read_json(path)["barrier"]:+.3f}')
+            if barriers:
+                out.append(f'{label} seed-line barrier ' + ', '.join(barriers))
         if not out:
             return 'waiting', 'Waiting for a partial arm and its exact arm, merged.'
-        return 'n/a', '; '.join(out) + '. 50% or more: walls; under 20%: floor.'
+        return 'n/a', '; '.join(out) + '. Merge: 50% or more recovered means walls, under 20% floor.'
     # (gates and diagnostics have no loss: they never hold a verdict back)
     own = [a for a in by_key.values() if a['experiment'] == e['id'] and a['task'] not in NO_LOSS]
     cells = {a['variant']: a for a in own if not a['followup'] or a['val_mean'] is not None}

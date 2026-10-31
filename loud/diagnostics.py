@@ -46,6 +46,7 @@ import torch.nn.functional as F
 from . import h8, ngram, paths, refs, snr
 from .anvil import is_anvil_matrix
 from .data import benchmark_split
+from .heldout import mean_loss
 from .options import ESTIMATORS, H8, diagnose_options
 from .runlog import Run
 
@@ -425,6 +426,33 @@ def checkpoint_path(ref):
     return paths.REPO / ref
 
 
+SEED_LINE = (-0.5, -0.25, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.25, 1.5)
+
+
+@torch.no_grad()
+def seed_line_tool(model, partner, rows, device):
+    """E21 C: the held-out loss along the line from the checkpoint's weights w0 to another seed's at the same fraction
+    w1, at w0 + t (w1 - w0). Barrier: the most the line rises above the straight interpolation of its ends inside
+    (0, 1); above zero, the two seeds sit in valleys a ridge separates."""
+    state = torch.load(partner, map_location=device, weights_only=True)
+    params = dict(model.named_parameters())
+    w0 = {n: p.detach().clone() for n, p in params.items()}
+    d = {n: state[n].float() - w0[n] for n in params}
+    losses = {}
+    for t in SEED_LINE:
+        for n, p in params.items():
+            p.copy_(w0[n] + t * d[n])
+        losses[str(t)] = round(mean_loss(model, rows, device, 16), 5)
+    for n, p in params.items():
+        p.copy_(w0[n])
+    ends = losses['0.0'], losses['1.0']
+    inside = [(t, v - ((1 - t) * ends[0] + t * ends[1])) for t, v in ((float(k), v) for k, v in losses.items()) if 0 < t < 1]
+    top = max(inside, key=lambda kv: kv[1])
+    summary = dict(losses=losses, barrier=round(top[1], 5), barrier_at=top[0],
+                   distance=round(float(torch.sqrt(sum(v.square().sum() for v in d.values()))), 4))
+    return summary, {}
+
+
 def run_task(spec, run_dir):
     o = diagnose_options(spec['args'])
     device = torch.device('cuda', 0) if torch.cuda.is_available() else torch.device('cpu')
@@ -439,7 +467,9 @@ def run_task(spec, run_dir):
     run = Run(run_dir, spec, dict(options=o, checkpoint=str(checkpoint),
                                   heldout_rows=None if o['tool'] == 'snr_spectrum' else
                                   split.describe()['heldout_rows'][o['row']:o['row'] + 1]))
-    if o['tool'] == 'ngram_tiers':  # E13's diagnostic: the 32 held-out sequences, the stream up to the checkpoint
+    if o['tool'] == 'seed_line':  # E21 C: two seeds' weights, the 32 held-out sequences
+        summary, tensors = seed_line_tool(model, checkpoint_path(o['partner']), split.heldout.to(device), device)
+    elif o['tool'] == 'ngram_tiers':  # E13's diagnostic: the 32 held-out sequences, the stream up to the checkpoint
         summary, tensors = ngram.tiers_tool(model, split.heldout.to(device), checkpoint)
     elif o['tool'] == 'snr_spectrum':  # E8's: training sequences after the checkpoint
         summary, tensors = snr_tool(model, split, checkpoint, o)

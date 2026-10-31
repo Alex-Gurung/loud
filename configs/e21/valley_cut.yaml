@@ -1,0 +1,14 @@
+# E21 B and C (added, from the valley handoff): e1.h8_cut (H8 cut mode) with valley: true and its H4 checkpoints, two seeds. At 20%, 50%
+# and 100% the loop takes the update the optimizer makes next, u, and scans the held-out loss (all 32 rows) at w + t u
+# for t = 0..3 (B: t* near 0.5 overshoots to the far wall, near 1 lands on the floor, above 1 under-steps), and along
+# long lines (C: the drift over the last 25 and 100 updates, u, the exact gradient, two random directions; how far
+# along the drift the loss keeps falling). Training is untouched (each scan restores the weights). The checkpoints
+# feed seed_line (the line to the other seed's weights at the same fraction). Compare t* and the lines between exact
+# (bp_b4_pr40), cut (H8) and noisy (K = 4) credit.
+experiment: e21
+variant: valley_cut
+task: h8
+seeds: [0, 1]
+priority: 26
+after: [verify.score_record.s0, verify.h8_smoke.s0, h6.h8_validation.s0]
+args: {sequences: 10M, heldout: 32, mode: cut, valley: true, checkpoints: true}

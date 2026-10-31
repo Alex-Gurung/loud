@@ -25,7 +25,7 @@ def checkpoints_read(configs=REPO / 'configs'):
     """(experiment, variant, seed, file) for every `checkpoint: <job id>:<file>` in a config, followups included."""
     found = set()
     for path in Path(configs).rglob('*.yaml'):
-        for jid, name in re.findall(r'checkpoint:\s*([\w.-]+\.s\d+):([\w.]+)', path.read_text()):
+        for jid, name in re.findall(r'(?:checkpoint|partner):\s*[\x27"]?([\w.-]+\.s\d+):([\w.]+)', path.read_text()):
             experiment, variant, seed = jid.rsplit('.', 2)
             found.add((experiment, variant, seed, name))
             found.add((experiment, variant, seed, name.replace('.pt', '.optim.pt')))

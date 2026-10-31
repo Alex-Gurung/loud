@@ -433,6 +433,7 @@ def test_prune_keeps_what_is_read(tmp_path):
     runs, configs = tmp_path / 'runs', tmp_path / 'configs'
     configs.mkdir()
     (configs / 'a.yaml').write_text('args:\n  checkpoint: e7.arm.s1:ckpt_20.pt\n')
+    (configs / 'b.yaml').write_text("args: {tool: seed_line, partner: 'e7.arm.s1:ckpt_50.pt'}\n")  # quoted, partner
 
     def run(path, files, complete=True):
         d = runs / path
@@ -455,5 +456,4 @@ def test_prune_keeps_what_is_read(tmp_path):
         gone = sorted(str(f.relative_to(runs)) for f in prune.candidates(runs))
     finally:
         prune.checkpoints_read = original
-    assert gone == ['e1/h8_cut/s0/final.pt', 'e1/h8_cut/s1/final.pt', 'e7/arm/s1/ckpt_50.pt', 'e7/arm/s1/final.pt',
-                    'e7/smoke/s0/final.pt'], gone
+    assert gone == ['e1/h8_cut/s0/final.pt', 'e1/h8_cut/s1/final.pt', 'e7/arm/s1/final.pt', 'e7/smoke/s0/final.pt'], gone

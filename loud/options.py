@@ -80,6 +80,7 @@ TRAINING = dict(
     means=False,                # H4: the record's nine trajectory means from 60%, scored on the held-out set at the end
     save_means=False,           # also write them to means.pt (2-D weights in checkpoint_dtype: about 0.7 GB in bf16)
     heldout_every=0,            # score the held-out set every N updates (monitoring only)
+    valley=False,               # E21 B and C: landing and long-line scans at 20/50/100% (loud/valley.py), untimed
     eval_every=0,               # untimed val.pt curve every N updates: a plot only, never a decision
     test=True,                  # also score test.pt at the end
     official_eval=True,
@@ -211,11 +212,12 @@ DIAGNOSE = dict(
     batch=8,                    # snr_spectrum: the update batch the SNR is stated at (and the checkpoint run's)
     estimators=['backprop', 'synthesis', 'time_k4', 'token_k4'],  # snr_spectrum: per-sequence gradients (ESTIMATORS)
     estimator='identity',       # cos_to_autograd: 'identity' (PR #26), 'h8' (H8 synthesis) or 'cut' (PR #40's Cut)
+    partner=None,               # seed_line: the second checkpoint ('<job id>:<file>'), another seed's at the same fraction
     precision='bf16',           # h8_validation, deep_readout_check: 'float32' runs without bf16; deep_readout_check
                                 # 'bf16_delta': changes carried in bf16 products, as the chain's kernels do
 )
 TOOLS = ('cos_to_autograd', 'credit_dump', 'deep_readout_check', 'key_paths', 'linearity_check', 'h8_validation',
-         'ngram_tiers', 'snr_spectrum', 'synth_vs_real')
+         'ngram_tiers', 'seed_line', 'snr_spectrum', 'synth_vs_real')
 # snr_spectrum's per-sequence gradients: autograd through the whole model, or H8 synthesis reading width / K rows
 # per token, assigned by time or by token (K = 1: the exact credits; E6's two assignments at E8's K = 4).
 ESTIMATORS = {'backprop': None, 'synthesis': (1, 'time'), 'time_k4': (4, 'time'), 'token_k4': (4, 'token')}
@@ -287,6 +289,8 @@ def training_options(args, table, task):
         raise ValueError(f'checkpoint_dtype must be one of {CHECKPOINT_DTYPES}')
     if o['heldout_every'] and not o['heldout']:
         raise ValueError('heldout_every needs held-out sequences (heldout > 0)')
+    if o['valley'] and not o['heldout']:
+        raise ValueError('valley scans the held-out sequences (heldout > 0)')
     if o['save_means'] and not o['means']:
         raise ValueError('save_means needs means')
     if o['checkpoint_optimizer'] and not o['checkpoints']:
@@ -559,6 +563,8 @@ def diagnose_options(args):
             o['precision'] == 'bf16_delta' and o['tool'] != 'deep_readout_check'):
         raise ValueError("precision: 'bf16' or 'float32' (h8_validation, deep_readout_check), or 'bf16_delta' "
                          "(deep_readout_check: the chain's way of differencing)")
+    if (o['tool'] == 'seed_line') != isinstance(o['partner'], str):
+        raise ValueError('seed_line takes partner (<job id>:<file>), and only seed_line does')
     positive(o, 'sequences', 'batch')
     names = o['estimators']
     if not names or set(names) - set(ESTIMATORS) or len(set(names)) < len(names):
